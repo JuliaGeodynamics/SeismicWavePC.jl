@@ -4,3 +4,5 @@ snapshots/
 *.pvd
 .claude/settings.local.json
 .claude/
+*.png
+*_snapshots/

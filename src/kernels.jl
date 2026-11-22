@@ -12,12 +12,12 @@
 @inline havg4(a, b, c, d) = 4a * b * c * d / (a * b * c + a * b * d + a * c * d + b * c * d + eps(typeof(a)))
 
 "Crank-Nicolson update of the NM memory variables of one stress component; returns their weighted sum."
-@inline function memvar!(R, I, f, vc, dt)
+Base.@propagate_inbounds function memvar!(R, I, f, vc, dt)
     c1, c2, d1, _ = vc
     s = zero(f)
     for m in 1:NM
-        r = c1[m] * R[I, m] - c2[m] * f * dt
-        R[I, m] = r
+        r = c1[m] * R[m, I] - c2[m] * f * dt
+        R[m, I] = r
         s += d1[m] * r
     end
     return s
@@ -25,8 +25,7 @@ end
 
 # ------------------------------------------------------------------ P-SV (x, z)
 
-@kernel function vel_psv!(F, M, c, dt)
-    i, k = @index(Global, NTuple) .+ H
+Base.@propagate_inbounds function vel_psv!(F, M, c, dt, i, k)
     (; Vx, Vz, Sxx, Szz, Sxz) = F
     two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i])
     ax, bx = fd(c[1], two)
@@ -39,8 +38,7 @@ end
     Vz[i, k] = (Vz[i, k] + 2 / (M.rho[i, k] + M.rho[i, k+1]) * (dxSxz + dzSzz) * dt) * M.gx_c[i] * M.gz_b[k]
 end
 
-@kernel function stress_psv!(F, M, c, vc, dt)
-    i, k = @index(Global, NTuple) .+ H
+Base.@propagate_inbounds function stress_psv!(F, M, c, vc, dt, i, k)
     (; Vx, Vz, Sxx, Szz, Sxz) = F
     two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i])
     ax, bx = fd(c[1], two)
@@ -66,7 +64,7 @@ end
     Sxz[I] = (Sxz[I] + (muxz * ts1 * e + Rxz) * dt) * M.gx_b[i] * M.gz_b[k]
 end
 
-@kernel function inject_psv!(F, S, it)
+Base.@propagate_inbounds function inject_psv!(F, S, it)
     for n in 1:length(S.i)
         i, k, s = S.i[n], S.k[n], S.s[n, it]
         F.Sxx[i, k] -= S.M[n, 1] * s
@@ -76,8 +74,7 @@ end
     end
 end
 
-@kernel function record_psv!(rec, F, st, itw)
-    n = @index(Global)
+Base.@propagate_inbounds function record_psv!(rec, F, st, itw, n)
     i, k = st.i[n], st.k[n]
     rec[itw, 1, n] = (F.Vx[i, k] + F.Vx[i-1, k]) / 2
     rec[itw, 2, n] = -(F.Vz[i, k] + F.Vz[i, k-1]) / 2     # positive up
@@ -85,8 +82,7 @@ end
 
 # ------------------------------------------------------------------ SH (x, z), out-of-plane y
 
-@kernel function vel_sh!(F, M, c, dt)
-    i, k = @index(Global, NTuple) .+ H
+Base.@propagate_inbounds function vel_sh!(F, M, c, dt, i, k)
     (; Vy, Syz, Sxy) = F
     two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i])
     ax, bx = fd(c[1], two)
@@ -96,8 +92,7 @@ end
     Vy[i, k] = (Vy[i, k] + (dxSxy + dzSyz) / M.rho[i, k] * dt) * M.gx_c[i] * M.gz_c[k]
 end
 
-@kernel function stress_sh!(F, M, c, vc, dt)
-    i, k = @index(Global, NTuple) .+ H
+Base.@propagate_inbounds function stress_sh!(F, M, c, vc, dt, i, k)
     (; Vy, Syz, Sxy) = F
     two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i])
     ax, bx = fd(c[1], two)
@@ -115,7 +110,7 @@ end
     Sxy[I] = (Sxy[I] + (muxy * ts1 * dxVy + Rxy) * dt) * M.gx_b[i] * M.gz_c[k]
 end
 
-@kernel function inject_sh!(F, S, it)
+Base.@propagate_inbounds function inject_sh!(F, S, it)
     for n in 1:length(S.i)
         i, k, s = S.i[n], S.k[n], S.s[n, it]
         F.Sxy[i, k] -= S.M[n, 6] * s / 2; F.Sxy[i-1, k] -= S.M[n, 6] * s / 2
@@ -123,15 +118,13 @@ end
     end
 end
 
-@kernel function record_sh!(rec, F, st, itw)
-    n = @index(Global)
+Base.@propagate_inbounds function record_sh!(rec, F, st, itw, n)
     rec[itw, 1, n] = F.Vy[st.i[n], st.k[n]]
 end
 
 # ------------------------------------------------------------------ 3D (x, y, z)
 
-@kernel function vel_3d!(F, M, c, dt)
-    i, j, k = @index(Global, NTuple) .+ H
+Base.@propagate_inbounds function vel_3d!(F, M, c, dt, i, j, k)
     (; Vx, Vy, Vz, Sxx, Syy, Szz, Syz, Sxz, Sxy) = F
     two = second_order(k, M.fs_top[i, j], M.fs_bot[i, j], M.ob_top[i, j], M.ob_bot[i, j])
     ax, bx = fd(c[1], two)
@@ -152,8 +145,7 @@ end
     Vz[i, j, k] = (Vz[i, j, k] + 2 / (ρ[i, j, k] + ρ[i, j, k+1]) * dSz * dt) * M.gx_c[i] * M.gy_c[j] * M.gz_b[k]
 end
 
-@kernel function stress_3d!(F, M, c, vc, dt)
-    i, j, k = @index(Global, NTuple) .+ H
+Base.@propagate_inbounds function stress_3d!(F, M, c, vc, dt, i, j, k)
     (; Vx, Vy, Vz, Sxx, Syy, Szz, Syz, Sxz, Sxy) = F
     two = second_order(k, M.fs_top[i, j], M.fs_bot[i, j], M.ob_top[i, j], M.ob_bot[i, j])
     ax, bx = fd(c[1], two)
@@ -193,7 +185,7 @@ end
     Sxy[I] = (Sxy[I] + (muxy * ts1 * exy + Rxy) * dt) * M.gx_b[i] * M.gy_b[j] * M.gz_c[k]
 end
 
-@kernel function inject_3d!(F, S, it)
+Base.@propagate_inbounds function inject_3d!(F, S, it)
     for n in 1:length(S.i)
         i, j, k, s = S.i[n], S.j[n], S.k[n], S.s[n, it]
         F.Sxx[i, j, k] -= S.M[n, 1] * s
@@ -208,10 +200,64 @@ end
     end
 end
 
-@kernel function record_3d!(rec, F, st, itw)
-    n = @index(Global)
+Base.@propagate_inbounds function record_3d!(rec, F, st, itw, n)
     i, j, k = st.i[n], st.j[n], st.k[n]
     rec[itw, 1, n] = (F.Vx[i, j, k] + F.Vx[i-1, j, k]) / 2
     rec[itw, 2, n] = (F.Vy[i, j, k] + F.Vy[i, j-1, k]) / 2
     rec[itw, 3, n] = -(F.Vz[i, j, k] + F.Vz[i, j, k-1]) / 2   # positive up
 end
+
+# ------------------------------------------------------------------ launching
+# The physics lives in the @inline cell functions above. On GPUs they are wrapped in one generic
+# KernelAbstractions kernel; on the CPU plain threaded/SIMD loops are used (much faster than POCL).
+
+@kernel inbounds = true function cells!(f, args)
+    I = @index(Global, NTuple)
+    f(args..., (I .+ H)...)
+end
+
+@kernel inbounds = true function items!(f, args)
+    f(args..., @index(Global))
+end
+
+@kernel function serial!(f, args)
+    f(args...)
+end
+
+"Apply `f(args..., i, [j,] k)` to every interior cell (`ndr` cells per direction)."
+foreach_cell!(backend, f, args, ndr) = cells!(backend, workgroup(ndr))(f, args; ndrange=ndr)
+
+# 2D tiles in the fastest two directions keep stencil neighbours in cache
+workgroup(::NTuple{2}) = (32, 8)
+workgroup(::NTuple{3}) = (32, 8, 1)
+
+function foreach_cell!(::CPU, f::F, args, ndr::NTuple{2}) where {F}
+    Threads.@threads for k in 1:ndr[2]
+        @inbounds @simd ivdep for i in 1:ndr[1]
+            f(args..., i + H, k + H)
+        end
+    end
+end
+
+# Threads work on strips of `JB` rows in y that sweep through all z, so the stencil neighbours
+# in y and z stay in cache.
+const JB = 8
+function foreach_cell!(::CPU, f::F, args, ndr::NTuple{3}) where {F}
+    Threads.@threads :dynamic for jb in 1:cld(ndr[2], JB)
+        for k in 1:ndr[3], j in (jb-1)*JB+1:min(jb * JB, ndr[2])
+            @inbounds @simd ivdep for i in 1:ndr[1]
+                f(args..., i + H, j + H, k + H)
+            end
+        end
+    end
+end
+
+"Apply `f(args..., n)` for `n = 1:count` (stations)."
+foreach_item!(backend, f, args, count) = items!(backend)(f, args; ndrange=count)
+foreach_item!(::CPU, f::F, args, count) where {F} = @inbounds for n in 1:count
+    f(args..., n)
+end
+
+"Run `f(args...)` once (source injection: sequential, as several sources may share a cell)."
+run_once!(backend, f, args) = serial!(backend)(f, args; ndrange=1)
+run_once!(::CPU, f, args) = @inbounds f(args...)

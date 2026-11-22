@@ -11,37 +11,46 @@ struct Grid{N}
     beg::NTuple{N,Float64}    # cell-edge start; for z this is the DEPTH of the top edge
 end
 
-"Grid of a `CartData` volume: every node becomes a cell centre."
-function Grid(data::CartData, mode::Symbol)
-    x, y, z = data.x.val[:, 1, 1], data.y.val[1, :, 1], data.z.val[1, 1, :]
-    axes = mode === :p3d ? (x, y, -reverse(z)) : (x, -reverse(z))
+"""
+Concretely typed copy of the parts of a `CartData` the solver needs (GMG stores them untyped):
+coordinate axes and the fields `rho`, `vp`, `vs`, `Qp`, `Qs` as `Array{Float64,3}` (Q = Inf if missing).
+"""
+function model_arrays(d::CartData)
+    axis(A, I...) = Vector{Float64}(A[I...])::Vector{Float64}
+    x, y, z = axis(d.x.val, :, 1, 1), axis(d.y.val, 1, :, 1), axis(d.z.val, 1, 1, :)
+    function field(name)
+        haskey(d.fields, name) && return convert(Array{Float64,3}, d.fields[name])::Array{Float64,3}
+        name in (:Qp, :Qs) || error("the CartData model needs fields `rho`, `vp` and `vs` (and optionally `Qp`, `Qs`)")
+        return fill(Inf, length(x), length(y), length(z))
+    end
+    return (; x, y, z, rho=field(:rho), vp=field(:vp), vs=field(:vs), Qp=field(:Qp), Qs=field(:Qs))
+end
+
+"Grid of the model: every `CartData` node becomes a cell centre."
+function Grid(m::NamedTuple, ::Val{N}) where {N}
+    axes = N == 3 ? (m.x, m.y, -reverse(m.z)) : (m.x, -reverse(m.z))
     for a in axes
         length(a) > 1 && all(≈(a[2] - a[1]), diff(a)) || error("CartData must be a regular grid with at least 2 points per axis")
     end
     d = map(a -> a[2] - a[1], axes)
-    return Grid(map(length, axes), d, map((a, h) -> a[1] - h / 2, axes, d))
+    return Grid{N}(map(length, axes), d, map((a, h) -> a[1] - h / 2, axes, d))
 end
 
 "Padded array index of the cell that contains coordinate `c` along axis `a` (z given as depth)."
 cell_index(g::Grid, a, c) = ceil(Int, (c - g.beg[a]) / g.d[a]) + H
 
-"Reads a field from `data` as an internal array (z flipped, 2D squeezed)."
-function internal(data::CartData, name::Symbol, mode::Symbol, default=nothing)
-    if !haskey(data.fields, name)
-        default === nothing && error("CartData needs a field `$name`")
-        return fill(Float64(default), mode === :p3d ? size(data) : size(data)[[1, 3]])
-    end
-    f = Float64.(reverse(data.fields[name], dims=3))
-    return mode === :p3d ? f : f[:, 1, :]
+"Field `A` as an internal array: z flipped so that k = 1 is the top, squeezed to (x, z) in 2D."
+function internal(A::Array{Float64,3}, ::Val{N}) where {N}
+    f = reverse(A, dims=3)
+    return N == 3 ? f : f[:, 1, :]
 end
 
 """
 Build padded material arrays `(rho, lam, mu, taup, taus)`, the 2nd-order zones near free surfaces
 `(fs_top, fs_bot, ob_top, ob_bot)` and the maximum P velocity.
 """
-function setup_medium(data::CartData, g::Grid{N}, mode, na, fq_min, fq_max, fq_ref) where {N}
-    rho, vp, vs = (internal(data, f, mode) for f in (:rho, :vp, :vs))
-    qp, qs = internal(data, :Qp, mode, Inf), internal(data, :Qs, mode, Inf)
+function setup_medium(m::NamedTuple, g::Grid{N}, na, fq_min, fq_max, fq_ref) where {N}
+    rho, vp, vs, qp, qs = (internal(A, Val(N)) for A in (m.rho, m.vp, m.vs, m.Qp, m.Qs))
     rho = max.(rho, 0.001)   # air needs a small non-zero density (as in OpenSWPC)
 
     # pad by replication; the absorber zone (sides and bottom) is homogenized as in OpenSWPC
@@ -67,7 +76,7 @@ Free-surface (`fs`) and ocean-bottom (`ob`) zones, per column, where 2nd-order i
 function surface_zones(lam, mu, n::NTuple{N}) where {N}
     ϵ = eps(Float32)
     nz = n[N]
-    hn = n[1:N-1]
+    hn = Base.front(n)
     # kfs/kob: last k (physical) with vacuum above material; 0 if none. Detected on columns 0:n+2, as in OpenSWPC.
     kfs = zeros(Int, hn .+ (2H + 1))       # physical columns -1 : n+3  ->  index i + 2
     kob = zeros(Int, hn .+ (2H + 1))

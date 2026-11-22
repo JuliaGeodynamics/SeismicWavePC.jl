@@ -19,11 +19,28 @@ struct MomentTensorSource
 end
 MomentTensorSource(x, y, z, M0, M; t0=0.0, trise=1.0) = MomentTensorSource(x, y, z, M0, Tuple(Float64.(M)), t0, trise)
 
+function Base.show(io::IO, s::MomentTensorSource)
+    @printf(io, "MomentTensorSource at (%g, %g, %g) km, M0 = %.3e N m (Mw %.2f), t0 = %g s, trise = %g s\n", s.x, s.y, s.z,
+            s.M0, (log10(s.M0) - 9.05) / 1.5, s.t0, s.trise)
+    @printf(io, "  M (xx, yy, zz, yz, xz, xy) = (%.3f, %.3f, %.3f, %.3f, %.3f, %.3f)", s.M...)
+end
+
+"Model coordinates [km] of a geographic point, using the projection of the model."
+function project(lon, lat, z, proj::ProjectionPoint)
+    A(v) = fill(Float64(v), 2, 1, 1)    # two copies: GeophysicalModelGenerator 0.10 fails on single-point UTMData
+    c = convert2CartData(GeoData(A(lon), A(lat), A(z), (z=A(z),)), proj)
+    return c.x.val[1], c.y.val[1], c.z.val[1]
+end
+
 """
     DoubleCoupleSource(x, y, z; Mw, strike, dip, rake, t0=0.0, trise=1.0)
+    DoubleCoupleSource(lon, lat, z, proj::ProjectionPoint; kwargs...)
 
-Double-couple source with moment magnitude `Mw` and fault angles in degrees (strike measured clockwise from north = +y).
+Double-couple source with moment magnitude `Mw` and fault angles in degrees (strike measured clockwise from north = +y),
+at model coordinates [km], or at a geographic location projected with the `ProjectionPoint` of the model.
 """
+DoubleCoupleSource(lon, lat, z, proj::ProjectionPoint; kwargs...) = DoubleCoupleSource(project(lon, lat, z, proj)...; kwargs...)
+
 function DoubleCoupleSource(x, y, z; Mw, strike, dip, rake, t0=0.0, trise=1.0)
     # Aki & Richards components in (north, east, down)
     sd, cd, s2d, c2d = sind(dip), cosd(dip), sind(2dip), cosd(2dip)
