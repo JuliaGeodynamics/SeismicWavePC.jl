@@ -98,7 +98,7 @@ end
 # Function barrier on the solver type: from here on the dimension N is known to the compiler.
 function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
                   na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
-                  snapshot_every=0, snapshot_dir="snapshots", backend=CPU(), T=Float32, nproc=1, verbose=true) where {mode}
+                  snapshot_every=0, snapshot_dir="snapshots", backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa MomentTensorSource ? [sources] : collect(MomentTensorSource, sources)
     stations = collect(Station, stations)
@@ -126,15 +126,15 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     dev(A) = (B = KernelAbstractions.allocate(backend, eltype(A), size(A)); copyto!(B, A); B)
 
     # medium on this rank
-    loc(A) = dev(T.(A[R...]))
+    loc(A) = dev(FT.(A[R...]))
     col(A) = dev(A[Base.front(R)...])
-    sponge(a) = map(v -> dev(T.(v[R[a]])), cerjan(g.n[a], g.d[a], na; top=a < N))
+    sponge(a) = map(v -> dev(FT.(v[R[a]])), cerjan(g.n[a], g.d[a], na; top=a < N))
     (gx_c, gx_b), (gz_c, gz_b) = sponge(1), sponge(N)
     G = N == 3 ? (; gx_c, gx_b, gy_c=sponge(2)[1], gy_b=sponge(2)[2], gz_c, gz_b) : (; gx_c, gx_b, gz_c, gz_b)
     M = merge((; rho=loc(med.rho), lam=loc(med.lam), mu=loc(med.mu), taup=loc(med.taup), taus=loc(med.taus),
                  fs_top=col(med.fs_top), fs_bot=col(med.fs_bot), ob_top=col(med.ob_top), ob_bot=col(med.ob_bot)), G)
-    c = ntuple(a -> (T(9 / 8 / g.d[a]), T(1 / 24 / g.d[a]), T(1 / g.d[a])), N)
-    vc = memory_coefficients(med.ts, dt, T)
+    c = ntuple(a -> (FT(9 / 8 / g.d[a]), FT(1 / 24 / g.d[a]), FT(1 / g.d[a])), N)
+    vc = memory_coefficients(med.ts, dt, FT)
     ijk = N == 3 ? (:i, :j, :k) : (:i, :k)
 
     # sources: stress glut at the cell containing the source (normalized by the total moment, as in OpenSWPC)
@@ -149,8 +149,8 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     end
     Is = [position(s.x, s.y, s.z) .- off for s in S]
     Src = merge(NamedTuple{ijk}(ntuple(a -> dev(Int32[p[a] for p in Is]), N)),
-                (; M=dev(T[s.M[m] * (m in (4, 5) ? -1 : 1) for s in S, m in 1:6]),     # z up -> z down
-                   s=dev(T[s.M0 / M0 * moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt / prod(g.d) for s in S, it in 1:nt])))
+                (; M=dev(FT[s.M[m] * (m in (4, 5) ? -1 : 1) for s in S, m in 1:6]),     # z up -> z down
+                   s=dev(FT[s.M0 / M0 * moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt / prod(g.d) for s in S, it in 1:nt])))
 
     # stations owned by this rank
     function station_cell(st)
@@ -164,11 +164,11 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     St = NamedTuple{ijk}(ntuple(a -> dev(Int32[SI[n][a] - off[a] for n in own]), N))
     components = mode === :psv ? (:x, :z) : mode === :sh ? (:y,) : (:x, :y, :z)
     nrec = (nt - 1) ÷ record_every + 1
-    rec = KernelAbstractions.zeros(backend, T, nrec, length(components), max(length(own), 1))
+    rec = KernelAbstractions.zeros(backend, FT, nrec, length(components), max(length(own), 1))
 
     # wavefields
-    z() = KernelAbstractions.zeros(backend, T, nl...)
-    zr() = KernelAbstractions.zeros(backend, T, NM, nl...)
+    z() = KernelAbstractions.zeros(backend, FT, nl...)
+    zr() = KernelAbstractions.zeros(backend, FT, NM, nl...)
     F = mode === :psv ? (; Vx=z(), Vz=z(), Sxx=z(), Szz=z(), Sxz=z(), Rxx=zr(), Rzz=zr(), Rxz=zr()) :
         mode === :sh ? (; Vy=z(), Syz=z(), Sxy=z(), Ryz=zr(), Rxy=zr()) :
         (; Vx=z(), Vy=z(), Vz=z(), Sxx=z(), Syy=z(), Szz=z(), Syz=z(), Sxz=z(), Sxy=z(),
@@ -184,7 +184,7 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     end
     movie = (snapshot_every > 0 && me == 0) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     wall = time()
-    movie = timeloop!(F, M, Src, St, rec, c, vc, T(dt), kernels(mode), nl, nt, isempty(S), length(own), record_every,
+    movie = timeloop!(F, M, Src, St, rec, c, vc, FT(dt), kernels(mode), nl, nt, isempty(S), length(own), record_every,
                       snapshot_every, snapshot_dir, movie, out, tbeg, dt, verbose && me == 0, parallel, backend)
     movie === nothing || movie_paraview(pvd=movie, Finalize=true)
     verbose && me == 0 && @printf("  finished in %.2f s\n", time() - wall)

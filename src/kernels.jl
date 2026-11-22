@@ -7,7 +7,7 @@
 # `c` = (cx, [cy,] cz) with c* = (9/8/d, 1/24/d, 1/d), `vc` = memory-variable coefficients.
 
 @inline second_order(k, ft, fb, ot, ob) = ((k - ft) * (fb - k) >= 0) | ((k - ot) * (ob - k) >= 0)
-@inline fd(c, two) = two ? (c[3], zero(c[3])) : (c[1], c[2])
+@inline fd(c, two) = (ifelse(two, c[3], c[1]), ifelse(two, zero(c[2]), c[2]))   # branch-free: vectorizes
 @inline havg2(a, b) = 2a * b / (a + b + eps(typeof(a)))
 @inline havg4(a, b, c, d) = 4a * b * c * d / (a * b * c + a * b * d + a * c * d + b * c * d + eps(typeof(a)))
 
@@ -15,7 +15,8 @@
 Base.@propagate_inbounds function memvar!(R, I, f, vc, dt)
     c1, c2, d1, _ = vc
     s = zero(f)
-    for m in 1:NM
+    # unrolled, so that the loop over cells is the innermost loop and can be vectorized
+    Base.Cartesian.@nexprs 3 m -> begin
         r = c1[m] * R[m, I] - c2[m] * f * dt
         R[m, I] = r
         s += d1[m] * r

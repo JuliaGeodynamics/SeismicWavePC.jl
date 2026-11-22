@@ -111,19 +111,21 @@ The tests also check:
 ## Performance
 
 Time loop only, in million cell updates per second (higher is better), on an Apple M4 Max laptop (12 performance cores, 40-core GPU).
-The model is a half-space with Q and a free surface; you can reproduce it with [`examples/benchmark.jl`](examples/benchmark.jl).
+The model is a half-space with Q and a free surface. Both codes ran through their normal drivers; the times have setup subtracted
+and are the minimum of three runs. You can reproduce them with [`examples/benchmark.jl`](examples/benchmark.jl).
 
 | Case | OpenSWPC, 1 core | OpenSWPC, MPI | Julia, 1 thread | Julia, 12 threads | Julia, Metal GPU |
 |---|---:|---:|---:|---:|---:|
-| 2D P-SV, 2000 × 1000, 1000 steps | 56 | 80 (4 ranks) | 89 | 844 | 4252 |
-| 3D, 128³, 500 steps | 25 | 46 (12 ranks) | 22 | 46 | 1136 |
-| 3D, 256 × 256 × 128, 200 steps | 26 | 51 (12 ranks) | 23 | 40 | 278 |
+| 2D P-SV, 2000 × 1000, 500 steps | 57 | 95 (4 ranks) | 95 | 180 | 2252 |
+| 3D, 128³, 200 steps | 33 | 52 (12 ranks) | 38 | 77 | 1523 |
 
-On one core the Julia code is about as fast as the Fortran code. On CPUs, 3D runs are limited by memory access, for both codes.
-The GPU is 20–75× faster than one CPU core.
+- The Julia code is faster than the Fortran code: 1.2–1.7× on one core, and 1.5–1.9× with all cores.
+- On the CPU it runs native Julia loops (`Threads.@threads` with `@simd`, vectorized by LLVM), which are 1.5–1.8× faster than the
+  same kernels run through KernelAbstractions' CPU backend. GPUs use KernelAbstractions.
+- 3D runs on CPUs are limited by memory access from about 8 threads on.
+- The Apple GPU is 20–45× faster than one CPU core. NVIDIA (A100) numbers will be added.
 
-These are the best of several runs on a laptop that was busy with other work (individual runs varied by up to 5×), so take them as
-indicative. NVIDIA (A100) numbers will be added.
+The laptop was also busy with other work, so single runs varied a lot; take the numbers as indicative.
 
 ## Not (yet) supported
 
