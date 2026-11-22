@@ -46,18 +46,28 @@ function internal(A::Array{Float64,3}, ::Val{N}) where {N}
 end
 
 """
+Pad `A` (physical cells `n`) by `H` ghost cells on every side by replication; the absorber zone (`na` cells at the sides
+and the bottom) is homogenized, as in OpenSWPC.
+"""
+function pad_absorber(A::Array{Float64,N}, n::NTuple{N,Int}, na) where {N}
+    P = Array{Float64,N}(undef, n .+ 2H)
+    for I in CartesianIndices(P)
+        J = ntuple(a -> a == N ? clamp(I[a] - H, 1, n[a] - na) : clamp(I[a] - H, na + 1, n[a] - na), Val(N))
+        P[I] = A[J...]
+    end
+    return P
+end
+
+"""
 Build padded material arrays `(rho, lam, mu, taup, taus)`, the 2nd-order zones near free surfaces
 `(fs_top, fs_bot, ob_top, ob_bot)` and the maximum P velocity.
 """
 function setup_medium(m::NamedTuple, g::Grid{N}, na, fq_min, fq_max, fq_ref) where {N}
-    rho, vp, vs, qp, qs = (internal(A, Val(N)) for A in (m.rho, m.vp, m.vs, m.Qp, m.Qs))
+    rho, vp, vs, qp, qs = internal(m.rho, Val(N)), internal(m.vp, Val(N)), internal(m.vs, Val(N)), internal(m.Qp, Val(N)), internal(m.Qs, Val(N))
     rho = max.(rho, 0.001)   # air needs a small non-zero density (as in OpenSWPC)
 
-    # pad by replication; the absorber zone (sides and bottom) is homogenized as in OpenSWPC
     n = g.n
-    src(I) = CartesianIndex(ntuple(a -> a == N ? clamp(I[a] - H, 1, n[a] - na) : clamp(I[a] - H, na + 1, n[a] - na), N))
-    pad(A) = [A[src(I)] for I in CartesianIndices(n .+ 2H)]
-    rho, vp, vs, qp, qs = pad.((rho, vp, vs, qp, qs))
+    rho, vp, vs, qp, qs = pad_absorber(rho, n, na), pad_absorber(vp, n, na), pad_absorber(vs, n, na), pad_absorber(qp, n, na), pad_absorber(qs, n, na)
 
     ts = relaxation_times(fq_min, fq_max)
     zeta = constq_zeta(fq_min, fq_max, ts)
