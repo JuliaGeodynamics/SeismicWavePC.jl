@@ -1,0 +1,6 @@
+Manifest.toml
+snapshots/
+*.vts
+*.pvd
+.claude/settings.local.json
+.claude/

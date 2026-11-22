@@ -1,0 +1,114 @@
+# Material setup on the global grid (host), ported from OpenSWPC `m_medium.f90` / `m_absorb_c.f90`.
+#
+# Internal layout: arrays are indexed (i, [j,] k) with k = 1 at the TOP of the model (depth increases with k),
+# padded by H = 2 ghost cells on every side. Physical cell i lives at array index i + H.
+
+const H = 2
+
+struct Grid{N}
+    n::NTuple{N,Int}          # physical cells (x, [y,] z)
+    d::NTuple{N,Float64}      # spacing [km]
+    beg::NTuple{N,Float64}    # cell-edge start; for z this is the DEPTH of the top edge
+end
+
+"Grid of a `CartData` volume: every node becomes a cell centre."
+function Grid(data::CartData, mode::Symbol)
+    x, y, z = data.x.val[:, 1, 1], data.y.val[1, :, 1], data.z.val[1, 1, :]
+    axes = mode === :p3d ? (x, y, -reverse(z)) : (x, -reverse(z))
+    for a in axes
+        length(a) > 1 && all(≈(a[2] - a[1]), diff(a)) || error("CartData must be a regular grid with at least 2 points per axis")
+    end
+    d = map(a -> a[2] - a[1], axes)
+    return Grid(map(length, axes), d, map((a, h) -> a[1] - h / 2, axes, d))
+end
+
+"Padded array index of the cell that contains coordinate `c` along axis `a` (z given as depth)."
+cell_index(g::Grid, a, c) = ceil(Int, (c - g.beg[a]) / g.d[a]) + H
+
+"Reads a field from `data` as an internal array (z flipped, 2D squeezed)."
+function internal(data::CartData, name::Symbol, mode::Symbol, default=nothing)
+    if !haskey(data.fields, name)
+        default === nothing && error("CartData needs a field `$name`")
+        return fill(Float64(default), mode === :p3d ? size(data) : size(data)[[1, 3]])
+    end
+    f = Float64.(reverse(data.fields[name], dims=3))
+    return mode === :p3d ? f : f[:, 1, :]
+end
+
+"""
+Build padded material arrays `(rho, lam, mu, taup, taus)`, the 2nd-order zones near free surfaces
+`(fs_top, fs_bot, ob_top, ob_bot)` and the maximum P velocity.
+"""
+function setup_medium(data::CartData, g::Grid{N}, mode, na, fq_min, fq_max, fq_ref) where {N}
+    rho, vp, vs = (internal(data, f, mode) for f in (:rho, :vp, :vs))
+    qp, qs = internal(data, :Qp, mode, Inf), internal(data, :Qs, mode, Inf)
+    rho = max.(rho, 0.001)   # air needs a small non-zero density (as in OpenSWPC)
+
+    # pad by replication; the absorber zone (sides and bottom) is homogenized as in OpenSWPC
+    n = g.n
+    src(I) = CartesianIndex(ntuple(a -> a == N ? clamp(I[a] - H, 1, n[a] - na) : clamp(I[a] - H, na + 1, n[a] - na), N))
+    pad(A) = [A[src(I)] for I in CartesianIndices(n .+ 2H)]
+    rho, vp, vs, qp, qs = pad.((rho, vp, vs, qp, qs))
+
+    ts = relaxation_times(fq_min, fq_max)
+    zeta = constq_zeta(fq_min, fq_max, ts)
+    taup, taus = NM * zeta ./ qp, NM * zeta ./ qs
+    mu = @. rho * vs^2 / visco_chi((ts,), taus, fq_ref)^2       # unrelaxed moduli
+    lam = @. rho * vp^2 / visco_chi((ts,), taup, fq_ref)^2 - 2mu
+    vmax = maximum(sqrt.((lam .+ 2mu) ./ rho))
+
+    return (; rho, lam, mu, taup, taus, ts, vmax, surface_zones(lam, mu, n)...)
+end
+
+"""
+Free-surface (`fs`) and ocean-bottom (`ob`) zones, per column, where 2nd-order instead of
+4th-order differences are used (OpenSWPC `surface_detection`).
+"""
+function surface_zones(lam, mu, n::NTuple{N}) where {N}
+    ϵ = eps(Float32)
+    nz = n[N]
+    hn = n[1:N-1]
+    # kfs/kob: last k (physical) with vacuum above material; 0 if none. Detected on columns 0:n+2, as in OpenSWPC.
+    kfs = zeros(Int, hn .+ (2H + 1))       # physical columns -1 : n+3  ->  index i + 2
+    kob = zeros(Int, hn .+ (2H + 1))
+    for C in CartesianIndices(kfs)
+        ip = Tuple(C) .- 2                # physical column
+        all(0 .<= ip .<= hn .+ 2) || continue
+        col = CartesianIndex(ip .+ H)
+        for k in 1:nz-1
+            abs(mu[col, k+H]) < ϵ && abs(mu[col, k+1+H]) > ϵ && (kob[C] = k)
+            abs(lam[col, k+H]) < ϵ && abs(lam[col, k+1+H]) > ϵ && (kfs[C] = k)
+        end
+    end
+    # zone = padded k-range [top, bot]; ghost columns get an empty zone (top > bot)
+    function zone(kk)
+        top, bot = fill(Int32(1), hn .+ 2H), fill(Int32(0), hn .+ 2H)
+        for C in CartesianIndices(hn)
+            w = kk[CartesianIndices(map(c -> c:c+5, Tuple(C)))]   # physical columns i-2 : i+3
+            P = C + CartesianIndex(ntuple(_ -> H, N - 1))
+            top[P] = max(minimum(w) - 2, 1) + H
+            bot[P] = min(maximum(w) + 2, nz) + H
+        end
+        return top, bot
+    end
+    (fs_top, fs_bot), (ob_top, ob_bot) = zone(kfs), zone(kob)
+    return (; fs_top, fs_bot, ob_top, ob_bot, kfs)   # kfs is indexed by padded column
+end
+
+"""
+Cerjan sponge factors `(centre, boundary)` along one axis of `n` cells (padded). No damping at the top (`top=false`).
+"""
+function cerjan(n, d, na; top=true)
+    α, L = 0.09, na * d
+    gc, gb = ones(n + 2H), ones(n + 2H)
+    for i in 1:n
+        if i <= na && top
+            gc[i+H] = exp(-α * (1 - (i - 0.5) * d / L)^2)
+            gb[i+H] = exp(-α * (1 - i * d / L)^2)
+        elseif i >= n - na + 1
+            gc[i+H] = exp(-α * (1 - (n - i + 1) * d / L)^2)
+            gb[i+H] = exp(-α * (1 - (n - i + 0.5) * d / L)^2)
+        end
+    end
+    return gc, gb
+end
