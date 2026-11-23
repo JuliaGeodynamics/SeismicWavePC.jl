@@ -99,6 +99,11 @@ and makes a movie of the wavefield while the simulation runs (no ParaView files)
 julia -t auto --project=examples/MagmaThermoKinematics examples/MagmaThermoKinematics/Unzen_2D.jl [resolution in m]
 ```
 
+![Waves through the magmatic system below Unzen](docs/src/assets/Unzen_2D_waves.gif)
+
+*Top: S-wave velocity from MAGEMin for the temperature field of MTK (black: molten, white lines: more than 10 % melt).
+Bottom: vertical velocity of a Mw 4 earthquake (star), recorded by seismometers just below the surface (triangles).*
+
 ## Usage
 
 - **Model:** a regular GMG `CartData` with fields `rho` [kg/m³] and `vp`, `vs` [km/s]; `Qp`, `Qs` are optional (`density_unit=:g_cm3` for densities in g/cm³, as in OpenSWPC)
