@@ -2,16 +2,26 @@
 # here the documentation and the chain rule from the internal moduli back to the fields of the model.
 
 """
-    J, gradient = misfit_gradient(model, observed::Seismograms; method=:adjoint, checkpoint_steps=nothing, kwargs...)
+    J, gradient, source_gradients = misfit_gradient(model, observed::Seismograms; sources, misfit=L2Misfit(), kwargs...)
+    J, gradient, source_gradients = misfit_gradient(model, observed::Vector{Seismograms}; sources::Vector, kwargs...)
 
-Least-squares misfit `J = ½ Σ (v - v_observed)²` of the velocity seismograms [m/s] (all samples, components and stations
-of `observed`), and its gradient with respect to the model.
+Misfit `J` between the velocity seismograms of a simulation and `observed` (whose stations are used), and its gradient with
+respect to the model and the sources. With a vector of `observed` seismograms and a vector of `sources` (one entry per shot:
+a source or a vector of sources) the misfits and model gradients of all shots are summed.
 
-`kwargs` are those of [`simulate`](@ref) (`dt`, `nt`, `sources`, `record_every`, `absorber`, `T`, `backend`, …) and must
-describe the simulation that `observed` is compared with; its stations are `observed.stations`. `gradient` is a `CartData`
-on the grid of `model` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`: ∂J/∂ of the model field in its units (per kg/m³ (or
-g/cm³ with `density_unit = :g_cm3`), per km/s, per unit Q). Cells in the absorbing layers are homogenized in the
-simulation, so their sensitivity is added to the cells next to the layers.
+- `misfit`: [`L2Misfit`](@ref) (default: `J = ½ Σ (v - v_observed)²`, optionally with weights and time windows),
+  [`TravelTimeMisfit`](@ref) (cross-correlation time shifts), or any function `(syn, obs, t) -> (J, ∂J/∂syn)` of the
+  synthetic and observed velocities `[it, component, station]` [m/s] and the sample times `t` [s].
+- `kwargs` are those of [`simulate`](@ref) (`dt`, `nt`, `stf`, `record_every`, `absorber`, `T`, `backend`, `nproc`, …) and
+  must describe the simulation that `observed` is compared with.
+- `gradient`: a `CartData` on the grid of `model` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`: ∂J/∂ of the model field in
+  its units (per kg/m³ (or g/cm³ with `density_unit = :g_cm3`), per km/s, per unit Q). Cells in the absorbing layers are
+  homogenized in the simulation, so their sensitivity is added to the cells next to the layers.
+- `source_gradients`: one entry per source (per shot: a vector of them), `nothing` for plane waves and ignored sources:
+  - moment tensors: `M` (∂J/∂ of the six components `M0 .* M` [per N m]), `M0` (at fixed `M`);
+  - forces: `F` (∂J/∂ of `fx, fy, fz` [per N]);
+  - both: `x, y, z` (location [per km]; from the spatial derivative of the adjoint field, as the source is injected at a
+    single cell), `t0`, `trise` [per s], and `stf`: ∂J/∂ of the moment rate (source time function) at the times `t`.
 
 `method`
 - `:adjoint` (default): adjoint-state method with adjoint kernels (transposed stencils, including the free-surface cells
@@ -19,20 +29,31 @@ simulation, so their sensitivity is added to the cells next to the layers.
   threads, GPUs); about 5 forward simulations. It is the exact gradient of the discrete simulation (to rounding errors),
   except for the Cerjan sponge, the side extrapolation of plane waves and the density in the source cell of P-SV forces.
 - `:ad`: reverse-mode automatic differentiation of the whole simulation (needs `using Enzyme`): exact in all cases, but
-  ~20-50 forward simulations, CPU and one process only. Use `T = Float64` with it.
+  ~20-50 forward simulations, CPU and one process only, the default misfit only and no source gradients. Use
+  `T = Float64` with it.
 
 The wavefields are saved every `checkpoint_steps` steps (default: balances the memory of the checkpoints, kept in host
 memory, and of the velocity fields of the steps in between, kept on the device), and the steps in between are recomputed in
-the reverse pass. With `nproc` (MPI, as in `simulate`) every process gets `J` and the whole `gradient`. Plane waves enter
-as a fixed initial wavefield (their dependence on the medium is not differentiated).
+the reverse pass. With `nproc` (MPI, as in `simulate`) every process gets all results. Plane waves enter as a fixed initial
+wavefield (their dependence on the medium is not differentiated).
 """
-function misfit_gradient(model::CartData, observed::Seismograms; method=:adjoint, checkpoint_steps=nothing, kwargs...)
+function misfit_gradient(model::CartData, observed::Seismograms; method=:adjoint, checkpoint_steps=nothing, misfit=L2Misfit(), kwargs...)
     bad = intersect(keys(kwargs), (:stations, :snapshots, :callback, :checkpoint, :restart, :driver))
     isempty(bad) || error("misfit_gradient does not take the keywords $(join(bad, ", "))")
     method in (:adjoint, :ad) || error("method must be :adjoint or :ad, got :$method")
     K = checkpoint_steps === nothing ? nothing : Int(checkpoint_steps)
-    driver = method === :adjoint ? AdjointDriver(observed, K) : ad_driver(observed, K)
+    driver = method === :adjoint ? AdjointDriver(observed, K, misfit) : ad_driver(observed, K, misfit)
     return simulate(model; kwargs..., stations=observed.stations, verbose=false, driver)
+end
+
+function misfit_gradient(model::CartData, observed::AbstractVector{Seismograms}; sources::AbstractVector, kwargs...)
+    length(sources) == length(observed) || error("one entry of `sources` per shot: $(length(observed)) shots, $(length(sources)) sources")
+    shots = [misfit_gradient(model, o; kwargs..., sources=src) for (o, src) in zip(observed, sources)]
+    g = first(shots)[2]
+    fields = map(keys(g.fields)) do f
+        sum(r -> r[2].fields[f], shots)
+    end
+    return sum(first, shots), CartData(g.x.val, g.y.val, g.z.val, NamedTuple{keys(g.fields)}(fields)), [r[3] for r in shots]
 end
 
 "Driver of `simulate` for `method = :ad` (Enzyme extension)."

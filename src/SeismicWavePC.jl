@@ -28,11 +28,13 @@ include("files.jl")
 include("layered.jl")
 include("green.jl")
 include("randommedium.jl")
+include("misfits.jl")
 include("gradient.jl")
 include("adjoint.jl")
 
 export MomentTensorSource, DoubleCoupleSource, ForceSource, PlaneWave, Station, Seismograms, simulate, moment_rate, CPU
-export ReciprocalGreen, reciprocal_green, seismogram, Snapshots, random_medium, perturb, read_random_medium, misfit_gradient
+export ReciprocalGreen, reciprocal_green, seismogram, Snapshots, random_medium, perturb, read_random_medium, misfit_gradient,
+       L2Misfit, TravelTimeMisfit
 export read_netcdf, write_sac, read_sac, read_lhm, read_lgm, read_grd, flatten_earth, flatten_depth
 
 end

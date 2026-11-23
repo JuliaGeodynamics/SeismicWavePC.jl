@@ -57,3 +57,37 @@ end
         end
     end
 end
+
+@testset "source gradients, misfits, several shots" begin
+    m = test_model(:psv)
+    src = test_source()
+    force = ForceSource(0.5, 0.0, -1.2; fx=1e13, fz=-2e13, t0=0.1, trise=0.3)
+    kw = (; dt=DT, nt=150, T=Float64)
+    stations = test_stations(:psv)
+    obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kw..., sources=[src, force], stations, verbose=false)
+    misfit_of(srcs, mis=L2Misfit()) = (r = simulate(m; kw..., sources=srcs, stations, verbose=false); mis(r.v, obs.v, r.t)[1])
+    fd(f, h, mis=L2Misfit()) = (misfit_of(f(h), mis) - misfit_of(f(-h), mis)) / 2h
+    J, g, sg = misfit_gradient(m, obs; kw..., sources=[src, force])
+    @test length(sg) == 2 && keys(sg[1]) == (:M, :M0, :x, :y, :z, :t0, :trise, :stf, :t) && keys(sg[2])[1] == :F
+    mt(; M=src.M, M0=src.M0, t0=src.t0) = MomentTensorSource(src.x, src.y, src.z, M0, M; t0, trise=src.trise)
+    @test sg[1].M[1] ≈ fd(h -> [mt(M=(src.M[1] + h / src.M0, src.M[2:6]...)), force], 1e-4 * src.M0) rtol = 1e-5
+    @test sg[1].M[5] ≈ fd(h -> [mt(M=(src.M[1:4]..., src.M[5] + h / src.M0, src.M[6])), force], 1e-4 * src.M0) rtol = 1e-5
+    @test sg[1].M0 ≈ fd(h -> [mt(M0=src.M0 + h), force], 1e-4 * src.M0) rtol = 1e-5
+    @test sg[1].t0 ≈ fd(h -> [mt(t0=src.t0 + h), force], 1e-6) rtol = 1e-4
+    @test sg[2].F[3] ≈ fd(h -> [src, ForceSource(force.x, force.y, force.z; fx=force.F[1], fz=force.F[3] + h, t0=force.t0, trise=force.trise)], 1e9) rtol = 1e-5
+    @test sg[1].x ≈ fd(h -> [MomentTensorSource(src.x + h, src.y, src.z, src.M0, src.M; t0=src.t0, trise=src.trise), force], 0.05) rtol = 0.05
+    # misfits: weights and windows, travel times
+    I = CartesianIndex(110, 1, 75)
+    for mis in (L2Misfit(weights=[1.0, 2.0, 0.5], window=(0.1, 0.5)), TravelTimeMisfit(window=(0.1, 0.55)))
+        Jm, gm = misfit_gradient(m, obs; kw..., sources=[src, force], misfit=mis)
+        @test Jm ≈ misfit_of([src, force], mis)
+        mm(d) = (r = simulate(perturbed(m, :vs, I, d); kw..., sources=[src, force], stations, verbose=false); mis(r.v, obs.v, r.t)[1])
+        @test gm.fields.vs[I] ≈ (mm(1e-4) - mm(-1e-4)) / 2e-4 rtol = 1e-4
+    end
+    # several shots: sums of the single shots
+    obs1 = simulate(m; kw..., sources=force, stations, verbose=false)
+    Js, gs, sgs = misfit_gradient(m, [obs, obs1]; kw..., sources=[[src, force], force])
+    J1, g1 = misfit_gradient(m, obs1; kw..., sources=force)
+    @test Js ≈ J + J1 && gs.fields.vp ≈ g.fields.vp .+ g1.fields.vp && length(sgs) == 2
+    @test_throws ErrorException misfit_gradient(m, [obs, obs1]; kw..., sources=[src])
+end

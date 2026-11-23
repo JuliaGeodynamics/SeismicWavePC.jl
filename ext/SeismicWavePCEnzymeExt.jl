@@ -58,9 +58,13 @@ function (d::GradientDriver)(s)
                  Duplicated(s.rec, Enzyme.make_zero(s.rec)), Duplicated(s.acc, dacc), Duplicated(s.regions, dregions),
                  Const(o), Const(seg(a)[1]), Const(seg(a)[2]), Const(p))
     end
-    return J, S.model_gradient(s, dM)
+    return J, S.model_gradient(s, dM), nothing
 end
 
-S.ad_driver(observed::Seismograms, K) = GradientDriver(observed, K)
+function S.ad_driver(observed::Seismograms, K, misfit)
+    misfit isa S.L2Misfit && misfit.weights == 1 && misfit.window === nothing ||
+        error("misfit_gradient(...; method = :ad) supports only the default misfit L2Misfit()")
+    return GradientDriver(observed, K)
+end
 
 end

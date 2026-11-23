@@ -289,12 +289,62 @@ Base.@propagate_inbounds function residual_3d!(Q, M, St, res, itw, nown)
     end
 end
 
+# ------------------------------------------------------------------ source sensitivities
+# At adjoint step n: w = ∂J/∂(amplitude injected at step n) for the components of every source (moment tensor: the stress
+# glut, -η sampled as `inject_*!`; force: the adjoint velocity λ = -q/B sampled as `force_*!`), stored in `W[l, j, n]`, and
+# Σₙ s(n) w at the neighbour cells (`X[l, j, ±axis]`) for the location derivative. Only points of this rank count (MPI).
+@inline owned(A, J) = all(ntuple(a -> H < J[a] <= size(A, a) - H, ndims(A)))
+Base.@propagate_inbounds ov(A, J) = owned(A, J) ? A[J] : zero(eltype(A))       # a branch: J may lie outside A
+Base.@propagate_inbounds avg4(A, I, e1, e2) = (ov(A, I) + ov(A, I - e1) + ov(A, I - e2) + ov(A, I - e1 - e2)) / 4
+Base.@propagate_inbounds avg2(A, I, e) = (ov(A, I) + ov(A, I - e)) / 2
+
+Base.@propagate_inbounds function mt_psv(E, Q, M, I)
+    z, ex, ez = zero(eltype(E[1])), CartesianIndex(1, 0), CartesianIndex(0, 1)
+    return (-ov(E[1], I), z, -ov(E[2], I), z, -avg4(E[3], I, ex, ez), z)
+end
+Base.@propagate_inbounds function mt_sh(E, Q, M, I)
+    z = zero(eltype(E[1]))
+    return (z, z, z, -avg2(E[1], I, CartesianIndex(0, 1)), z, -avg2(E[2], I, CartesianIndex(1, 0)))
+end
+Base.@propagate_inbounds function mt_3d(E, Q, M, I)
+    ex, ey, ez = CartesianIndex(1, 0, 0), CartesianIndex(0, 1, 0), CartesianIndex(0, 0, 1)
+    return (-ov(E[1], I), -ov(E[2], I), -ov(E[3], I), -avg4(E[4], I, ey, ez), -avg4(E[5], I, ex, ez), -avg4(E[6], I, ex, ey))
+end
+Base.@propagate_inbounds function f_psv(E, Q, M, I)
+    ρ, ex, ez = M.rho, CartesianIndex(1, 0), CartesianIndex(0, 1)
+    lam(V, J, e) = owned(V, J) ? V[J] * (ρ[J] + ρ[J+e]) / 2 : zero(eltype(V))      # q / B
+    owned(ρ, I) || return ntuple(_ -> zero(eltype(ρ)), 3)
+    return (-(lam(Q.Vx, I, ex) + lam(Q.Vx, I - ex, ex)) / 2ρ[I], zero(eltype(ρ)), -(lam(Q.Vz, I, ez) + lam(Q.Vz, I - ez, ez)) / 2ρ[I])
+end
+Base.@propagate_inbounds f_sh(E, Q, M, I) = (zero(eltype(M.rho)), -ov(Q.Vy, I), zero(eltype(M.rho)))
+Base.@propagate_inbounds f_3d(E, Q, M, I) = (-avg2(Q.Vx, I, CartesianIndex(1, 0, 0)), -avg2(Q.Vy, I, CartesianIndex(0, 1, 0)),
+                                             -avg2(Q.Vz, I, CartesianIndex(0, 0, 1)))
+
+@inline unit(::CartesianIndex{N}, a) where {N} = CartesianIndex(ntuple(b -> Int(b == a), Val(N)))
+@inline cellof(S, l) = haskey(S, :j) ? CartesianIndex(S.i[l], S.j[l], S.k[l]) : CartesianIndex(S.i[l], S.k[l])
+Base.@propagate_inbounds function source_sens!(W, X, sample, E, Q, M, S, n)
+    for l in 1:length(S.i)
+        I = cellof(S, l)
+        w = sample(E, Q, M, I)
+        for j in eachindex(w)
+            W[l, j, n] = w[j]
+        end
+        s = S.s[l, n]
+        for a in 1:length(I), (q, o) in ((2a - 1, 1), (2a, -1))
+            wo = sample(E, Q, M, I + o * unit(I, a))
+            for j in eachindex(wo)
+                X[l, j, q] += s * wo[j]
+            end
+        end
+    end
+end
+
 # kernels, accumulators and the staggering of shear moduli (offsets of the cells averaged) and buoyancies per mode
 const O2, O3 = CartesianIndex{2}, CartesianIndex{3}
-adjoint_setup(::Val{:psv}) = (vel_psv_adj!, stress_psv_adj!, grad_psv!, residual_psv!, stretch_v_psv!, stretch_s_psv!, (:axVx, :azVz, :axVz, :azVx), (:lam, :mu, :xz, :tp, :ts, :bx, :bz), 3,
+adjoint_setup(::Val{:psv}) = (mt_psv, f_psv, vel_psv_adj!, stress_psv_adj!, grad_psv!, residual_psv!, stretch_v_psv!, stretch_s_psv!, (:axVx, :azVz, :axVz, :azVx), (:lam, :mu, :xz, :tp, :ts, :bx, :bz), 3,
                               (xz=(O2(0, 0), O2(0, 1), O2(1, 0), O2(1, 1)),), (bx=O2(1, 0), bz=O2(0, 1)))
-adjoint_setup(::Val{:sh}) = (vel_sh_adj!, stress_sh_adj!, grad_sh!, residual_sh!, stretch_v_sh!, stretch_s_sh!, (:axVy, :azVy), (:yz, :xy, :ts, :by), 2, (yz=(O2(0, 0), O2(0, 1)), xy=(O2(0, 0), O2(1, 0))), (by=nothing,))
-adjoint_setup(::Val{:p3d}) = (vel_3d_adj!, stress_3d_adj!, grad_3d!, residual_3d!, stretch_v_3d!, stretch_s_3d!,
+adjoint_setup(::Val{:sh}) = (mt_sh, f_sh, vel_sh_adj!, stress_sh_adj!, grad_sh!, residual_sh!, stretch_v_sh!, stretch_s_sh!, (:axVy, :azVy), (:yz, :xy, :ts, :by), 2, (yz=(O2(0, 0), O2(0, 1)), xy=(O2(0, 0), O2(1, 0))), (by=nothing,))
+adjoint_setup(::Val{:p3d}) = (mt_3d, f_3d, vel_3d_adj!, stress_3d_adj!, grad_3d!, residual_3d!, stretch_v_3d!, stretch_s_3d!,
                               (:axVx, :ayVy, :azVz, :axVy, :ayVx, :axVz, :azVx, :ayVz, :azVy), (:lam, :mu, :yz, :xz, :xy, :tp, :ts, :bx, :by, :bz), 6,
                               (yz=(O3(0, 0, 0), O3(0, 0, 1), O3(0, 1, 0), O3(0, 1, 1)), xz=(O3(0, 0, 0), O3(0, 0, 1), O3(1, 0, 0), O3(1, 0, 1)),
                                xy=(O3(0, 0, 0), O3(1, 0, 0), O3(0, 1, 0), O3(1, 1, 0))), (bx=O3(1, 0, 0), by=O3(0, 1, 0), bz=O3(0, 0, 1)))
@@ -308,7 +358,7 @@ end
 
 "Gradients with respect to rho, lam, mu (internal arrays) from the accumulators `G` and the shear modulus `mu` (host arrays)."
 function assemble_gradient(G, mu, mode)
-    shear, buoy = adjoint_setup(Val(mode))[10:11]
+    shear, buoy = adjoint_setup(Val(mode))[12:13]
     z = zero(mu)
     glam, gmu, grho = haskey(G, :lam) ? G.lam : copy(z), haskey(G, :mu) ? G.mu : copy(z), copy(z)
     R = CartesianIndices(mu)
@@ -331,9 +381,10 @@ function assemble_gradient(G, mu, mode)
 end
 
 # ------------------------------------------------------------------ driver
-struct AdjointDriver
+struct AdjointDriver{F}
     observed::Seismograms
     checkpoint_steps::Union{Nothing,Int}
+    misfit::F
 end
 
 "Forward step `it` (as `timeloop!`, without output); `record`: also record the stations."
@@ -363,9 +414,9 @@ function observed_velocities(obs, s)
 end
 
 function (d::AdjointDriver)(s)
-    o = observed_velocities(d.observed, s)
+    observed_velocities(d.observed, s)
     (; F, M, St, rec, acc, regions, backend, nt, nown, c, vc, dtT, record_every) = s
-    vel!, stress!, grad!, residual!, stretch_v!, stretch_s!, fmnames, names, nE = adjoint_setup(Val(s.mode))
+    mt_sample, f_sample, vel!, stress!, grad!, residual!, stretch_v!, stretch_s!, fmnames, names, nE = adjoint_setup(Val(s.mode))
     V = velocities(F)
     new(A) = fill!(similar(A), 0)
     attenuation = maximum(abs, M.taup) > 0 || maximum(abs, M.taus) > 0
@@ -387,10 +438,14 @@ function (d::AdjointDriver)(s)
         step!(it, true)
     end
     KernelAbstractions.synchronize(backend)
-    r = Array(rec)[:, 1:s.nc, 1:nown] .* s.scale .- o
-    J = s.parallel ? MPI.Allreduce(sum(abs2, r) / 2, +, IGG.comm()) : sum(abs2, r) / 2
+    # misfit of the seismograms of all stations (on every rank), and its derivative at the stations of this rank
+    syn = zeros(size(rec, 1), s.nc, length(s.stations))
+    syn[:, :, s.own] .= Array(rec)[:, 1:s.nc, 1:nown] .* s.scale
+    s.parallel && MPI.Allreduce!(syn, +, IGG.comm())
+    J, adj = d.misfit(syn, d.observed.v, d.observed.t)
+    size(adj) == size(syn) || error("the misfit function must return the misfit and its derivative (size $(size(syn)))")
     res = KernelAbstractions.zeros(backend, s.T, size(rec, 1), s.nc, max(nown, 1))
-    copyto!(res, s.T.(cat(r .* s.scale, zeros(size(res, 1), s.nc, size(res, 3) - nown); dims=3)))    # ∂J/∂rec
+    copyto!(res, s.T.(cat(adj[:, :, s.own] .* s.scale, zeros(size(res, 1), s.nc, size(res, 3) - nown); dims=3)))    # ∂J/∂rec
 
     # 2nd-order flags of all cells (next to free surfaces and at the outer edge of the PML), for the transposed differences
     fs = map(A -> Array(A), (M.fs_top, M.fs_bot, M.ob_top, M.ob_bot))
@@ -417,6 +472,9 @@ function (d::AdjointDriver)(s)
     Rb = attenuation ? map(new, values(F)[end-nE+1:end]) : nothing
     G = NamedTuple{names}(map(_ -> new(M.lam), names))
     buf = [(map(new, V), fmem()) for _ in 0:K]
+    N = ndims(M.lam)
+    SW, SX = KernelAbstractions.zeros(backend, s.T, length(s.Src.i), 6, nt), KernelAbstractions.zeros(backend, s.T, length(s.Src.i), 6, 2N)
+    FW, FX = KernelAbstractions.zeros(backend, s.T, length(s.FSrc.i), 3, nt), KernelAbstractions.zeros(backend, s.T, length(s.FSrc.i), 3, 2N)
     sync_halo!(A) = s.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, s.nb, A...))
     # backward, segment by segment: recompute the forward velocities, then the adjoint steps n = b … a
     for (seg, a) in Iterators.reverse(enumerate(1:K:nt))
@@ -443,6 +501,8 @@ function (d::AdjointDriver)(s)
             map((z, P, m) -> foreach_cell!(backend, grad!, (G, E, Rb, Qv, Δv, Vn, Vp, (; P, fm=m), Ma, c, vc, dtT), z[1], z[2]), zones, Zp, fm)
             foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, nothing), deep...)
             map(((lo, ndr),) -> foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, Δv), lo, ndr), rest)
+            s.nosource || run_once!(backend, source_sens!, (SW, SX, mt_sample, E, Qv, M, s.Src, n))
+            s.noforce || run_once!(backend, source_sens!, (FW, FX, f_sample, E, Qv, M, s.FSrc, n))
             sync_halo!(stresses(Q))
             map(((lo, ndr, P),) -> foreach_cell!(backend, stretch_s!, (Δs, Q, P, dtT), lo, ndr), azones)
             sync_halo!(halo_s)
@@ -453,7 +513,66 @@ function (d::AdjointDriver)(s)
     Gg = map(A -> gather_interior(A, s), G)
     g = s.me == 0 ? model_gradient(s, assemble_gradient(Gg, s.med.mu, s.mode)) : nothing
     s.parallel && (g = MPI.bcast(g, 0, IGG.comm()))
-    return J, g
+    return J, g, source_gradients(s, SW, SX, FW, FX)
+end
+
+"Sum of the per-rank source sensitivities `A[l, …]` of the sources `idx` (indices in the list of all sources) over the ranks."
+function global_sources(A, idx, n, s)
+    G = zeros(n, size(A)[2:end]...)
+    G[idx, :, :] .= Array(A)
+    s.parallel && MPI.Allreduce!(G, +, IGG.comm())
+    return G
+end
+
+"""
+Gradients with respect to the parameters of every source of `s.sources` (`nothing` for plane waves and ignored sources), from
+the sensitivities to the injected amplitudes `W` (per step) and `X` (neighbour cells): see [`misfit_gradient`](@ref).
+"""
+function source_gradients(s, SW, SX, FW, FX)
+    g, N, nt, dt = s.g, length(s.g.n), s.nt, s.dt
+    W, X = global_sources(SW, s.iS, length(s.moments), s), global_sources(SX, s.iS, length(s.moments), s)
+    FWg, FXg = global_sources(FW, s.iF, length(s.forces), s), global_sources(FX, s.iF, length(s.forces), s)
+    vol = prod(g.d)
+    # ∂J/∂(position) from the sensitivities at the neighbour cells; internal axes (x, [y,] depth) -> (x, y, z up)
+    function position(A, amp, l)
+        d = ntuple(a -> sum(amp[j] * (A[l, j, 2a-1] - A[l, j, 2a]) for j in eachindex(amp)) / (2g.d[a]), N)
+        return N == 3 ? (d[1], d[2], -d[3]) : (d[1], 0.0, -d[2])
+    end
+    # ∂J/∂t0, ∂J/∂trise from the gradient with respect to the moment rate (central differences of the source time function)
+    function timing(gm, times, src)
+        mr(t, t0, tr) = moment_rate(s.stf, t, t0, tr)
+        h = 1e-6 * src.trise
+        dt0 = sum(gm[n] * (mr(times[n], src.t0 + h, src.trise) - mr(times[n], src.t0 - h, src.trise)) / 2h for n in 1:nt)
+        dtr = sum(gm[n] * (mr(times[n], src.t0, src.trise + h) - mr(times[n], src.t0, src.trise - h)) / 2h for n in 1:nt)
+        return dt0, dtr
+    end
+    flip(j) = j in (4, 5) ? -1.0 : 1.0                          # z up -> z down (as in `simulate`)
+    tm = [s.tbeg + (n - 0.5) * dt for n in 1:nt]                 # times of the moment-tensor injections
+    tf = [s.tbeg + n * dt for n in 1:nt]                         # and of the forces
+    mts = map(enumerate(s.moments)) do (l, src)
+        Mi = ntuple(j -> src.M[j] * flip(j), 6)                    # internal moment tensor
+        sl = [src.M0 / s.M0 * moment_rate(s.stf, tm[n], src.t0, src.trise) * dt / vol for n in 1:nt]
+        dMi = ntuple(j -> sum(sl[n] * W[l, j, n] for n in 1:nt), 6)  # ∂J/∂Mi
+        dP = ntuple(j -> flip(j) * dMi[j] / src.M0, 6)             # ∂J/∂(M0 M)
+        gm = [sum(Mi[j] * W[l, j, n] for j in 1:6) * src.M0 / s.M0 * dt / vol for n in 1:nt]    # ∂J/∂(moment rate)
+        x, y, z = position(X, Mi, l)
+        t0, trise = timing(gm, tm, src)
+        (; M=dP, M0=sum(src.M[j] * dP[j] for j in 1:6), x, y, z, t0, trise, stf=gm, t=tm)
+    end
+    fs = map(enumerate(s.forces)) do (l, src)
+        Fi = ntuple(m -> src.F[m] * (m == 3 ? -1.0 : 1.0), 3)
+        sl = [1e3 / s.M0 * moment_rate(s.stf, tf[n], src.t0, src.trise) * dt / vol for n in 1:nt]
+        dF = ntuple(m -> (m == 3 ? -1.0 : 1.0) * sum(sl[n] * FWg[l, m, n] for n in 1:nt), 3)
+        gm = [sum(Fi[m] * FWg[l, m, n] for m in 1:3) * 1e3 / s.M0 * dt / vol for n in 1:nt]
+        x, y, z = position(FXg, Fi, l)
+        t0, trise = timing(gm, tf, src)
+        (; F=dF, x, y, z, t0, trise, stf=gm, t=tf)
+    end
+    # in the order of the sources given to `simulate`
+    return map(s.sources) do src
+        i = src isa MomentTensorSource ? findfirst(x -> x === src, s.moments) : src isa ForceSource ? findfirst(x -> x === src, s.forces) : nothing
+        i === nothing ? nothing : src isa MomentTensorSource ? mts[i] : fs[i]
+    end
 end
 
 """

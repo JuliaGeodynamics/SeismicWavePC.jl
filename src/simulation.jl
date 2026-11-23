@@ -233,7 +233,8 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
         res = driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode), regions, nt, nosource=isempty(S),
                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
                         components, med, m, g, na, fq_ref, rho_unit=density_scale(density_unit, maximum(model_arrays(model).rho)),
-                        mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl))
+                        mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl, sources, moments, forces, M0, stf,
+                        iS=findall(here, moments), iF=findall(here, forces)))
         parallel && IGG.finalize_global_grid(finalize_MPI=false)
         return res
     end

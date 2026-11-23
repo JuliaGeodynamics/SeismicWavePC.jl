@@ -66,7 +66,7 @@ end
 
 @testset "optional packages" begin
     isdefined(Main, :NCDatasets) || @test_throws "NCDatasets" read_netcdf("model.nc")
-    isdefined(Main, :Enzyme) || @test_throws "Enzyme" SeismicWavePC.ad_driver(nothing, nothing)   # misfit_gradient(...; method=:ad)
+    isdefined(Main, :Enzyme) || @test_throws "Enzyme" SeismicWavePC.ad_driver(nothing, nothing, nothing)   # misfit_gradient(...; method=:ad)
 end
 
 @testset "density units" begin
