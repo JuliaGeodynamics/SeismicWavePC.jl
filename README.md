@@ -191,6 +191,14 @@ The test suite compares seismograms (velocity, displacement, stress and strain) 
 | 2D SH | two layers, free surface, Q = 50 | 2 × 10⁻⁶ / 2 × 10⁻⁶ |
 | 3D | two layers, free surface with a topographic step, Q = 50 | 7 × 10⁻⁶ / 6 × 10⁻⁶ |
 
+On Marmousi2 (5 m grid, 3 s, an explosion and 161 receivers 22 m below the sea surface, PML) the three codes give the same
+waveforms. OpenSWPC agrees to 10⁻³ (vertical) and 0.7 % (horizontal velocity) with the same amplitude.
+[SeismicWaves.jl](https://github.com/GinvLab/SeismicWaves.jl) agrees to 6 % (vertical) and 2 % (horizontal) after one amplitude
+factor per component (it uses the opposite sign of moment tensors and z down; its free surface is half a cell lower and its
+receivers are snapped to grid points, which changes amplitudes close to a free surface):
+
+![Code comparison on Marmousi2](docs/src/assets/Marmousi2_codes.png)
+
 The tests also check:
 - MPI runs with 4 processes against serial runs (identical);
 - CPU against Metal (agree to 10⁻⁶);
