@@ -5,6 +5,7 @@
 #
 using SeismicWavePC, GeophysicalModelGenerator, Printf
 include("backend.jl")
+absorber = :cerjan     # as in the README tables; :pml (the default) absorbs better and takes longer
 
 function halfspace(n)
     dx = 0.05
@@ -20,9 +21,9 @@ cases = [("2D P-SV", (2000, 1, 1000), 1000), ("3D", (128, 128, 128), 500), ("3D"
 for (name, n, nt) in cases
     model = halfspace(n)
     src = DoubleCoupleSource(n[1] * 0.025, n[2] * 0.025, -2.0; Mw=3, strike=30, dip=60, rake=70, trise=0.3)
-    simulate(model; dt=0.004, nt=2, sources=src, backend, verbose=false)                  # compile
-    t0 = @elapsed simulate(model; dt=0.004, nt=2, sources=src, backend, verbose=false)    # setup
-    t = @elapsed simulate(model; dt=0.004, nt, sources=src, backend, verbose=false)
+    simulate(model; dt=0.004, nt=2, sources=src, backend, absorber, verbose=false)        # compile
+    t0 = @elapsed simulate(model; dt=0.004, nt=2, sources=src, backend, absorber, verbose=false)    # setup
+    t = @elapsed simulate(model; dt=0.004, nt, sources=src, backend, absorber, verbose=false)
     loop = t - t0
     @printf("%-8s %-16s %6d %10.2f %14.1f\n", name, join(filter(>(1), n), "×"), nt, loop, prod(n) * nt / loop / 1e6)
 end

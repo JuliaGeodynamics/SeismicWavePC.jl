@@ -88,7 +88,8 @@ Keyword arguments
 - `sources`: `MomentTensorSource` or vector of them (see `DoubleCoupleSource`); `stf = :kupper` source time function (see `moment_rate`).
 - `stations = Station[]`; seismograms (velocity, displacement, stress, strain) are recorded every `record_every = 1` steps.
 - `wave = :psv`: `:psv` or `:sh`, for 2D models.
-- `na = 20`: thickness of the Cerjan absorbing layer (sides and bottom) in cells.
+- `absorber = :pml`: absorbing boundary at the sides and the bottom, `:pml` (perfectly matched layer) or `:cerjan` (sponge);
+  `na = 20` is its thickness in cells.
 - `fq_min = 0.05`, `fq_max = 5.0`, `fq_ref = 1.0`: frequency band [Hz] of constant Q, and reference frequency of the velocities.
 - `density_unit = :kg_m3`: unit of `rho`, or `:g_cm3` (as in OpenSWPC).
 - `snapshot_every = 0`: if > 0, write the velocity field every so many steps to ParaView files in `snapshot_dir = "snapshots"`.
@@ -107,7 +108,7 @@ end
 
 # Function barrier on the solver type: from here on the dimension N is known to the compiler.
 function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
-                  na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
+                  absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa MomentTensorSource ? [sources] : collect(MomentTensorSource, sources)
@@ -141,7 +142,8 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     # medium on this rank
     loc(A) = dev(FT.(A[R...]))
     col(A) = dev(A[Base.front(R)...])
-    sponge(a) = map(v -> dev(FT.(v[R[a]])), cerjan(g.n[a], g.d[a], na; top=a < N))
+    absorber in (:pml, :cerjan) || error("absorber must be :pml or :cerjan, got :$absorber")
+    sponge(a) = map(v -> dev(FT.(v[R[a]])), absorber === :cerjan ? cerjan(g.n[a], g.d[a], na; top=a < N) : (ones(g.n[a] + 2H), ones(g.n[a] + 2H)))
     (gx_c, gx_b), (gz_c, gz_b) = sponge(1), sponge(N)
     G = N == 3 ? (; gx_c, gx_b, gy_c=sponge(2)[1], gy_b=sponge(2)[2], gz_c, gz_b) : (; gx_c, gx_b, gz_c, gz_b)
     M = merge((; rho=loc(med.rho), lam=loc(med.lam), mu=loc(med.mu), taup=loc(med.taup), taus=loc(med.taus),
@@ -201,9 +203,13 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     end
     movie = (snapshot_every > 0 && me == 0 && callback === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     wall = time()
-    movie = timeloop!(F, M, Src, St, rec, acc, c, vc, FT(dt), kernels(mode), nl, nt, isempty(S), length(own), record_every,
-                      snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose && me == 0, parallel, nb, backend)
-    movie === nothing || movie_paraview(pvd=movie, Finalize=true)
+    # cell ranges (offset, size, zone): the whole model (Cerjan), or the interior and the PML zones
+    head = (F, M, Src, St, rec, acc, c, vc, FT(dt), kernels(mode))
+    tail = (nt, isempty(S), length(own), record_every, snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt,
+            verbose && me == 0, parallel, nb, backend)
+    movie_out = absorber === :cerjan ? timeloop!(head..., ((ntuple(_ -> H, N), nl .- 2H, nothing),), tail...) :
+                timeloop!(head..., pml_regions(Val(mode), g, na, dt, maximum(s -> 1 / s.trise, sources), off, nl, R, dev, backend, FT), tail...)
+    movie_out === nothing || movie_paraview(pvd=movie_out, Finalize=true)
     verbose && me == 0 && @printf("  finished in %.2f s\n", time() - wall)
 
     traces = zeros(nrec, 2nc + 2ns, length(stations))
@@ -230,9 +236,8 @@ velocities(F) = haskey(F, :Vx) ? (haskey(F, :Vy) ? (F.Vx, F.Vy, F.Vz) : (F.Vx, F
 stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, F.Sxz, F.Sxy) : (F.Sxx, F.Szz, F.Sxz)) : (F.Syz, F.Sxy)
 
 # Function barrier: everything below is concretely typed.
-function timeloop!(F, M, Src, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, record!), nl, nt, nosource, nown, record_every,
+function timeloop!(F, M, Src, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, record!), regions, nt, nosource, nown, record_every,
                    snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, backend)
-    ndr = nl .- 2H
     V, Σ = velocities(F), stresses(F)
     report = max(nt ÷ 10, 1)
     for it in 1:nt
@@ -247,10 +252,10 @@ function timeloop!(F, M, Src, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!,
                                                                pvd=movie, time=t, verbose=false)) : callback(data, t)
             end
         end
-        foreach_cell!(backend, stress!, (F, M, c, vc, dtT), ndr)
+        map(((lo, ndr, P),) -> foreach_cell!(backend, stress!, (F, M, c, vc, dtT, P), lo, ndr), regions)
         nosource || run_once!(backend, inject!, (F, Src, it))
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, Σ...))
-        foreach_cell!(backend, vel!, (F, M, c, dtT), ndr)
+        map(((lo, ndr, P),) -> foreach_cell!(backend, vel!, (F, M, c, dtT, P), lo, ndr), regions)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, V...))
         if verbose && it % report == 0
             KernelAbstractions.synchronize(backend)

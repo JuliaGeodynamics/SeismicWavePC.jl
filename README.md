@@ -7,7 +7,7 @@
 SeismicWavePC.jl is a Julia version of the finite-difference code [OpenSWPC](https://openswpc.github.io)
 (Maeda et al., 2017). It uses the same numerical method: a staggered grid that is 4th order in space and 2nd order in time,
 a generalized Zener body for constant Q, free surfaces and topography from an air layer, moment-tensor point sources and a
-Cerjan absorbing boundary. It reproduces OpenSWPC seismograms to single-precision round-off; see [Validation](#validation).
+perfectly matched layer (PML) or Cerjan absorbing boundary. It reproduces OpenSWPC seismograms to single-precision round-off; see [Validation](#validation).
 Models are [GeophysicalModelGenerator.jl](https://github.com/JuliaGeodynamics/GeophysicalModelGenerator.jl) (GMG) `CartData`
 objects, so any GMG model setup can be used directly.
 
@@ -125,6 +125,9 @@ record weaker S waves and a longer coda.*
 - **MPI:** start with `mpiexecjl -n 4 julia script.jl`.
   - Pass `nproc=(2, 2)` in 3D (subdomains in x and y) or `nproc=4` in 2D.
   - This works on CPUs and on CUDA or AMD GPUs, one GPU per process; the results are identical to a serial run.
+- **Absorbing boundary:** `absorber=:pml` (default; perfectly matched layer, as recommended for OpenSWPC) or `:cerjan` (sponge),
+  `na=20` cells thick at the sides and the bottom. The PML absorbs much better; it costs 15–100% more time, depending on how
+  much of the model lies in the absorbing layers.
 - **Snapshots:** `snapshot_every=100` writes the velocity field to `snapshot_dir` as a ParaView movie (`wavefield.pvd`).
   With `callback=(wavefield, t) -> ...` the wavefield (a `CartData`) is passed to your function instead, e.g. to plot it while the
   simulation runs.
@@ -159,11 +162,11 @@ t, v, header = read_sac("old_run/wav/swpc.psv.ST01.Vz.sac")   # e.g. to compare 
 The test suite compares seismograms (velocity, displacement, stress and strain) with the Fortran OpenSWPC code (`swpc_psv`,
 `swpc_sh`, `swpc_3d`; reference traces are in [`test/reference`](test/reference)):
 
-| Solver | Model | Max. difference to OpenSWPC |
+| Solver | Model | Max. difference to OpenSWPC (Cerjan / PML) |
 |---|---|---|
-| 2D P-SV | two layers, free surface, Q = 50 | 5 × 10⁻⁴ |
-| 2D SH | two layers, free surface, Q = 50 | 2 × 10⁻⁶ |
-| 3D | two layers, free surface with a topographic step, Q = 50 | 7 × 10⁻⁶ |
+| 2D P-SV | two layers, free surface, Q = 50 | 5 × 10⁻⁴ / 3 × 10⁻⁴ |
+| 2D SH | two layers, free surface, Q = 50 | 2 × 10⁻⁶ / 2 × 10⁻⁶ |
+| 3D | two layers, free surface with a topographic step, Q = 50 | 7 × 10⁻⁶ / 6 × 10⁻⁶ |
 
 The tests also check:
 - MPI runs with 4 processes against serial runs (identical);
@@ -173,8 +176,8 @@ The tests also check:
 ## Performance
 
 Seconds per simulation for the two examples, on an Apple M4 Max laptop (12 performance cores, 40-core GPU). These are
-wall-clock times of a whole run, including setup (and, for OpenSWPC, writing and reading its input files), and without
-snapshots. Each time is the better of two runs, with OpenSWPC and Julia runs alternating. The first run in a new Julia
+wall-clock times of a whole run, including setup (and, for OpenSWPC, writing and reading its input files), with the Cerjan
+absorber in both codes and without snapshots. Each time is the better of two runs, with OpenSWPC and Julia runs alternating. The first run in a new Julia
 session takes 4–10 s more for compilation.
 
 | Example | OpenSWPC, 1 core | OpenSWPC, MPI | Julia, 1 thread | Julia, MPI | Julia, 12 threads | Julia, Metal GPU |
@@ -185,7 +188,7 @@ session takes 4–10 s more for compilation.
 - On a single computer, Julia threads are faster than MPI with either code. MPI is meant for several GPUs or computers.
 - Julia's MPI runs pay a fixed ~0.2–0.5 s for setting up and closing the ImplicitGlobalGrid domain decomposition.
 
-Time loop only, in million cell updates per second (higher is better), on an Apple M4 Max laptop (12 performance cores, 40-core GPU).
+Time loop only, with the Cerjan absorber, in million cell updates per second (higher is better), on an Apple M4 Max laptop (12 performance cores, 40-core GPU).
 The model is a half-space with Q and a free surface. Both codes ran through their normal drivers; the times have setup subtracted
 and are the minimum of three runs. You can reproduce them with [`examples/benchmark.jl`](examples/benchmark.jl).
 
@@ -204,7 +207,6 @@ The laptop was also busy with other work, so single runs varied a lot; take the 
 
 ## Not (yet) supported
 
-- PML absorbing boundaries: only the Cerjan sponge so far; PML is planned.
 - From OpenSWPC: checkpoint/restart, plane-wave and body-force sources, reciprocal Green's functions, Earth flattening and the Munk
   ocean profile, the minimum velocity cut-off (`vcut`), netCDF snapshots.
 - OpenSWPC's random-medium generator; perturb the GMG model yourself instead.

@@ -1,0 +1,72 @@
+# Perfectly matched layer (OpenSWPC m_absorb_p): ADE CFS-PML (Zhang & Shen, 2010) at the sides and the bottom, `na` cells
+# thick. The interior and the PML zones are separate cell ranges; the kernels add the PML terms only in the zones.
+
+"""
+Damping coefficients `(g1, g2, g3, g4)` at distance `x` from the model edge `0` (model width `L`), for a PML of thickness `h`
+(OpenSWPC `damping_profile`; P velocity assumed 6 km/s, `fcut` the highest source frequency).
+"""
+function damping_profile(x, h, L, na, dt, fcut)
+    R0 = 10^(-(log10(na) - 1) / log10(2.0) - 3.0)           # reflection coefficient
+    d0 = -(1 / 2h) * 3 * 6.0 * log(R0)
+    xx = x <= h ? h - x : x >= L - h ? x - (L - h) : 0.0
+    d = d0 * (xx / h)^2
+    a = π * fcut * (1 - xx / h)
+    b = 1 + 6 * (xx / h)^3
+    q = 1 + dt / 2 * (a + d / b)
+    return ((1 + dt / 2 * a) / b / q, -1 / b / q, (1 - dt / 2 * (a + d / b)) / q, d / b / q)
+end
+
+"PML profiles at the cell centres and edges along an axis of `n` cells (padded by `H`), and the 2nd-order edge cells."
+function pml_axis(n, d, na, dt, fcut, ::Type{T}) where {T}
+    p(x) = T.(damping_profile(x, na * d, n * d, na, dt, fcut))
+    i = 1-H:n+H
+    return [p((i - 0.5) * d) for i in i], [p(i * d) for i in i], [i in (1, 2, n - 1, n) for i in i]
+end
+
+"""
+Cell ranges (global, physical) of the interior and of the PML zones: sides in x (and y) over the whole depth, bottom below
+the interior. As OpenSWPC, no PML at the top.
+"""
+function zones(n::NTuple{2,Int}, na)
+    x, z = n
+    inner = (na+1:x-na, 1:z-na)
+    return inner, ((1:na, 1:z), (x-na+1:x, 1:z), (na+1:x-na, z-na+1:z))
+end
+function zones(n::NTuple{3,Int}, na)
+    x, y, z = n
+    inner = (na+1:x-na, na+1:y-na, 1:z-na)
+    return inner, ((1:x, 1:na, 1:z), (1:x, y-na+1:y, 1:z), (1:na, na+1:y-na, 1:z), (x-na+1:x, na+1:y-na, 1:z),
+                   (na+1:x-na, na+1:y-na, z-na+1:z))
+end
+
+"Offset `lo` and size of the part of the global range `r` (per axis) on this rank (array indices `lo .+ (1:ndr)`)."
+function local_range(r, off, nl)
+    first_ = ntuple(a -> max(first(r[a]), off[a] + 1), length(r))
+    last_ = ntuple(a -> min(last(r[a]), off[a] + nl[a] - 2H), length(r))
+    return first_ .- off .+ (H - 1), max.(last_ .- first_ .+ 1, 0)
+end
+
+"PML memory variables (one per derivative and axis), made by `z()`."
+pml_memory(::Val{:psv}, z) = (; axSxx=z(), azSzz=z(), axSxz=z(), azSxz=z(), axVx=z(), azVz=z(), axVz=z(), azVx=z())
+pml_memory(::Val{:sh}, z) = (; azSyz=z(), axSxy=z(), axVy=z(), azVy=z())
+pml_memory(::Val{:p3d}, z) = (; axSxx=z(), aySxy=z(), azSxz=z(), axSxy=z(), aySyy=z(), azSyz=z(), axSxz=z(), aySyz=z(), azSzz=z(),
+                                axVx=z(), ayVy=z(), azVz=z(), axVy=z(), ayVx=z(), axVz=z(), azVx=z(), ayVz=z(), azVy=z())
+
+"""
+Cell ranges `(offset, size, zone)` of this rank for the PML: the interior (zone `nothing`) and the PML zones with their
+memory variables and damping profiles.
+"""
+function pml_regions(::Val{mode}, g::Grid{N}, na, dt, fcut, off, nl, R, dev, backend, ::Type{T}) where {mode,N,T}
+    prof = ntuple(a -> pml_axis(g.n[a], g.d[a], na, dt, fcut, T), Val(N))
+    loc(v, a) = dev(v[R[a]])
+    profiles = N == 3 ? (; gxc=loc(prof[1][1], 1), gxe=loc(prof[1][2], 1), gyc=loc(prof[2][1], 2), gye=loc(prof[2][2], 2),
+                           gzc=loc(prof[3][1], 3), gze=loc(prof[3][2], 3), ox=loc(prof[1][3], 1), oy=loc(prof[2][3], 2)) :
+                (; gxc=loc(prof[1][1], 1), gxe=loc(prof[1][2], 1), gzc=loc(prof[2][1], 2), gze=loc(prof[2][2], 2), ox=loc(prof[1][3], 1))
+    inner, boxes = zones(g.n, na)
+    pml = map(boxes) do b
+        lo, ndr = local_range(b, off, nl)
+        memory = pml_memory(Val(mode), () -> KernelAbstractions.zeros(backend, T, ndr...))
+        (lo, ndr, merge((; lo=CartesianIndex(lo)), profiles, memory))
+    end
+    return ((local_range(inner, off, nl)..., nothing), pml...)
+end
