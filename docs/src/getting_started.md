@@ -33,6 +33,8 @@ Seismograms: 9 station(s), 1500 samples, t = 0.0 … 5.996 s, components x, z
   final wavefield: CartData of size (400, 1, 201)
 ```
 
+![Model and seismograms](assets/getting_started.png)
+
 - `result["S1"]` returns the velocities of a station, `result.v[it, component, station]` all of them (`result.t` are the
   times), and `result.u`, `result.stress`, `result.strain` the displacement, stress and strain.
 - `result.wavefield` is the velocity field at the end, as a `CartData` (`write_paraview(result.wavefield, "final")`).
@@ -51,3 +53,8 @@ end
 simulate(model; dt=0.004, nt=1500, sources=source, stations, snapshot_every=20, callback=frame)
 save("waves.mp4", movie)
 ```
+
+![Waves below the hill](assets/getting_started.gif)
+
+*The vertical velocity over the model (here with the waves transparent where they are weak): P and S waves from the
+earthquake (star), reflected and converted at the base of the sediments and at the free surface, and scattered by the hill.*

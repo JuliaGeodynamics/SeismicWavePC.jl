@@ -6,11 +6,14 @@
 **Seismic wave propagation and full-waveform inversion (FWI) in 2D and 3D visco-elastic media, in pure Julia, on CPUs,
 GPUs and MPI clusters.**
 
-![Waves below an Unzen-like volcano](docs/src/assets/Unzen_3D.gif)
+![Waves through the magmatic system below Unzen](docs/src/assets/Unzen_2D_waves.gif)
 
-*A Mw 4 earthquake below an Unzen-like volcano. The magmatic system is a temperature field (a geotherm plus Gaussian
-anomalies) turned into velocities and melt with MAGEMin; orange marks partially molten rock
-([example](examples/MagmaThermoKinematics/Unzen_3D.jl)).*
+![Seismograms of the Unzen example](docs/src/assets/Unzen_2D_seismograms.png)
+
+*A Mw 4 earthquake below Unzen, through the temperature field of a
+[MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl) model with MAGEMin velocities (white lines:
+more than 10 % melt). Stations above the partially molten region (shaded) record weaker S waves and a longer coda
+([example](examples/MagmaThermoKinematics/Unzen_2D.jl)).*
 
 SeismicWavePC.jl simulates seismic waves through any model built with
 [GeophysicalModelGenerator.jl](https://github.com/JuliaGeodynamics/GeophysicalModelGenerator.jl) and computes exact misfit
@@ -29,16 +32,13 @@ gradients for full-waveform inversion. It started as a Julia port of [OpenSWPC](
   other Julia packages.
 - **Live output:** plot or film the waves while the simulation runs; SAC and netCDF files for OpenSWPC users.
 
-## 2D: Unzen from MagmaThermoKinematics.jl
+## 3D: magmatic system below an Unzen-like volcano
 
-![Waves through the magmatic system below Unzen](docs/src/assets/Unzen_2D_waves.gif)
+![Waves below an Unzen-like volcano](docs/src/assets/Unzen_3D.gif)
 
-![Seismograms of the Unzen example](docs/src/assets/Unzen_2D_seismograms.png)
-
-*A Mw 4 earthquake below Unzen, through the temperature field of a
-[MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl) model with MAGEMin velocities (white lines:
-more than 10 % melt). Stations above the partially molten region (shaded) record weaker S waves and a longer coda
-([example](examples/MagmaThermoKinematics/Unzen_2D.jl)).*
+*A Mw 4 earthquake below an Unzen-like volcano. The magmatic system is a temperature field (a geotherm plus Gaussian
+anomalies) turned into velocities and melt with MAGEMin; orange marks partially molten rock
+([example](examples/MagmaThermoKinematics/Unzen_3D.jl)).*
 
 ## Installation
 
