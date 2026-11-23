@@ -408,12 +408,23 @@ end
 workgroup(::NTuple{2}) = (32, 8)
 workgroup(::NTuple{3}) = (32, 8, 1)
 
+# Every task gets at least `MINWORK` cells: small loops (small models, thin PML zones) use few tasks, as waking many threads
+# (and waiting for the slowest, e.g. on a busy machine or on efficiency cores) costs more than their work.
+const MINWORK = (1 << 14, 1 << 11)                 # 2D, 3D (more work per cell)
+ntasks(ndr, maxtasks) = clamp(prod(ndr) ÷ MINWORK[length(ndr)-1], 1, min(Threads.nthreads(), maxtasks))
+
 function foreach_cell!(::CPU, f::F, args, lo, ndr::NTuple{2}) where {F}
-    Threads.@threads for k in 1:ndr[2]
+    nt = ntasks(ndr, ndr[2])
+    rows(t) = (t - 1) * ndr[2] ÷ nt + 1:t * ndr[2] ÷ nt
+    run(t) = for k in rows(t)
         @inbounds @simd ivdep for i in 1:ndr[1]
             f(args..., i + lo[1], k + lo[2])
         end
     end
+    nt == 1 ? run(1) : Threads.@threads :static for t in 1:nt
+        run(t)
+    end
+    return nothing
 end
 
 # Threads work on blocks of `JB` rows in y and `KB` in z, so the stencil neighbours in y and z stay in cache, and thin zones
@@ -421,14 +432,26 @@ end
 const JB, KB = 8, 16
 function foreach_cell!(::CPU, f::F, args, lo, ndr::NTuple{3}) where {F}
     nbj = cld(ndr[2], JB)
-    Threads.@threads :dynamic for b in 0:nbj*cld(ndr[3], KB)-1
-        jb, kb = b % nbj, b ÷ nbj
+    nb = nbj * cld(ndr[3], KB)
+    block(b) = (jb = b % nbj; kb = b ÷ nbj;
         for k in kb*KB+1:min((kb + 1) * KB, ndr[3]), j in jb*JB+1:min((jb + 1) * JB, ndr[2])
             @inbounds @simd ivdep for i in 1:ndr[1]
                 f(args..., i + lo[1], j + lo[2], k + lo[3])
             end
+        end)
+    nt = ntasks(ndr, nb)
+    if nt == 1
+        foreach(block, 0:nb-1)
+    elseif nt == Threads.nthreads()
+        Threads.@threads :dynamic for b in 0:nb-1
+            block(b)
+        end
+    else                                        # fewer tasks than threads: every task takes every nt-th block
+        @sync for t in 1:nt
+            Threads.@spawn foreach(block, t-1:nt:nb-1)
         end
     end
+    return nothing
 end
 
 "Apply `f(args..., n)` for `n = 1:count` (stations)."
