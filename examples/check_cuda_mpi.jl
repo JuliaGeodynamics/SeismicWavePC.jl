@@ -1,16 +1,16 @@
-# Checks of MPI on NVIDIA GPUs (one GPU per process): runs on 4 processes must equal the serial CPU run.
+# Checks of MPI on NVIDIA GPUs (one GPU per process): runs on n processes (2 or 4) must equal the serial CPU run.
 #
-#   mpiexecjl -n 4 julia --project=examples examples/check_cuda_mpi.jl
+#   mpiexecjl -n 2 julia --project=examples examples/check_cuda_mpi.jl
 #
 using MPI
 MPI.Init()
 using SeismicWavePC, GeophysicalModelGenerator, CUDA, Printf
 include(joinpath(@__DIR__, "..", "test", "setup.jl"))
 
-rank = MPI.Comm_rank(MPI.COMM_WORLD)
+rank, np = MPI.Comm_rank(MPI.COMM_WORLD), MPI.Comm_size(MPI.COMM_WORLD)
 reldiff(a, b) = maximum(abs, a .- b) / maximum(abs, a)
 ok = true
-for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
+for (mode, nproc) in ((:psv, np), (:p3d, np == 4 ? (2, 2) : (np, 1)))
     m = test_model(mode)
     kw = (; dt=DT, nt=200, sources=test_source(), stations=test_stations(mode), T=Float64, verbose=false)
     serial = simulate(m; kw...)                                                       # CPU, every process
