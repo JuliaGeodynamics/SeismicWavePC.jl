@@ -62,8 +62,9 @@ end
     @test sprint(show, f) == "ForceSource at (0.3, 0, -1.5) km, F = (2.000e+13, 0.000e+00, -1.000e+13) N, t0 = 0 s, trise = 0.3 s"
 end
 
-@testset "netCDF needs NCDatasets" begin
+@testset "optional packages" begin
     isdefined(Main, :NCDatasets) || @test_throws "NCDatasets" read_netcdf("model.nc")
+    isdefined(Main, :Enzyme) || @test_throws "Enzyme" misfit_gradient(test_model(:psv), nothing)
 end
 
 @testset "density units" begin

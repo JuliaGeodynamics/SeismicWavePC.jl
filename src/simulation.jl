@@ -114,7 +114,7 @@ end
 function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
                   absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
-                  snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
+                  snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave} ? [sources] : collect(sources)
     all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave}, sources) ||
@@ -225,6 +225,16 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
         @printf("  %d source(s) (%s), %d station(s), backend %s, %s, %d MPI rank(s)\n", nused,
                 isempty(forces) ? @sprintf("M0 = %.3e N m", M0) : @sprintf("%d moment tensor(s), %d force(s)", length(moments), length(forces)),
                 length(stations), backend isa CPU ? "CPU ($(Threads.nthreads()) threads)" : string(nameof(typeof(backend))), T, prod(dims))
+    end
+    # internal: another driver of the time loop (misfit_gradient) gets the whole setup
+    if driver !== nothing
+        parallel && error("gradients are computed on one process (nproc = 1)")
+        regions = absorber === :cerjan ? ((ntuple(_ -> H, N), nl .- 2H, nothing),) :
+                  pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT)
+        return driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode), regions, nt, nosource=isempty(S),
+                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
+                         components, med, m, g, na, fq_ref, rho_unit=density_scale(density_unit, maximum(model_arrays(model).rho)),
+                         mode, model, tbeg, dt, T=FT))
     end
     planes = snapshots === nothing ? nothing : setup_planes(snapshots, Val(mode), g, med, off, nl, dev, backend, FT, snapshot_dir, me)
     movie = (snapshot_every > 0 && me == 0 && callback === nothing && snapshots === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing

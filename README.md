@@ -131,6 +131,11 @@ record weaker S waves and a longer coda.*
 - **Absorbing boundary:** `absorber=:pml` (default; perfectly matched layer, as recommended for OpenSWPC) or `:cerjan` (sponge),
   `na=20` cells thick at the sides and the bottom. The PML absorbs much better; it costs 15–100% more time, depending on how
   much of the model lies in the absorbing layers.
+- **Gradients (for waveform inversion):** with `using Enzyme`, `J, grad = misfit_gradient(model, observed; dt, nt, sources, T=Float64)`
+  returns the least-squares misfit of the velocity seismograms and its exact gradient with respect to `rho`, `vp`, `vs`, `Qp`, `Qs`
+  (a `CartData`), by reverse-mode automatic differentiation of the time loop with checkpointing. Checked against finite
+  differences of whole simulations (2D, 3D, PML, Cerjan, forces, plane waves). CPU only so far, one process; a gradient takes about
+  20 (2D) to 50 (3D) times as long as the forward simulation.
 - **Random media:** `xi = random_medium(x, y, z; spectrum=:vonkarman, a=0.5, epsilon=0.05, kappa=0.3)` makes fluctuations with a
   Gaussian, exponential or von Kármán spectrum (anisotropic with `a=(ax, ay, az)`), and `perturb(model, xi)` applies them to any
   GMG model as OpenSWPC does (vp, vs × (1 + ξ), ρ × (1 + 0.8 ξ) in solid rock).
