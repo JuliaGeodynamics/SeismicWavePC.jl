@@ -135,7 +135,7 @@ logprior(prior, θ) = prior(θ)
 function data_misfit(prob::WaveformProblem, m)
     shots = prob.observed isa Seismograms ? ((prob.observed, prob.sources),) : zip(prob.observed, prob.sources)
     return sum(shots) do (obs, src)
-        r = simulate(m; prob.kwargs..., sources=src, stations=obs.stations, verbose=false)
+        r = simulate(m; Base.structdiff(prob.kwargs, NamedTuple{(:mute,)})..., sources=src, stations=obs.stations, verbose=false)
         first(prob.misfit(r.v, obs.v, r.t))
     end
 end

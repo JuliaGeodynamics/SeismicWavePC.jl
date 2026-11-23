@@ -1,6 +1,6 @@
 # Misfit gradients: adjoint-state method and automatic differentiation (Enzyme extension), against each other and against
 # finite differences of whole simulations
-using Enzyme
+using Enzyme, LinearAlgebra
 
 perturbed(m, field, I, d) = CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, NamedTuple{(field,)}(((A = copy(m.fields[field]); A[I] += d; A),))))
 observed(m, kw, mode) = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kw...,
@@ -90,4 +90,49 @@ end
     J1, g1 = misfit_gradient(m, obs1; kw..., sources=force)
     @test Js ≈ J + J1 && gs.fields.vp ≈ g.fields.vp .+ g1.fields.vp && length(sgs) == 2
     @test_throws ErrorException misfit_gradient(m, [obs, obs1]; kw..., sources=[src])
+end
+
+@testset "source time functions, covariance, muting" begin
+    m = test_model(:psv)
+    src = test_source()
+    kw = (; dt=DT, nt=150, T=Float64, sources=src, stations=test_stations(:psv), verbose=false)
+    # source time functions: any function, sampled values, Gaussians
+    r0 = simulate(m; kw..., stf=:kupper)
+    @test simulate(m; kw..., stf=(t, t0, tr) -> moment_rate(:kupper, t, t0, tr)).v == r0.v
+    ts = range(0, src.trise, length=2001)
+    sampled = SampledSTF(ts, [moment_rate(:kupper, t, 0.0, src.trise) for t in ts])
+    @test simulate(m; kw..., stf=sampled).v ≈ r0.v rtol = 1e-4
+    integral(stf) = sum(moment_rate(stf, t, 0.0, 0.3) for t in range(-1, 3, step=1e-4)) * 1e-4
+    @test integral(:gaussian) ≈ 1 rtol = 1e-6
+    @test abs(integral(:gaussian_derivative)) < 1e-8
+    @test_throws ErrorException SampledSTF([0.0, 1.0], [1.0])
+    # the gradient with respect to the source time function, chained to the samples of a SampledSTF
+    tq = collect(range(0, 0.4, length=21))
+    vals = [moment_rate(:kupper, t, 0.0, 0.3) for t in tq]
+    obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kw..., stf=SampledSTF(tq, vals))
+    J, g, sg = misfit_gradient(m, obs; dt=DT, nt=150, T=Float64, sources=src, stf=SampledSTF(tq, vals .* 1.1))
+    k = 8
+    weight(t) = (τ = t - src.t0; i = searchsortedlast(tq, τ); i == k ? 1 - (τ - tq[k]) / (tq[k+1] - tq[k]) : i == k - 1 ? (τ - tq[k-1]) / (tq[k] - tq[k-1]) : 0.0)
+    dJ = sum(sg[1].stf[n] * weight(sg[1].t[n]) for n in eachindex(sg[1].t))
+    misfit(v) = (r = simulate(m; kw..., stations=obs.stations, stf=SampledSTF(tq, v)); sum(abs2, r.v .- obs.v) / 2)
+    h = 1e-3
+    @test dJ ≈ (misfit(vals .* 1.1 .+ h .* (1:21 .== k)) - misfit(vals .* 1.1 .- h .* (1:21 .== k))) / 2h rtol = 1e-5
+    # L2 misfit with an inverse covariance matrix: identity = plain L2; derivative by finite differences
+    syn, o = randn(30, 2, 3), randn(30, 2, 3)
+    t = range(0, 1, length=30)
+    @test L2Misfit(invcov=Matrix(1.0I, 30, 30))(syn, o, t)[1] ≈ L2Misfit()(syn, o, t)[1]
+    A = randn(30, 30); C = A * A' / 30 + I
+    mis = L2Misfit(invcov=C, weights=[1.0, 2.0, 0.5], window=(0.2, 0.8))
+    Jc, adj = mis(syn, o, t)
+    e = zeros(size(syn)); e[12, 2, 3] = 1e-6
+    @test adj[12, 2, 3] ≈ (mis(syn .+ e, o, t)[1] - mis(syn .- e, o, t)[1]) / 2e-6 rtol = 1e-6
+    # muting: zero at the source and the stations, unchanged far from them
+    J1, g1 = misfit_gradient(m, obs; dt=DT, nt=150, T=Float64, sources=src, stf=SampledSTF(tq, vals .* 1.1))
+    _, g2 = misfit_gradient(m, obs; dt=DT, nt=150, T=Float64, sources=src, stf=SampledSTF(tq, vals .* 1.1), mute=(sources=1.0, stations=0.5))
+    near(px, pz) = argmin((m.x.val .- px) .^ 2 .+ (m.z.val .- pz) .^ 2)
+    @test abs(g2.fields.vs[near(src.x, src.z)]) < 0.05 * abs(g1.fields.vs[near(src.x, src.z)])   # cell ≈ 35 m from the source
+    st = obs.stations[1]
+    @test abs(g2.fields.vs[near(st.x, st.z)]) < 0.05 * abs(g1.fields.vs[near(st.x, st.z)]) + 1e-30
+    far = near(src.x + 2.5, src.z - 1.5)
+    @test g2.fields.vs[far] == g1.fields.vs[far]
 end

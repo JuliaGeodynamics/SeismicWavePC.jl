@@ -9,9 +9,12 @@ Misfit `J` between the velocity seismograms of a simulation and `observed` (whos
 respect to the model and the sources. With a vector of `observed` seismograms and a vector of `sources` (one entry per shot:
 a source or a vector of sources) the misfits and model gradients of all shots are summed.
 
-- `misfit`: [`L2Misfit`](@ref) (default: `J = ½ Σ (v - v_observed)²`, optionally with weights and time windows),
+- `misfit`: [`L2Misfit`](@ref) (default: `J = ½ Σ (v - v_observed)²`, optionally with weights, time windows and an inverse
+  covariance matrix),
   [`TravelTimeMisfit`](@ref) (cross-correlation time shifts), or any function `(syn, obs, t) -> (J, ∂J/∂syn)` of the
   synthetic and observed velocities `[it, component, station]` [m/s] and the sample times `t` [s].
+- `mute = (sources=r, stations=r)`: taper the model gradient to 0 at the sources and stations within the distance `r` [km]
+  (the gradient is large and of little use next to them).
 - `kwargs` are those of [`simulate`](@ref) (`dt`, `nt`, `stf`, `record_every`, `absorber`, `T`, `backend`, `nproc`, …) and
   must describe the simulation that `observed` is compared with.
 - `gradient`: a `CartData` on the grid of `model` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`: ∂J/∂ of the model field in
@@ -37,13 +40,36 @@ memory, and of the velocity fields of the steps in between, kept on the device),
 the reverse pass. With `nproc` (MPI, as in `simulate`) every process gets all results. Plane waves enter as a fixed initial
 wavefield (their dependence on the medium is not differentiated).
 """
-function misfit_gradient(model::CartData, observed::Seismograms; method=:adjoint, checkpoint_steps=nothing, misfit=L2Misfit(), kwargs...)
+function misfit_gradient(model::CartData, observed::Seismograms; method=:adjoint, checkpoint_steps=nothing, misfit=L2Misfit(),
+                         mute=nothing, kwargs...)
     bad = intersect(keys(kwargs), (:stations, :snapshots, :callback, :checkpoint, :restart, :driver))
     isempty(bad) || error("misfit_gradient does not take the keywords $(join(bad, ", "))")
     method in (:adjoint, :ad) || error("method must be :adjoint or :ad, got :$method")
     K = checkpoint_steps === nothing ? nothing : Int(checkpoint_steps)
     driver = method === :adjoint ? AdjointDriver(observed, K, misfit) : ad_driver(observed, K, misfit)
-    return simulate(model; kwargs..., stations=observed.stations, verbose=false, driver)
+    res = simulate(model; kwargs..., stations=observed.stations, verbose=false, driver)
+    mute === nothing || mute_gradient!(res[2], mute, kwargs[:sources], observed.stations)
+    return res
+end
+
+"""
+Multiply the model gradient `g` by a taper that is 0 at the sources and stations and rises as (1 - cos(π d/r))/2 to 1 at the
+distance `r` [km] (`mute = (sources=r, stations=r)`; either may be left out).
+"""
+function mute_gradient!(g::CartData, mute, sources, stations)
+    keys(mute) ⊆ (:sources, :stations) || error("mute = (sources=r, stations=r) [km], got $mute")
+    srcs = [s for s in (sources isa AbstractVector ? sources : [sources]) if s isa Union{MomentTensorSource,ForceSource}]
+    points = [[(s.x, s.y, s.z, mute.sources) for s in srcs if haskey(mute, :sources)];
+              [(s.x, s.y, s.z, mute.stations) for s in stations if haskey(mute, :stations)]]
+    is3d = size(g)[2] > 1
+    X, Y, Z = g.x.val, g.y.val, g.z.val
+    taper = ones(size(X))
+    for (px, py, pz, r) in points, I in eachindex(X)
+        d = sqrt((X[I] - px)^2 + (is3d ? (Y[I] - py)^2 : 0.0) + (Z[I] - pz)^2)
+        d < r && (taper[I] *= (1 - cos(π * d / r)) / 2)
+    end
+    foreach(f -> f .*= taper, g.fields)
+    return g
 end
 
 function misfit_gradient(model::CartData, observed::AbstractVector{Seismograms}; sources::AbstractVector, kwargs...)

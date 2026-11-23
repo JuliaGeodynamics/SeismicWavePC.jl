@@ -9,9 +9,18 @@
 - `PlaneWave(:p or :s; depth, length, strike, dip, rake)`: an incoming plane wave (OpenSWPC's `pw_mode`).
 
 All can be combined in a vector, and all accept `(lon, lat, z, proj::ProjectionPoint)` instead of `x, y, z`. Sources outside
-the model or in the air are ignored with a warning (as in OpenSWPC, e.g. parts of a finite fault). The source time function
-is set with `stf = :kupper` (default), `:boxcar`, `:triangle`, `:herrmann`, `:cosine`, `:texp` or `:ricker` (see
-[`moment_rate`](@ref)).
+the model or in the air are ignored with a warning (as in OpenSWPC, e.g. parts of a finite fault).
+
+## Source time functions
+
+The keyword `stf` of [`simulate`](@ref) sets the moment-rate function (or force history) of all sources, with their origin
+time `t0` and rise time `trise` (see [`moment_rate`](@ref)):
+- `:kupper` (default), `:boxcar`, `:triangle`, `:herrmann`, `:cosine`, `:texp` (as in OpenSWPC), `:ricker`, `:gaussian`,
+  `:gaussian_derivative`;
+- any function `stf(t, t0, trise)`;
+- sampled values: `stf = SampledSTF(t, values)` (times after `t0`, linearly interpolated), e.g. a source time function
+  from a source inversion, or one that is being inverted for: [`misfit_gradient`](@ref) returns the gradient with respect
+  to it.
 
 ## Stations
 

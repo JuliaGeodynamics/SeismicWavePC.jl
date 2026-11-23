@@ -47,6 +47,7 @@ MPI = "0.20"
 NCDatasets = "0.12, 0.13, 0.14"
 DelimitedFiles = "1"
 JET = "0.9, 0.10, 0.11, 0.12, 0.13"
+LinearAlgebra = "1"
 Test = "1"
 Printf = "1"
 Serialization = "1"
@@ -58,9 +59,10 @@ ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
 DelimitedFiles = "8bb1440f-4735-579b-a4ab-409b98df4dab"
 JET = "c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
 NCDatasets = "85f8d34a-cbdd-5861-8df4-14fed0d494ab"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["ChainRulesCore", "DelimitedFiles", "Enzyme", "ForwardDiff", "JET", "LogDensityProblems", "NCDatasets", "Test"]
+test = ["ChainRulesCore", "DelimitedFiles", "Enzyme", "ForwardDiff", "JET", "LinearAlgebra", "LogDensityProblems", "NCDatasets", "Test"]

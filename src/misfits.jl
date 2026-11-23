@@ -2,16 +2,19 @@
 # `syn[it, component, station]`, `obs` (same size) [m/s] and the sample times `t` [s]. Any function of this form can be used.
 
 """
-    L2Misfit(; weights=1, window=nothing)
+    L2Misfit(; weights=1, window=nothing, invcov=nothing)
 
 Least-squares misfit `J = ½ Σ w (v - v_observed)²` of the samples in the time window.
 - `weights`: a number, one per station (vector), per component and station (matrix `nc × nstations`) or per sample (array
   like the seismograms).
 - `window`: `nothing` (all samples), `(t1, t2)` [s] for all stations, or a vector of `(t1, t2)`, one per station.
+- `invcov`: an inverse covariance matrix of the samples of a trace (`nt × nt`, symmetric), for correlated noise:
+  `J = ½ Σ_traces w rᵀ invcov r` with the residuals `r` in the window (`weights` per trace then).
 """
-Base.@kwdef struct L2Misfit{W,T}
+Base.@kwdef struct L2Misfit{W,T,C}
     weights::W = 1.0
     window::T = nothing
+    invcov::C = nothing
 end
 
 """
@@ -42,9 +45,24 @@ window_mask(w::AbstractVector, t, ns) = (length(w) == ns || error("window: one (
                                          reshape(reduce(hcat, [Float64.(wi[1] .<= t .<= wi[2]) for wi in w]), length(t), 1, ns))
 
 function (m::L2Misfit)(syn, obs, t)
-    w = expand_weights(m.weights, size(syn)) .* window_mask(m.window, t, size(syn, 3))
+    mask = window_mask(m.window, t, size(syn, 3))
     r = syn .- obs
-    return sum(w .* r .^ 2) / 2, w .* r
+    if m.invcov === nothing
+        w = expand_weights(m.weights, size(syn)) .* mask
+        return sum(w .* r .^ 2) / 2, w .* r
+    end
+    C = m.invcov
+    size(C) == (size(syn, 1), size(syn, 1)) || error("invcov must be $(size(syn, 1)) × $(size(syn, 1)) (samples of a trace)")
+    m.weights isa AbstractArray{<:Any,3} && error("L2Misfit with invcov: weights per trace (number, vector or matrix)")
+    w = expand_weights(m.weights, size(syn))
+    J, adj = 0.0, zero(syn)
+    for n in axes(syn, 3), c in axes(syn, 2)
+        rm = r[:, c, n] .* mask[:, 1, n]
+        Cr = C * rm
+        J += w[1, c, n] * sum(rm .* Cr) / 2
+        adj[:, c, n] .= w[1, c, n] .* mask[:, 1, n] .* Cr
+    end
+    return J, adj
 end
 
 function (m::TravelTimeMisfit)(syn, obs, t)

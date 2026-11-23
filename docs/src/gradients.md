@@ -11,17 +11,20 @@ sgrad[1].M, sgrad[1].t0                                                 # ∂J/�
 - **Misfit:** `misfit=L2Misfit()` (default) is `J = ½ Σ (v - v_observed)²` over all samples, components and stations of
   `observed`, whose stations are used.
   - `L2Misfit(weights=w, window=(t1, t2))` weights stations, components or samples and selects time windows (one for all, or
-    one per station).
+    one per station); `L2Misfit(invcov=C⁻¹)` uses an inverse covariance matrix of the samples of a trace (correlated noise).
   - `TravelTimeMisfit(; weights, window)` uses the cross-correlation time shifts of the traces.
   - Any function `(syn, obs, t) -> (J, ∂J/∂syn)` of the synthetic and observed velocities `[it, component, station]` works too.
 - **Several shots:** `misfit_gradient(model, [obs1, obs2, …]; sources=[src1, src2, …], …)` sums the misfits and model
   gradients of the shots; each shot can have several sources.
-- **Model gradient:** `grad` is a `CartData` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`.
+- **Model gradient:** `grad` is a `CartData` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`. With
+  `mute=(sources=r, stations=r)` it is tapered to zero within the distance `r` [km] of the sources and stations, where it is
+  large and of little use.
 - **Source gradients:** `sgrad` has one entry per source (per shot: a vector):
   - moment tensors: `M` (∂J/∂ of the six components `M0 .* M`) and `M0`;
   - forces: `F` (∂J/∂ of `fx, fy, fz`);
   - both: the location `x, y, z`, `t0`, `trise`, and `stf`, the gradient with respect to the source time function at the
-    times `t`.
+    times `t`. With a sampled source time function (`stf = SampledSTF(t, values)`), the gradient with respect to its samples
+    follows from `stf` by the chain rule of the linear interpolation.
 
   The location gradient comes from the spatial derivative of the adjoint field, because the source is injected at a single
   cell; all other source gradients are exact.

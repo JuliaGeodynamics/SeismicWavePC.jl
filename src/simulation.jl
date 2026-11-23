@@ -85,7 +85,7 @@ Cells with `vs = 0` and `vp > 0` are water. A `CartData` of size `(nx, 1, nz)` g
 
 Keyword arguments
 - `dt`, `nt`: time step [s] and number of steps; `tbeg = 0.0` is the start time.
-- `sources`: `MomentTensorSource`, `ForceSource`, `PlaneWave` or a vector of them (see `DoubleCoupleSource`); `stf = :kupper` source time function (see `moment_rate`).
+- `sources`: `MomentTensorSource`, `ForceSource`, `PlaneWave` or a vector of them (see `DoubleCoupleSource`); `stf = :kupper` source time function: a name or any function (see `moment_rate`, `SampledSTF`).
 - `stations = Station[]`; seismograms (velocity, displacement, stress, strain) are recorded every `record_every = 1` steps.
 - `wave = :psv`: `:psv` or `:sh`, for 2D models.
 - `absorber = :pml`: absorbing boundary at the sides and the bottom, `:pml` (perfectly matched layer) or `:cerjan` (sponge);

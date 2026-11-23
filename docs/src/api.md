@@ -15,6 +15,7 @@ DoubleCoupleSource
 ForceSource
 PlaneWave
 moment_rate
+SampledSTF
 Snapshots
 ```
 

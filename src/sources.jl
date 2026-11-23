@@ -84,14 +84,25 @@ end
 seismic_moment(Mw) = 10^(1.5Mw + 9.05)
 
 """
-    moment_rate(stf::Symbol, t, t0, tr)
+    moment_rate(stf, t, t0, tr)
 
-Normalized moment-rate function (integral 1). `stf` is one of
-`:kupper` (default in OpenSWPC), `:boxcar`, `:triangle`, `:herrmann`, `:cosine`, `:texp`, or `:ricker`: a Ricker wavelet with the
-peak frequency `1/tr`, centred at `t0 + tr` (integral 0, peak value `1/tr`; common in benchmarks).
+Normalized moment-rate function (source time function, integral 1) at time `t` of a source with origin time `t0` and rise
+time `tr`. `stf` is
+- one of `:kupper` (default in OpenSWPC), `:boxcar`, `:triangle`, `:herrmann`, `:cosine`, `:texp`;
+- `:ricker`: a Ricker wavelet with the peak frequency `1/tr`, centred at `t0 + tr` (integral 0, peak value `1/tr`; common in
+  benchmarks);
+- `:gaussian`: a Gaussian centred at `t0 + tr` with width `tr` (`√π/tr · exp(-(π(t - t0 - tr)/tr)²)`, integral 1), and
+  `:gaussian_derivative`: its time derivative times `tr/π` (integral 0);
+- any function `stf(t, t0, tr)`, e.g. a [`SampledSTF`](@ref) of sampled values.
 """
+moment_rate(stf, t, t0, tr) = stf(t, t0, tr)
 function moment_rate(stf::Symbol, t, t0, tr)
     τ = t - t0
+    if stf === :gaussian || stf === :gaussian_derivative
+        u = π * (τ - tr) / tr
+        g = sqrt(π) / tr * exp(-u^2)
+        return stf === :gaussian ? g : -2u * g
+    end
     if stf === :texp
         return τ >= 0 ? (2π)^2 * τ / tr^2 * exp(-2π * τ / tr) : 0.0
     end
@@ -110,4 +121,29 @@ function moment_rate(stf::Symbol, t, t0, tr)
         return 16 * (tr - τ)^2 / tr^3
     end
     error("unknown source time function :$stf")
+end
+
+"""
+    SampledSTF(t, values)
+
+Source time function (moment rate, or force history) given by `values` at the times `t` [s] after the origin time `t0` of
+the source, linearly interpolated, zero outside `t`. For moment tensors and forces the integral should be 1 (`M0` and the
+force set the size). Use it as `simulate(...; stf=SampledSTF(t, values))`; the gradient of the misfit with respect to it is
+`source_gradients[n].stf` of [`misfit_gradient`](@ref).
+"""
+struct SampledSTF
+    t::Vector{Float64}
+    values::Vector{Float64}
+    function SampledSTF(t, values)
+        length(t) == length(values) >= 2 || error("SampledSTF: t and values must have the same length (at least 2)")
+        issorted(t) || error("SampledSTF: the times must be increasing")
+        return new(collect(Float64, t), collect(Float64, values))
+    end
+end
+function (s::SampledSTF)(t, t0, tr)
+    τ = t - t0
+    (τ < s.t[1] || τ > s.t[end]) && return 0.0
+    i = clamp(searchsortedlast(s.t, τ), 1, length(s.t) - 1)
+    a = (τ - s.t[i]) / (s.t[i+1] - s.t[i])
+    return (1 - a) * s.values[i] + a * s.values[i+1]
 end
