@@ -51,6 +51,17 @@ end
     @test_throws ErrorException simulate(model; dt=DT, nt=10, sources=s, nproc=3, verbose=false)       # 200 cells / 3
 end
 
+@testset "forces and moment tensors together" begin
+    s = test_source()
+    f = ForceSource(0.3, 0.0, -1.5; fx=2e13, fz=-1e13, trise=0.3)
+    kw = (; dt=DT, nt=300, stations=test_stations(:psv), verbose=false)
+    a, b, ab = simulate(test_model(:psv); sources=s, kw...), simulate(test_model(:psv); sources=f, kw...),
+               simulate(test_model(:psv); sources=[s, f], kw...)
+    @test maximum(abs, ab.v .- a.v .- b.v) < 1e-5 * maximum(abs, ab.v)       # superposition
+    @test_throws ErrorException simulate(test_model(:psv); sources=[1.0], kw...)
+    @test sprint(show, f) == "ForceSource at (0.3, 0, -1.5) km, F = (2.000e+13, 0.000e+00, -1.000e+13) N, t0 = 0 s, trise = 0.3 s"
+end
+
 @testset "density units" begin
     m = test_model(:sh)
     kw = (; dt=DT, nt=50, sources=test_source(), wave=:sh, verbose=false)

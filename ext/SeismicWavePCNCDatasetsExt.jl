@@ -32,7 +32,8 @@ function SeismicWavePC.read_netcdf(file)
 end
 
 # OpenSWPC "grd" model: layer boundaries [m depth] on longitude-latitude grids (GMT netCDF: x, y, z variables)
-function SeismicWavePC.read_grd(listfile, x, y, z, proj::ProjectionPoint; dir=dirname(listfile), ocean=true)
+function SeismicWavePC.read_grd(listfile, x, y, z, proj::ProjectionPoint; dir=dirname(listfile), ocean=true, vcut=0.0, munk=false,
+                                earth_flattening=false)
     rows = [split(l) for l in eachline(listfile) if !isempty(strip(l)) && !startswith(strip(l), '#')]
     isempty(rows) && error("no layers in $listfile")
     X, Y, Z = xyz_grid(x, y, z)
@@ -42,15 +43,18 @@ function SeismicWavePC.read_grd(listfile, x, y, z, proj::ProjectionPoint; dir=di
         NCDataset(joinpath(dir, r[1])) do ds
             v = collect(keys(ds))
             glon, glat, d = Float64.(ds[v[1]][:]), Float64.(ds[v[2]][:]), Float64.(Array(ds[v[3]])) ./ 1000
-            bilinear.(Ref(glon), Ref(glat), Ref(d), lon, lat)
+            t = bilinear.(Ref(glon), Ref(glat), Ref(d), lon, lat)
+            earth_flattening ? SeismicWavePC.flatten_depth.(t) : t
         end
     end
     top = accumulate((a, b) -> max.(a, b), top)       # a layer starts not above the previous one
-    props = [Tuple(parse.(Float64, r[2:6])) for r in rows]
+    props = SeismicWavePC.apply_vcut!([parse.(Float64, r[2:6]) for r in rows], vcut, 1)
     P = map(CartesianIndices(X)) do I
         depth = -Z[I]
+        cv = earth_flattening ? exp(depth / SeismicWavePC.R_EARTH) : 1.0
         l = findlast(t -> t[I[1], I[2]] <= depth, top)
-        l === nothing ? (depth < 0 || !ocean ? SeismicWavePC.AIR : SeismicWavePC.SEAWATER) : props[l]
+        p = l !== nothing ? props[l] : depth < 0 || !ocean ? SeismicWavePC.AIR : SeismicWavePC.seawater(depth, munk)
+        (p[1], cv * p[2], cv * p[3], p[4], p[5])
     end
     f(n) = getindex.(P, n)
     return CartData(X, Y, Z, (; rho=1000 .* f(1), vp=f(2), vs=f(3), Qp=f(4), Qs=f(5)))

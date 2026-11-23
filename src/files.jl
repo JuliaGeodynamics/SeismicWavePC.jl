@@ -61,7 +61,7 @@ function write_sac_file(file, data, t, st, kcmpnm, kevnm, idep, (cmpaz, cmpinc),
         f[51] = hypot(st.x - source.x, st.y - source.y)                         # dist [km]
         f[52] = mod(atand(st.x - source.x, st.y - source.y), 360)                # az (from north)
         f[53] = mod(f[52] + 180, 360)                                            # baz
-        f[41:46] .= source.M0 .* collect(source.M)                               # user0-5
+        source isa MomentTensorSource && (f[41:46] .= source.M0 .* collect(source.M))  # user0-5
     end
     i[7], i[10], i[16], i[17], i[18] = 6, length(data), 1, idep, 9   # nvhdr, npts, iftype = time series, idep, iztype = b
     i[31], i[34] = 1, 0                                              # leven, lcalda

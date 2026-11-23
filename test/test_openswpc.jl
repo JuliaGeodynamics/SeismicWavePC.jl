@@ -26,3 +26,13 @@ end
                  verbose=false, absorber=:pml)
     @test maximum(abs, reshape(r.v, NT, :) .- ref) / maximum(abs, ref) < 1e-3
 end
+
+@testset "agrees with OpenSWPC, body force: $mode" for (mode, file) in ((:psv, "psv"), (:sh, "sh"), (:p3d, "3d"))
+    ref = readdlm(joinpath(@__DIR__, "reference", "$(file)_force.txt"), comments=true)
+    s = test_source()
+    f = ForceSource(s.x, s.y, s.z; fx=1.0e15, fy=0.5e15, fz=-2.0e15, t0=s.t0, trise=s.trise)      # OpenSWPC: z down
+    r = simulate(test_model(mode); dt=DT, nt=NT, sources=f, stations=test_stations(mode), wave=mode === :p3d ? :psv : mode,
+                 verbose=false, absorber=:cerjan)
+    v = reshape(r.v[1:4:end, :, :], size(ref, 1), :)
+    @test maximum(abs, v .- ref) / maximum(abs, ref) < 1e-3
+end

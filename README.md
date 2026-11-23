@@ -116,8 +116,10 @@ record weaker S waves and a longer coda.*
   - Air has `vp = vs = 0`; the free surface and topography follow from it.
   - Water has `vs = 0`.
   - A `CartData` of size `(nx, 1, nz)` is a 2D model: P-SV by default, `wave=:sh` for SH.
-- **Sources:** `DoubleCoupleSource(x, y, z; Mw, strike, dip, rake)` or a general `MomentTensorSource`.
-  - Both accept `(lon, lat, z, proj::ProjectionPoint)` instead of `x, y, z`.
+- **Sources:** `DoubleCoupleSource(x, y, z; Mw, strike, dip, rake)`, a general `MomentTensorSource`, or a point force
+  `ForceSource(x, y, z; fx, fy, fz)` [N] (OpenSWPC's body force); forces and moment tensors can be combined.
+  - All accept `(lon, lat, z, proj::ProjectionPoint)` instead of `x, y, z`.
+  - Sources outside the model or in the air are ignored with a warning (as in OpenSWPC, e.g. parts of a finite fault).
   - Source time functions are set with `stf=:kupper | :boxcar | :triangle | :herrmann | :cosine | :texp`.
 - **Stations:** `Station(name, x, y, z)`, `Station(name, lon, lat, z, proj)`, with `surface=true` to place a station on the free surface.
   Velocity, displacement, stress and strain are recorded (`result.v`, `result.u`, `result.stress`, `result.strain`).
@@ -139,7 +141,8 @@ Velocity models and seismograms in the file formats of OpenSWPC can still be use
 ```julia
 using SeismicWavePC, NCDatasets
 model  = read_netcdf("velocity_model.nc")      # netCDF model of OpenSWPC (vmodel_type = "velm", OpenSWPC.write_netcdf)
-model  = read_lhm("layers.dat", x, y, z)       # or a layered model (lhm; read_lgm for lgm) on the grid x, y, z [km]
+model  = read_lhm("layers.dat", x, y, z)       # or a layered model (lhm; read_lgm for lgm) on the grid x, y, z [km];
+                                               # options vcut, munk (sea water) and earth_flattening, as in OpenSWPC
 model  = read_grd("grd.lst", x, y, z, proj)    # or layer boundaries from GMT grids (grd), placed with a GMG ProjectionPoint
 result = simulate(model; dt, nt, sources=source, stations)
 write_sac(result, "out/wav"; title="swpc", source, quantities=(:v, :u, :stress, :strain))   # swpc.psv.<station>.Vx.sac, …
@@ -150,7 +153,8 @@ t, v, header = read_sac("old_run/wav/swpc.psv.ST01.Vz.sac")   # e.g. to compare 
 |---|---|
 | input file (`dt`, `nt`, `na`, `fq_min`, `stftype`, …) | keyword arguments of `simulate` (`stf` for `stftype`) |
 | velocity model (`vmodel_type`) | any GMG `CartData`; `read_netcdf` (`velm`), `read_lhm` (`lhm`), `read_lgm` (`lgm`), `read_grd` (`grd`); `velm` and `grd` need `using NCDatasets` |
-| source and station files | `DoubleCoupleSource`, `MomentTensorSource`, `Station` (in x, y or longitude, latitude) |
+| source and station files | `DoubleCoupleSource`, `MomentTensorSource`, `ForceSource` (`bf_mode`), `Station` (in x, y or longitude, latitude) |
+| `vcut`, `munk_profile`, `earth_flattening` | keywords of `read_lhm`, `read_lgm`, `read_grd`; `flatten_earth(model)` for any model, `flatten_depth` for sources |
 | seismograms (`sw_wav_v`, `_u`, `_stress`, `_strain`) | always recorded: `result.v` [m/s], `result.u` [m], `result.stress` [Pa], `result.strain` |
 | SAC files in `odir/wav` | `write_sac(result, dir; quantities)`: same file names and units (nm/s, nm, Pa), z positive up |
 | snapshots (netCDF) | ParaView movie (`snapshot_every`) or your own plots (`callback`) |
@@ -207,8 +211,7 @@ The laptop was also busy with other work, so single runs varied a lot; take the 
 
 ## Not (yet) supported
 
-- From OpenSWPC: checkpoint/restart, plane-wave and body-force sources, reciprocal Green's functions, Earth flattening and the Munk
-  ocean profile, the minimum velocity cut-off (`vcut`), netCDF snapshots.
+- From OpenSWPC: checkpoint/restart, plane-wave sources, reciprocal Green's functions, netCDF snapshots.
 - OpenSWPC's random-medium generator; perturb the GMG model yourself instead.
 - Near vertical topography steps, the 2D results differ by 7–28% from the `swpc_psv`/`swpc_sh` binaries. They agree to 10⁻⁶ for flat
   surfaces, and for the same step in 3D, so the difference appears to lie in the 2D Fortran codes.

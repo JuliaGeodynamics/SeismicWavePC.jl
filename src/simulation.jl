@@ -85,7 +85,7 @@ Cells with `vs = 0` and `vp > 0` are water. A `CartData` of size `(nx, 1, nz)` g
 
 Keyword arguments
 - `dt`, `nt`: time step [s] and number of steps; `tbeg = 0.0` is the start time.
-- `sources`: `MomentTensorSource` or vector of them (see `DoubleCoupleSource`); `stf = :kupper` source time function (see `moment_rate`).
+- `sources`: `MomentTensorSource`, `ForceSource` or a vector of them (see `DoubleCoupleSource`); `stf = :kupper` source time function (see `moment_rate`).
 - `stations = Station[]`; seismograms (velocity, displacement, stress, strain) are recorded every `record_every = 1` steps.
 - `wave = :psv`: `:psv` or `:sh`, for 2D models.
 - `absorber = :pml`: absorbing boundary at the sides and the bottom, `:pml` (perfectly matched layer) or `:cerjan` (sponge);
@@ -111,7 +111,8 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
                   absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
     N = mode === :p3d ? 3 : 2
-    sources = sources isa MomentTensorSource ? [sources] : collect(MomentTensorSource, sources)
+    sources = sources isa Union{MomentTensorSource,ForceSource} ? [sources] : collect(sources)
+    all(s -> s isa Union{MomentTensorSource,ForceSource}, sources) || error("sources must be MomentTensorSource or ForceSource")
     stations = collect(Station, stations)
     isempty(sources) && error("at least one source is required")
     m = model_arrays(model)
@@ -152,21 +153,25 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     vc = memory_coefficients(med.ts, dt, FT)
     ijk = N == 3 ? (:i, :j, :k) : (:i, :k)
 
-    # sources: stress glut at the cell containing the source (normalized by the total moment, as in OpenSWPC)
+    # sources: moment tensors as stress glut at the cell of the source, forces on the velocities around it, normalized by
+    # the total moment and force (forces carry a factor 10³ for the units, as in OpenSWPC)
     position(x, y, z) = N == 3 ? (cell_index(g, 1, x), cell_index(g, 2, y), cell_index(g, 3, -z)) : (cell_index(g, 1, x), cell_index(g, 2, -z))
     inside(I) = all(H + 1 .<= I .<= g.n .+ H)
     active(s) = (I = position(s.x, s.y, s.z); inside(I) && !(med.mu[I...] == 0 && med.lam[I...] == 0))
-    nsources = length(sources)
-    sources = filter(active, sources)          # as OpenSWPC, ignore sources outside the model (e.g. parts of a finite fault)
-    isempty(sources) && error("all sources are outside the model or in the air (vp = vs = 0)")
-    length(sources) < nsources && me == 0 &&
-        @warn "$(nsources - length(sources)) of $nsources sources are outside the model or in the air (vp = vs = 0) and are ignored"
-    M0 = sum(s.M0 for s in sources)
-    S = filter(s -> all(2 .<= position(s.x, s.y, s.z) .- off .<= nl), sources)   # the stencil reaches i-1, k-1; ghost copies are overwritten by the halo update
-    Is = [position(s.x, s.y, s.z) .- off for s in S]
-    Src = merge(NamedTuple{ijk}(ntuple(a -> dev(Int32[p[a] for p in Is]), N)),
-                (; M=dev(FT[s.M[m] * (m in (4, 5) ? -1 : 1) for s in S, m in 1:6]),     # z up -> z down
-                   s=dev(FT[s.M0 / M0 * moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt / prod(g.d) for s in S, it in 1:nt])))
+    moments = filter(active, MomentTensorSource[s for s in sources if s isa MomentTensorSource])   # as OpenSWPC, ignore sources
+    forces = filter(active, ForceSource[s for s in sources if s isa ForceSource])                  # outside the model
+    nused = length(moments) + length(forces)
+    nused == 0 && error("all sources are outside the model or in the air (vp = vs = 0)")
+    nused < length(sources) && me == 0 &&
+        @warn "$(length(sources) - nused) of $(length(sources)) sources are outside the model or in the air (vp = vs = 0) and are ignored"
+    M0 = sum((s.M0 for s in moments); init=0.0) + 1e3 * sum((sqrt(sum(abs2, s.F)) for s in forces); init=0.0)
+    here(s) = all(2 .<= position(s.x, s.y, s.z) .- off .<= nl)    # the stencil reaches i-1, k-1; ghost copies are overwritten by the halo update
+    S, FS = filter(here, moments), filter(here, forces)
+    Src = merge(source_cells(S, position, off, dev, Val(N)), (; M=dev(FT[s.M[m] * (m in (4, 5) ? -1 : 1) for s in S, m in 1:6]),     # z up -> z down
+                             s=dev(FT[s.M0 / M0 * moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt / prod(g.d) for s in S, it in 1:nt])))
+    FSrc = merge(source_cells(FS, position, off, dev, Val(N)), (; F=dev(FT[s.F[m] * (m == 3 ? -1 : 1) for s in FS, m in 1:3]),
+                               s=dev(FT[1e3 / M0 * moment_rate(stf, tbeg + it * dt, s.t0, s.trise) * dt / prod(g.d) for s in FS, it in 1:nt])))
+    fcut = max(maximum((1 / s.trise for s in moments); init=0.0), maximum((1 / s.trise for s in forces); init=0.0))
 
     # stations owned by this rank
     function station_cell(st)
@@ -198,17 +203,18 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     if verbose && me == 0
         @printf("SeismicWavePC: %s, %s cells (dx = %s km), %d steps of %g s, Courant number %.3f\n", mode === :p3d ? "3D" : uppercase(string(mode)),
                 join(g.n, "×"), join(round.(g.d, sigdigits=4), ", "), nt, dt, courant)
-        @printf("  %d source(s) (M0 = %.3e N m), %d station(s), backend %s, %s, %d MPI rank(s)\n", length(sources), M0,
+        @printf("  %d source(s) (%s), %d station(s), backend %s, %s, %d MPI rank(s)\n", nused,
+                isempty(forces) ? @sprintf("M0 = %.3e N m", M0) : @sprintf("%d moment tensor(s), %d force(s)", length(moments), length(forces)),
                 length(stations), backend isa CPU ? "CPU ($(Threads.nthreads()) threads)" : string(nameof(typeof(backend))), T, prod(dims))
     end
     movie = (snapshot_every > 0 && me == 0 && callback === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     wall = time()
     # cell ranges (offset, size, zone): the whole model (Cerjan), or the interior and the PML zones
-    head = (F, M, Src, St, rec, acc, c, vc, FT(dt), kernels(mode))
-    tail = (nt, isempty(S), length(own), record_every, snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt,
+    head = (F, M, Src, FSrc, St, rec, acc, c, vc, FT(dt), kernels(mode))
+    tail = (nt, isempty(S), isempty(FS), length(own), record_every, snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt,
             verbose && me == 0, parallel, nb, backend)
     movie_out = absorber === :cerjan ? timeloop!(head..., ((ntuple(_ -> H, N), nl .- 2H, nothing),), tail...) :
-                timeloop!(head..., pml_regions(Val(mode), g, na, dt, maximum(s -> 1 / s.trise, sources), off, nl, R, dev, backend, FT), tail...)
+                timeloop!(head..., pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT), tail...)
     movie_out === nothing || movie_paraview(pvd=movie_out, Finalize=true)
     verbose && me == 0 && @printf("  finished in %.2f s\n", time() - wall)
 
@@ -221,6 +227,12 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
                        part(2nc+1:2nc+ns, 1e6), part(2nc+ns+1:2nc+2ns, 1e-3), stations, components, tensor_components, wavefield)
 end
 
+"Cell indices (local) of the sources `S` as a `NamedTuple` `(i, [j,] k)` of device vectors."
+function source_cells(S, position, off, dev, ::Val{N}) where {N}
+    Is = [position(s.x, s.y, s.z) .- off for s in S]
+    return NamedTuple{N == 3 ? (:i, :j, :k) : (:i, :k)}(ntuple(a -> dev(Int32[p[a] for p in Is]), Val(N)))
+end
+
 "Factor from `unit` to g/cm³; `rho_max` guards against densities given in the other unit."
 function density_scale(unit, rho_max)
     unit === :kg_m3 || unit === :g_cm3 || error("density_unit must be :kg_m3 or :g_cm3, got :$unit")
@@ -229,14 +241,15 @@ function density_scale(unit, rho_max)
     return unit === :kg_m3 ? 1000.0 : 1.0
 end
 
-kernels(mode) = mode === :psv ? (vel_psv!, stress_psv!, inject_psv!, record_psv!) :
-                mode === :sh ? (vel_sh!, stress_sh!, inject_sh!, record_sh!) : (vel_3d!, stress_3d!, inject_3d!, record_3d!)
+kernels(mode) = mode === :psv ? (vel_psv!, stress_psv!, inject_psv!, force_psv!, record_psv!) :
+                mode === :sh ? (vel_sh!, stress_sh!, inject_sh!, force_sh!, record_sh!) :
+                (vel_3d!, stress_3d!, inject_3d!, force_3d!, record_3d!)
 
 velocities(F) = haskey(F, :Vx) ? (haskey(F, :Vy) ? (F.Vx, F.Vy, F.Vz) : (F.Vx, F.Vz)) : (F.Vy,)
 stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, F.Sxz, F.Sxy) : (F.Sxx, F.Szz, F.Sxz)) : (F.Syz, F.Sxy)
 
 # Function barrier: everything below is concretely typed.
-function timeloop!(F, M, Src, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, record!), regions, nt, nosource, nown, record_every,
+function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, force!, record!), regions, nt, nosource, noforce, nown, record_every,
                    snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, backend)
     V, Σ = velocities(F), stresses(F)
     report = max(nt ÷ 10, 1)
@@ -256,6 +269,7 @@ function timeloop!(F, M, Src, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!,
         nosource || run_once!(backend, inject!, (F, Src, it))
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, Σ...))
         map(((lo, ndr, P),) -> foreach_cell!(backend, vel!, (F, M, c, dtT, P), lo, ndr), regions)
+        noforce || run_once!(backend, force!, (F, M, FSrc, it))
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, V...))
         if verbose && it % report == 0
             KernelAbstractions.synchronize(backend)

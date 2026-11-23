@@ -65,6 +65,13 @@ end
     @test at(m, :vp, -1.0) == 0 && at(m, :rho, -1.0) == 1.0           # air above sea level
     @test at(m, :vp, 0.5) == 1.5 && at(m, :vs, 0.5) == 0 && at(m, :rho, 0.5) == 1000   # sea water above the first layer
     @test at(m, :vp, 1.0) == 4.0 && at(m, :Qs, 2.5) == 50 && at(m, :vs, 3.0) == 3.5 && at(m, :rho, 5.0) == 3000
+    @test at(read_lhm(file, x, 0.0, z; vcut=2.5), :vs, 1.5) == 3.5               # the first layer is slower than vcut
+    @test at(read_lhm(file, x, 0.0, z; munk=true), :vp, 0.5) ≈ 1.5 * (1 + 0.00737 * (2(500 - 1300) / 1300 - 1 + exp(-2(500 - 1300) / 1300)))
+    deep = read_lhm(file, x, 0.0, range(-1000, 0, length=11); earth_flattening=true)
+    zs = SeismicWavePC.R_EARTH * (1 - exp(-1000 / SeismicWavePC.R_EARTH))       # spherical depth of the flat depth 1000 km
+    @test deep.fields.vp[1, 1, 1] ≈ 6.0 * exp(1000 / SeismicWavePC.R_EARTH) && flatten_depth(zs) ≈ 1000
+    flat = flatten_earth(read_lhm(file, x, 0.0, range(-1000, 0, length=1001)))
+    @test flat.fields.vp[1, 1, 1] ≈ 6.0 * exp(1000 / SeismicWavePC.R_EARTH) && flat.fields.rho[1, 1, 1] == 3000
     g = read_lgm(file, x, 0.0, z)
     @test at(g, :vp, 2.0) ≈ 5.0 && at(g, :rho, 2.5) ≈ 2750 && at(g, :vp, 5.0) == 6.0   # linear between the layer tops
     src = DoubleCoupleSource(0.0, 0, -4; Mw=1, strike=0, dip=45, rake=0)

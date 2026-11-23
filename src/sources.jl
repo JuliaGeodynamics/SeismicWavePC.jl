@@ -25,6 +25,29 @@ function Base.show(io::IO, s::MomentTensorSource)
     @printf(io, "  M (xx, yy, zz, yz, xz, xy) = (%.3f, %.3f, %.3f, %.3f, %.3f, %.3f)", s.M...)
 end
 
+"""
+    ForceSource(x, y, z; fx=0.0, fy=0.0, fz=0.0, t0=0.0, trise=1.0)
+    ForceSource(lon, lat, z, proj::ProjectionPoint; kwargs...)
+
+Point force (the body-force source of OpenSWPC, `bf_mode`) at model coordinates [km] or at a geographic location.
+`fx, fy, fz` [N] point east, north and up; the force history is the source time function (`stf`, unit area) times the force.
+Forces and moment tensor sources can be used together.
+"""
+struct ForceSource
+    x::Float64
+    y::Float64
+    z::Float64
+    F::NTuple{3,Float64}
+    t0::Float64
+    trise::Float64
+end
+ForceSource(x, y, z; fx=0.0, fy=0.0, fz=0.0, t0=0.0, trise=1.0) = ForceSource(x, y, z, Float64.((fx, fy, fz)), t0, trise)
+ForceSource(lon, lat, z, proj::ProjectionPoint; kwargs...) = ForceSource(project(lon, lat, z, proj)...; kwargs...)
+
+function Base.show(io::IO, s::ForceSource)
+    @printf(io, "ForceSource at (%g, %g, %g) km, F = (%.3e, %.3e, %.3e) N, t0 = %g s, trise = %g s", s.x, s.y, s.z, s.F..., s.t0, s.trise)
+end
+
 "Model coordinates [km] of a geographic point, using the projection of the model."
 function project(lon, lat, z, proj::ProjectionPoint)
     A(v) = fill(Float64(v), 2, 1, 1)    # two copies: GeophysicalModelGenerator 0.10 fails on single-point UTMData

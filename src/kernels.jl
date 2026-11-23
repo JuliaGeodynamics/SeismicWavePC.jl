@@ -95,6 +95,16 @@ Base.@propagate_inbounds function inject_psv!(F, S, it)
     end
 end
 
+# body forces (OpenSWPC source__bodyforce), added to the velocities after their update
+Base.@propagate_inbounds function force_psv!(F, M, S, it)
+    for n in 1:length(S.i)
+        i, k, s = S.i[n], S.k[n], S.s[n, it]
+        b = s / M.rho[i, k] / 2
+        F.Vx[i, k] += S.F[n, 1] * b; F.Vx[i-1, k] += S.F[n, 1] * b
+        F.Vz[i, k] += S.F[n, 3] * b; F.Vz[i, k-1] += S.F[n, 3] * b
+    end
+end
+
 
 # ------------------------------------------------------------------ SH (x, z), out-of-plane y
 
@@ -133,6 +143,13 @@ Base.@propagate_inbounds function inject_sh!(F, S, it)
         i, k, s = S.i[n], S.k[n], S.s[n, it]
         F.Sxy[i, k] -= S.M[n, 6] * s / 2; F.Sxy[i-1, k] -= S.M[n, 6] * s / 2
         F.Syz[i, k] -= S.M[n, 4] * s / 2; F.Syz[i, k-1] -= S.M[n, 4] * s / 2
+    end
+end
+
+Base.@propagate_inbounds function force_sh!(F, M, S, it)
+    for n in 1:length(S.i)
+        i, k = S.i[n], S.k[n]
+        F.Vy[i, k] += S.F[n, 2] * S.s[n, it] / M.rho[i, k]
     end
 end
 
@@ -214,6 +231,17 @@ Base.@propagate_inbounds function inject_3d!(F, S, it)
         F.Sxz[i, j, k] -= q; F.Sxz[i, j, k-1] -= q; F.Sxz[i-1, j, k] -= q; F.Sxz[i-1, j, k-1] -= q
         q = S.M[n, 6] * s / 4
         F.Sxy[i, j, k] -= q; F.Sxy[i, j-1, k] -= q; F.Sxy[i-1, j, k] -= q; F.Sxy[i-1, j-1, k] -= q
+    end
+end
+
+Base.@propagate_inbounds function force_3d!(F, M, S, it)
+    ρ = M.rho
+    for n in 1:length(S.i)
+        i, j, k, s = S.i[n], S.j[n], S.k[n], S.s[n, it] / 2
+        r = ρ[i, j, k]
+        F.Vx[i, j, k] += 2 / (r + ρ[i+1, j, k]) * S.F[n, 1] * s; F.Vx[i-1, j, k] += 2 / (r + ρ[i-1, j, k]) * S.F[n, 1] * s
+        F.Vy[i, j, k] += 2 / (r + ρ[i, j+1, k]) * S.F[n, 2] * s; F.Vy[i, j-1, k] += 2 / (r + ρ[i, j-1, k]) * S.F[n, 2] * s
+        F.Vz[i, j, k] += 2 / (r + ρ[i, j, k+1]) * S.F[n, 3] * s; F.Vz[i, j, k-1] += 2 / (r + ρ[i, j, k-1]) * S.F[n, 3] * s
     end
 end
 

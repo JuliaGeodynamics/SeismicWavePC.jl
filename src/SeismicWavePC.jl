@@ -22,7 +22,7 @@ include("simulation.jl")
 include("files.jl")
 include("layered.jl")
 
-export MomentTensorSource, DoubleCoupleSource, Station, Seismograms, simulate, moment_rate, CPU
-export read_netcdf, write_sac, read_sac, read_lhm, read_lgm, read_grd
+export MomentTensorSource, DoubleCoupleSource, ForceSource, Station, Seismograms, simulate, moment_rate, CPU
+export read_netcdf, write_sac, read_sac, read_lhm, read_lgm, read_grd, flatten_earth, flatten_depth
 
 end
