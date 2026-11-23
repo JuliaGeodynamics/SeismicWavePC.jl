@@ -186,16 +186,26 @@ The tests also check:
 ## Performance
 
 Seconds per simulation for the two examples, on an Apple M4 Max laptop (12 performance cores, 40-core GPU). These are
-wall-clock times of a whole run, including setup (and, for OpenSWPC, writing and reading its input files), with the Cerjan
-absorber in both codes and without snapshots. Each time is the better of two runs, with OpenSWPC and Julia runs alternating. The first run in a new Julia
-session takes 4–10 s more for compilation.
+wall-clock times of a whole run, including setup (and, for OpenSWPC, writing and reading its input files), without snapshots,
+with the same absorbing boundary in both codes. Each time is the better of two runs, with OpenSWPC and Julia runs alternating.
+The first run in a new Julia session takes 4–10 s more for compilation.
+
+With the PML (the default of both codes):
 
 | Example | OpenSWPC, 1 core | OpenSWPC, MPI | Julia, 1 thread | Julia, MPI | Julia, 12 threads | Julia, Metal GPU |
 |---|---:|---:|---:|---:|---:|---:|
-| [2D P-SV hill](examples/2D_PSV_hill.jl): 600 × 281 cells, 3000 steps | 6.8 s | 1.8 s (4 ranks) | 3.7 s | 1.5 s (4 ranks) | 1.0 s | 0.16 s |
-| [3D volcano](examples/3D_volcano.jl): 160 × 160 × 126 cells, 1000 steps | 86 s | 17 s (8 ranks) | 68 s | 18 s (8 ranks) | 12 s | 2.9 s |
+| [2D P-SV hill](examples/2D_PSV_hill.jl): 600 × 281 cells, 3000 steps | 6.2 s | 1.7 s (4 ranks) | 4.4 s | 1.9 s (4 ranks) | 1.2 s | 0.28 s |
+| [3D volcano](examples/3D_volcano.jl): 160 × 160 × 126 cells, 1000 steps | 109 s | 18 s (8 ranks) | 91 s | 22 s (8 ranks) | 14 s | 4.4 s |
 
-- On a single computer, Julia threads are faster than MPI with either code. MPI is meant for several GPUs or computers.
+With the Cerjan sponge (`absorber=:cerjan`):
+
+| Example | OpenSWPC, 1 core | OpenSWPC, MPI | Julia, 1 thread | Julia, MPI | Julia, 12 threads | Julia, Metal GPU |
+|---|---:|---:|---:|---:|---:|---:|
+| 2D P-SV hill | 6.8 s | 1.8 s (4 ranks) | 3.7 s | 1.5 s (4 ranks) | 1.0 s | 0.16 s |
+| 3D volcano | 86 s | 17 s (8 ranks) | 68 s | 18 s (8 ranks) | 12 s | 2.9 s |
+
+- On a single computer, Julia threads are faster than MPI with either code. MPI is meant for several GPUs or computers; with
+  the same number of MPI ranks, OpenSWPC is somewhat faster with the PML.
 - Julia's MPI runs pay a fixed ~0.2–0.5 s for setting up and closing the ImplicitGlobalGrid domain decomposition.
 
 Time loop only, with the Cerjan absorber, in million cell updates per second (higher is better), on an Apple M4 Max laptop (12 performance cores, 40-core GPU).
