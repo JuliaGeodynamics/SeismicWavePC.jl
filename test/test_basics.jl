@@ -140,3 +140,30 @@ end
     @test basename(files[1]) == "swpc__00000001__R__z__mxx__.sac" && basename(files[end]) == "swpc__00000001__R__z__fz___.sac"
     @test_throws ErrorException reciprocal_green(model, rcv, [Station("P", p...)]; component=:w, dt=DT, nt=10, verbose=false)
 end
+
+@testset "random media" begin
+    x, z = range(0, step=0.05, length=256), range(0, step=0.05, length=256)
+    acf(A, l, dim) = (B = dim == 1 ? A[1:end-l, 1, :] .* A[1+l:end, 1, :] : A[:, 1, 1:end-l] .* A[:, 1, 1+l:end];
+                      sum(B) / length(B) / (sum(abs2, A) / length(A)))
+    xi = random_medium(x, 0.0, z; spectrum=:gaussian, a=(0.5, 1.0), epsilon=0.05, seed=1)
+    @test size(xi) == (256, 1, 256) && sqrt(sum(abs2, xi) / length(xi)) ≈ 0.05 && abs(sum(xi)) / length(xi) < 1e-12
+    @test acf(xi, 10, 1) ≈ exp(-1) atol = 0.08                                               # Gaussian ACF exp(-r²/a²)
+    @test acf(xi, 20, 2) ≈ exp(-1) atol = 0.08                                               # anisotropic: az = 2 ax
+    e = random_medium(x, 0.0, z; spectrum=:exponential, a=0.5, epsilon=0.05, seed=1)
+    @test acf(e, 10, 1) ≈ exp(-1) atol = 0.08                                                # exponential ACF exp(-r/a)
+    @test acf(e, 20, 1) ≈ exp(-2) atol = 0.08
+    @test random_medium(x, 0.0, z; a=0.5, epsilon=0.05, seed=3) == random_medium(x, 0.0, z; a=0.5, epsilon=0.05, seed=3)
+    @test size(random_medium(1:10, 1:8, 1:6; a=1, epsilon=0.1, seed=1)) == (10, 8, 6)
+    @test_throws ErrorException random_medium(x, 0.0, z; spectrum=:pink, a=1, epsilon=0.1)
+
+    m = test_model(:psv)
+    xi = random_medium(m.x.val[:, 1, 1], 0.0, m.z.val[1, 1, :]; a=0.3, epsilon=0.05, seed=2)
+    p = perturb(m, xi)
+    solid = m.fields.vs .> 0
+    @test p.fields.vp[solid] ≈ m.fields.vp[solid] .* (1 .+ xi[solid]) && p.fields.vp[.!solid] == m.fields.vp[.!solid]
+    @test p.fields.rho[solid] ≈ m.fields.rho[solid] .* (1 .+ 0.8 .* xi[solid]) && haskey(p.fields, :Qp)
+    small = reshape(collect(1.0:6.0) ./ 100, 2, 1, 3)                     # repeated periodically from the top
+    q = perturb(m, small)
+    @test q.fields.vs[3, 1, end-5] ≈ m.fields.vs[3, 1, end-5] * (1 + small[1, 1, 3 - mod1(6, 3) + 1])
+    @test simulate(p; dt=DT, nt=50, sources=test_source(), verbose=false) isa Seismograms
+end

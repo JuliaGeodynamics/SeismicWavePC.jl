@@ -114,4 +114,13 @@ function SeismicWavePC.snapshot_peaks(file, (V, Hz, A))
     return nothing
 end
 
+# Random medium of OpenSWPC's gen_rmed2d / gen_rmed3d: dimensions x, (y,) z (z = depth), variable "random media"
+function SeismicWavePC.read_random_medium(file)
+    NCDataset(file) do ds
+        A = Float64.(Array(ds["random media"]))
+        A = ndims(A) == 2 ? reshape(A, size(A, 1), 1, size(A, 2)) : A
+        return reverse(A, dims=3)                                  # z up
+    end
+end
+
 end

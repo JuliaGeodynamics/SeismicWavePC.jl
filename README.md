@@ -131,6 +131,9 @@ record weaker S waves and a longer coda.*
 - **Absorbing boundary:** `absorber=:pml` (default; perfectly matched layer, as recommended for OpenSWPC) or `:cerjan` (sponge),
   `na=20` cells thick at the sides and the bottom. The PML absorbs much better; it costs 15–100% more time, depending on how
   much of the model lies in the absorbing layers.
+- **Random media:** `xi = random_medium(x, y, z; spectrum=:vonkarman, a=0.5, epsilon=0.05, kappa=0.3)` makes fluctuations with a
+  Gaussian, exponential or von Kármán spectrum (anisotropic with `a=(ax, ay, az)`), and `perturb(model, xi)` applies them to any
+  GMG model as OpenSWPC does (vp, vs × (1 + ξ), ρ × (1 + 0.8 ξ) in solid rock).
 - **Reciprocal Green's functions:** `reciprocal_green(model, receiver, points; component=:z)` puts a unit force at the receiver
   and records the displacement gradients at many `points` (OpenSWPC's `green_mode`); `seismogram(green, n, source)` then gives the
   receiver seismogram for a source at any of the points, without a simulation per source.
@@ -163,6 +166,7 @@ t, v, header = read_sac("old_run/wav/swpc.psv.ST01.Vz.sac")   # e.g. to compare 
 | source and station files | `DoubleCoupleSource`, `MomentTensorSource`, `ForceSource` (`bf_mode`), `PlaneWave` (`pw_mode`), `Station` (in x, y or longitude, latitude) |
 | `green_mode` (reciprocal Green's functions) | `reciprocal_green(model, receiver, points; component)`, `seismogram(green, n, source)`, `write_sac(green, dir)` |
 | netCDF in general | optional: NCDatasets is only loaded with `using NCDatasets` (package extension) |
+| random media (`gen_rmed3d`, `gen_rmed2d`, `*_rmed` models) | `perturb(model, random_medium(x, y, z; spectrum, a, epsilon, kappa))`; `read_random_medium(file)` for existing files |
 | `vcut`, `munk_profile`, `earth_flattening` | keywords of `read_lhm`, `read_lgm`, `read_grd`; `flatten_earth(model)` for any model, `flatten_depth` for sources |
 | seismograms (`sw_wav_v`, `_u`, `_stress`, `_strain`) | always recorded: `result.v` [m/s], `result.u` [m], `result.stress` [Pa], `result.strain` |
 | SAC files in `odir/wav` | `write_sac(result, dir; quantities)`: same file names and units (nm/s, nm, Pa), z positive up |
@@ -228,13 +232,14 @@ and are the minimum of three runs. You can reproduce them with [`examples/benchm
 
 The laptop was also busy with other work, so single runs varied a lot; take the numbers as indicative.
 
-## Not (yet) supported
+## Differences to OpenSWPC
+
+All features of OpenSWPC are available. Differences:
 
 - Plane waves agree with `swpc_3d` to 10⁻⁵. `swpc_psv` and `swpc_sh` give 1–5% different plane waves (even at vertical incidence),
   while the 2D initial wavefield here equals the analytic formula and uses the same code as 3D; the difference appears to lie in the
   2D Fortran codes. OpenSWPC's 3D P-wave formula for `sxy` has `sd·cd·sf` where `sd²·sf·cf` is correct (only for inclined waves);
   the correct form is used here.
-- OpenSWPC's random-medium generator; perturb the GMG model yourself instead.
 - Near vertical topography steps, the 2D results differ by 7–28% from the `swpc_psv`/`swpc_sh` binaries. They agree to 10⁻⁶ for flat
   surfaces, and for the same step in 3D, so the difference appears to lie in the 2D Fortran codes.
 

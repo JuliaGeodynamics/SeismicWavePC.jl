@@ -128,3 +128,15 @@ end
                                          snapshot_every=10, snapshot_dir=dir, snapshots=Snapshots(xz=true, quantities=(:ps,)))
     @test_throws ErrorException Snapshots(xy=0.0, quantities=(:energy,))
 end
+
+@testset "random medium file (OpenSWPC gen_rmed)" begin
+    file = joinpath(mktempdir(), "rmed.nc")
+    A = reshape(Float32.(1:24), 2, 3, 4)                                  # x, y, z (z = depth, index 1 at the top)
+    NCDataset(file, "c") do ds
+        defDim(ds, "x", 2); defDim(ds, "y", 3); defDim(ds, "z", 4)
+        defVar(ds, "x", Float32[0, 1], ("x",)); defVar(ds, "y", Float32[0, 1, 2], ("y",)); defVar(ds, "z", Float32[0, 1, 2, 3], ("z",))
+        defVar(ds, "random media", A, ("x", "y", "z"))
+    end
+    xi = read_random_medium(file)
+    @test size(xi) == (2, 3, 4) && xi[:, :, end] == A[:, :, 1]                # top of the file = top of the model
+end
