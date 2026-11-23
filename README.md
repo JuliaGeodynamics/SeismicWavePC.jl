@@ -104,6 +104,11 @@ julia -t auto --project=examples/MagmaThermoKinematics examples/MagmaThermoKinem
 *Top: S-wave velocity from MAGEMin for the temperature field of MTK (black: molten, white lines: more than 10 % melt).
 Bottom: vertical velocity of a Mw 4 earthquake (star), recorded by seismometers just below the surface (triangles).*
 
+![Seismograms of the Unzen example](docs/src/assets/Unzen_2D_seismograms.png)
+
+*Vertical velocity at the seismometers (left) and peak velocities (right). Stations above the partially molten region (shaded)
+record weaker S waves and a longer coda.*
+
 ## Usage
 
 - **Model:** a regular GMG `CartData` with fields `rho` [kg/m³] and `vp`, `vs` [km/s]; `Qp`, `Qs` are optional (`density_unit=:g_cm3` for densities in g/cm³, as in OpenSWPC)
@@ -123,7 +128,29 @@ Bottom: vertical velocity of a Mw 4 earthquake (star), recorded by seismometers 
   With `callback=(wavefield, t) -> ...` the wavefield (a `CartData`) is passed to your function instead, e.g. to plot it while the
   simulation runs.
 
-## Validation
+## Coming from OpenSWPC
+
+Velocity models and seismograms in the file formats of OpenSWPC can still be used:
+
+```julia
+using SeismicWavePC, NCDatasets
+model  = read_netcdf("velocity_model.nc")     # netCDF model of OpenSWPC (vmodel_type = "velm", OpenSWPC.write_netcdf)
+result = simulate(model; dt, nt, sources=source, stations)
+write_sac(result, "out/wav"; title="swpc", source)           # out/wav/swpc.psv.<station>.Vx.sac, ... in nm/s
+t, v, header = read_sac("old_run/wav/swpc.psv.ST01.Vz.sac")  # e.g. to compare with an earlier OpenSWPC run
+```
+
+| OpenSWPC | SeismicWavePC.jl |
+|---|---|
+| input file (`dt`, `nt`, `na`, `fq_min`, `stftype`, …) | keyword arguments of `simulate` (`stf` for `stftype`) |
+| velocity model (`vmodel_type`) | any GMG `CartData`, or `read_netcdf` for a `velm` netCDF file (needs `using NCDatasets`) |
+| source and station files | `DoubleCoupleSource`, `MomentTensorSource`, `Station` (in x, y or longitude, latitude) |
+| SAC files in `odir/wav` | `write_sac(result, dir)`: same file names, nm/s, `Vz` positive up |
+| snapshots (netCDF) | ParaView movie (`snapshot_every`) or your own plots (`callback`) |
+| x north, y east, z down | x east, y north, z up (as in GMG) |
+| density in g/cm³ | kg/m³ (`density_unit=:g_cm3` for g/cm³) |
+
+
 
 The test suite compares seismograms with the Fortran OpenSWPC code (`swpc_psv`, `swpc_sh`, `swpc_3d`; reference traces are in
 [`test/reference`](test/reference)):
@@ -140,6 +167,19 @@ The tests also check:
 - type stability with [JET.jl](https://github.com/aviatesk/JET.jl).
 
 ## Performance
+
+Seconds per simulation for the two examples, on an Apple M4 Max laptop (12 performance cores, 40-core GPU). These are
+wall-clock times of a whole run, including setup (and, for OpenSWPC, writing and reading its input files), and without
+snapshots. Each time is the better of two runs, with OpenSWPC and Julia runs alternating. The first run in a new Julia
+session takes 4–10 s more for compilation.
+
+| Example | OpenSWPC, 1 core | OpenSWPC, MPI | Julia, 1 thread | Julia, MPI | Julia, 12 threads | Julia, Metal GPU |
+|---|---:|---:|---:|---:|---:|---:|
+| [2D P-SV hill](examples/2D_PSV_hill.jl): 600 × 281 cells, 3000 steps | 6.8 s | 1.8 s (4 ranks) | 3.7 s | 1.5 s (4 ranks) | 1.0 s | 0.16 s |
+| [3D volcano](examples/3D_volcano.jl): 160 × 160 × 126 cells, 1000 steps | 86 s | 17 s (8 ranks) | 68 s | 18 s (8 ranks) | 12 s | 2.9 s |
+
+- On a single computer, Julia threads are faster than MPI with either code. MPI is meant for several GPUs or computers.
+- Julia's MPI runs pay a fixed ~0.2–0.5 s for setting up and closing the ImplicitGlobalGrid domain decomposition.
 
 Time loop only, in million cell updates per second (higher is better), on an Apple M4 Max laptop (12 performance cores, 40-core GPU).
 The model is a half-space with Q and a free surface. Both codes ran through their normal drivers; the times have setup subtracted
@@ -161,7 +201,8 @@ The laptop was also busy with other work, so single runs varied a lot; take the 
 ## Not (yet) supported
 
 - PML absorbing boundaries: only the Cerjan sponge so far; PML is planned.
-- From OpenSWPC: checkpoint/restart, plane-wave and body-force sources, reciprocal Green's functions, Earth flattening and the Munk ocean profile.
+- From OpenSWPC: checkpoint/restart, plane-wave and body-force sources, reciprocal Green's functions, Earth flattening and the Munk ocean profile;
+  the layered (`lhm`, `grd`) model files (build such models with GMG instead); displacement, stress and strain seismograms; netCDF snapshots.
 - OpenSWPC's random-medium generator; perturb the GMG model yourself instead.
 - Near vertical topography steps, the 2D results differ by 7–28% from the `swpc_psv`/`swpc_sh` binaries. They agree to 10⁻⁶ for flat
   surfaces, and for the same step in 3D, so the difference appears to lie in the 2D Fortran codes.

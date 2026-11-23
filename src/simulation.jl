@@ -143,15 +143,16 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     ijk = N == 3 ? (:i, :j, :k) : (:i, :k)
 
     # sources: stress glut at the cell containing the source (normalized by the total moment, as in OpenSWPC)
-    M0 = sum(s.M0 for s in sources)
     position(x, y, z) = N == 3 ? (cell_index(g, 1, x), cell_index(g, 2, y), cell_index(g, 3, -z)) : (cell_index(g, 1, x), cell_index(g, 2, -z))
     inside(I) = all(H + 1 .<= I .<= g.n .+ H)
-    S = filter(sources) do s
-        I = position(s.x, s.y, s.z)
-        inside(I) || error("source at ($(s.x), $(s.y), $(s.z)) is outside the model")
-        med.mu[I...] == 0 && med.lam[I...] == 0 && error("source at ($(s.x), $(s.y), $(s.z)) is in the air (vp = vs = 0)")
-        all(2 .<= I .- off .<= nl)       # the stencil reaches i-1, k-1; ghost copies are overwritten by the halo update
-    end
+    active(s) = (I = position(s.x, s.y, s.z); inside(I) && !(med.mu[I...] == 0 && med.lam[I...] == 0))
+    nsources = length(sources)
+    sources = filter(active, sources)          # as OpenSWPC, ignore sources outside the model (e.g. parts of a finite fault)
+    isempty(sources) && error("all sources are outside the model or in the air (vp = vs = 0)")
+    length(sources) < nsources && me == 0 &&
+        @warn "$(nsources - length(sources)) of $nsources sources are outside the model or in the air (vp = vs = 0) and are ignored"
+    M0 = sum(s.M0 for s in sources)
+    S = filter(s -> all(2 .<= position(s.x, s.y, s.z) .- off .<= nl), sources)   # the stencil reaches i-1, k-1; ghost copies are overwritten by the halo update
     Is = [position(s.x, s.y, s.z) .- off for s in S]
     Src = merge(NamedTuple{ijk}(ntuple(a -> dev(Int32[p[a] for p in Is]), N)),
                 (; M=dev(FT[s.M[m] * (m in (4, 5) ? -1 : 1) for s in S, m in 1:6]),     # z up -> z down

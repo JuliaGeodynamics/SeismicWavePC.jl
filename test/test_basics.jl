@@ -42,10 +42,11 @@ end
     @test r.wavefield isa CartData && size(r.wavefield) == size(model)
     @test redirect_stdout(() -> simulate(model; dt=DT, nt=20, sources=s), devnull) isa Seismograms   # verbose output
     @test_throws ErrorException simulate(model; dt=0.1, nt=10, sources=s, verbose=false)               # unstable
-    @test_throws ErrorException simulate(model; dt=DT, nt=10, verbose=false,
-                                         sources=DoubleCoupleSource(50.0, 0, -1; Mw=1, strike=0, dip=45, rake=0))
-    @test_throws ErrorException simulate(model; dt=DT, nt=10, verbose=false,                         # source in the air
-                                         sources=DoubleCoupleSource(0.0, 0, 0.3; Mw=1, strike=0, dip=45, rake=0))
+    outside = DoubleCoupleSource(50.0, 0, -1; Mw=1, strike=0, dip=45, rake=0)
+    in_air = DoubleCoupleSource(0.0, 0, 0.3; Mw=1, strike=0, dip=45, rake=0)
+    @test_throws ErrorException simulate(model; dt=DT, nt=10, sources=[outside, in_air], verbose=false)
+    r2 = @test_logs (:warn, r"2 of 3 sources") simulate(model; dt=DT, nt=50, sources=[outside, s, in_air], stations=test_stations(:psv), verbose=false)
+    @test r2.v == r.v                                                                                  # ignored, as in OpenSWPC
     @test_throws ErrorException simulate(model; dt=DT, nt=10, sources=s, wave=:love, verbose=false)
     @test_throws ErrorException simulate(model; dt=DT, nt=10, sources=s, nproc=3, verbose=false)       # 200 cells / 3
 end

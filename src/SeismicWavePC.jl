@@ -18,7 +18,9 @@ include("sources.jl")
 include("medium.jl")
 include("kernels.jl")
 include("simulation.jl")
+include("files.jl")
 
 export MomentTensorSource, DoubleCoupleSource, Station, Seismograms, simulate, moment_rate, CPU
+export read_netcdf, write_sac, read_sac
 
 end

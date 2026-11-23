@@ -90,7 +90,7 @@ c = Observable(1.0f-12)
 title = Observable("")
 ax2 = Axis(fig[2, 1], title=title, xlabel="distance W–E [km]", ylabel="height [km]")
 hw = heatmap!(ax2, x, z, vz, colormap=:balance, colorrange=@lift((-$c, $c)))
-Colorbar(fig[2, 2], hw, label="vz [m/s]")
+Colorbar(fig[2, 2], hw, label="vz [m/s]", ticklabelspace=55, tickformat=v -> [@sprintf("%.2g", x) for x in v])   # fixed width: frames do not shift
 for ax in (ax1, ax2)
     contour!(ax, x, z, ϕ, levels=[0.1], color=:white, linewidth=1.5)      # partially molten rock (melt > 10 %, from MAGEMin)
     scatter!(ax, surface_x, surface_z, marker=:dtriangle, color=:black, markersize=10)
@@ -111,12 +111,24 @@ end
 result = simulate(model; dt, nt, sources=source, stations, snapshot_every=round(Int, 0.1 / dt), callback=frame)
 save(joinpath(@__DIR__, "Unzen_2D_waves.mp4"), movie)
 
-# --- Record section ------------------------------------------------------------------------------------------------------
-fig2 = Figure(size=(900, 700))
-ax = Axis(fig2[1, 1], xlabel="time [s]", ylabel="station x [km]", title="vertical velocity at the surface (each trace normalized)")
+# --- Seismograms -----------------------------------------------------------------------------------------------------------
+molten = extrema(x[i] for i in eachindex(x) if any(>(0.1), ϕ[i, :]))      # horizontal extent of the partially molten region
+peak = [maximum(abs, result.v[:, c, n]) for n in eachindex(result.stations), c in 1:2]
+fig2 = Figure(size=(1100, 700))
+ax = Axis(fig2[1, 1], xlabel="time [s]", ylabel="station x [km]", title="vertical velocity, each trace normalized (shaded: above partially molten rock)")
+ax2 = Axis(fig2[1, 2], xlabel="peak velocity [m/s]", title="peak amplitude")
+for a in (ax, ax2)
+    hspan!(a, molten..., color=(:orange, 0.2))                               # stations above the partially molten region
+end
 for (n, s) in enumerate(result.stations)
     v = result.v[:, 2, n]
     lines!(ax, result.t, s.x .+ 0.8 .* v ./ maximum(abs, v), color=:black, linewidth=0.7)
 end
+scatterlines!(ax2, peak[:, 2], surface_x, label="vertical")
+scatterlines!(ax2, peak[:, 1], surface_x, label="horizontal")
+axislegend(ax2, position=:rt)
+linkyaxes!(ax, ax2)
+hideydecorations!(ax2, grid=false)
+colsize!(fig2.layout, 2, Relative(0.25))
 save(joinpath(@__DIR__, "Unzen_2D_seismograms.png"), fig2)
 println("saved Unzen_2D_waves.mp4 and Unzen_2D_seismograms.png in ", @__DIR__)
