@@ -137,12 +137,13 @@ record weaker S waves and a longer coda.*
   least-squares misfit of the velocity seismograms and its gradient with respect to `rho`, `vp`, `vs`, `Qp`, `Qs` (a `CartData`).
   - It uses the adjoint-state method with checkpointing, on CPUs and GPUs, at the cost of about 4–5 forward simulations
     ([benchmark](#marmousi2)).
-  - The adjoint kernels use the transposed stencils, including the 2nd-order cells at free surfaces, and adjoint memory
-    variables for attenuation. The result is therefore the exact gradient of the discrete simulation: it agrees with automatic
-    differentiation to round-off in 2D and 3D, with attenuation.
-  - The exception is the part of the waves that interacts with the PML, whose adjoint is approximated by the PML itself, as is
-    usual. Keep stations a few wavelengths away from the absorbing layers.
-  - `method=:ad` (with `using Enzyme`) differentiates the whole simulation automatically. It is exact in the PML too, but costs
+  - The adjoint kernels transpose the stencils exactly, including the 2nd-order cells at free surfaces and the PML (with
+    adjoint PML memory variables), and use adjoint memory variables for attenuation. The result is the exact gradient of the
+    discrete simulation: it agrees with automatic differentiation to round-off (1e-15) in 2D and 3D, with attenuation and
+    with waves in the PML.
+  - Still approximate: the Cerjan sponge (`absorber=:cerjan`), the side extrapolation of plane waves, and the density
+    gradient in the source cell of P-SV body forces.
+  - `method=:ad` (with `using Enzyme`) differentiates the whole simulation automatically (exact for all of these), but costs
     20–50 forward simulations and runs only on the CPU, on one process.
   - Works with MPI (`nproc`, CPUs or GPUs) like `simulate`; every process gets the misfit and the whole gradient.
 - **Random media:** `xi = random_medium(x, y, z; spectrum=:vonkarman, a=0.5, epsilon=0.05, kappa=0.3)` makes fluctuations with a
@@ -248,8 +249,8 @@ Misfit gradient (adjoint-state method, L2 misfit of all receivers) on the same p
 |---|---:|---:|---:|
 | SeismicWaves.jl, 12 threads, 641 receivers | 169 s | 403 s | 2.4 |
 | SeismicWaves.jl, 12 threads, 1 receiver | 30 s | 121 s | 4.0 |
-| SeismicWavePC.jl, 12 threads, 641 receivers | 17.6 s | 68 s | 3.9 |
-| SeismicWavePC.jl, Apple M4 Max GPU (Metal), 641 receivers | 5.3 s | 29 s | 5.4 |
+| SeismicWavePC.jl, 12 threads, 641 receivers | 16.9 s | 80 s | 4.7 |
+| SeismicWavePC.jl, Apple M4 Max GPU (Metal), 641 receivers | 6.2 s | 30 s | 4.9 |
 
 Both codes save the wavefield every √nt steps or so and recompute the steps in between. The forward times here include the
 setup.

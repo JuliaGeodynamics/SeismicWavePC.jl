@@ -6,8 +6,8 @@
 #     qⁿ = qⁿ⁺¹ + Δt B D pⁿ⁺¹ - B rⁿ,    pⁿ = pⁿ⁺¹ + Δt C G qⁿ,    and   ηⁿ = ηⁿ⁺¹ + Δt G qⁿ.
 # The gradients are ∂J/∂C = Δt Σₙ ηⁿ ∂(C G vⁿ⁻¹)/∂C and ∂J/∂B = -Σₙ qⁿ (vⁿ - vⁿ⁻¹) / B². This is the exact gradient of the
 # discrete scheme: the adjoint kernels use the transposed differences (coefficients of the stencil points, which differ
-# next to free surfaces), and adjoint memory variables give the gradient of the attenuation terms. Only the PML is not
-# transposed: the adjoint kernels stretch their differences as the forward ones (an approximation, as usual).
+# next to free surfaces) and the transposed PML stretching, and adjoint memory variables give the gradient of the
+# attenuation terms. (Only the Cerjan sponge is not transposed exactly.)
 
 # ------------------------------------------------------------------ differences
 # Forward differences use the coefficients of the point they are computed at (2nd order next to free surfaces); their
@@ -26,79 +26,115 @@ Base.@propagate_inbounds function (d::AdjD)(A, I, e, a)
            (A[I+2e] * ifelse(two[I+2e], zero(c[2]), c[2]) - A[I-e] * ifelse(two[I-e], zero(c[2]), c[2]))
 end
 
-# strain rates as in the stress kernels, with the differences `d`
-Base.@propagate_inbounds strain_psv(d, Vx, Vz, I) = (ex = CartesianIndex(1, 0); ez = CartesianIndex(0, 1);
-    (d(Vx, I - ex, ex, 1), d(Vz, I - ez, ez, 2), d(Vz, I, ex, 1) + d(Vx, I, ez, 2)))
-Base.@propagate_inbounds strain_sh(d, Vy, I) = (d(Vy, I, CartesianIndex(0, 1), 2), d(Vy, I, CartesianIndex(1, 0), 1))
-Base.@propagate_inbounds function strain_3d(d, Vx, Vy, Vz, I)
+# ------------------------------------------------------------------ PML
+# In the PML a derivative d is stretched, d̃ = γ₁ d + γ₂ m, with the memory variable m ← γ₃ m + γ₄ Δt d (`ade`). Transposed:
+# the adjoint field x gathered by the transposed difference is replaced by W = γ₁ x + γ₄ Δt m̄ at every point of the PML, and
+# the adjoint memory variable m̄ ← γ₃ m̄ + γ₂ x. `Δ` holds δ = W - x of every derivative (zero outside the PML), so the adjoint
+# kernels gather x + δ; `stretch_*!` compute δ and update m̄ (`P.mem`) after every adjoint update of the velocities (`v`:
+# the derivatives of the velocity kernel) and the stresses (`s`: those of the stress kernel).
+Base.@propagate_inbounds function stretch1!(δ, mb, X, prof, I, J, ix, dt)
+    γ = prof[ix]
+    x, m = X[I], mb[J]
+    δ[I] = (γ[1] - 1) * x + γ[4] * dt * m
+    mb[J] = γ[3] * m + γ[2] * x
+end
+
+Base.@propagate_inbounds function stretch_v_psv!(Δ, Q, P, dt, i, k)
+    I = CartesianIndex(i, k); J = I - P.lo; m = P.mem
+    stretch1!(Δ.axSxx, m.axSxx, Q.Vx, P.gxe, I, J, i, dt); stretch1!(Δ.azSxz, m.azSxz, Q.Vx, P.gzc, I, J, k, dt)
+    stretch1!(Δ.axSxz, m.axSxz, Q.Vz, P.gxc, I, J, i, dt); stretch1!(Δ.azSzz, m.azSzz, Q.Vz, P.gze, I, J, k, dt)
+end
+Base.@propagate_inbounds function stretch_s_psv!(Δ, Q, P, dt, i, k)
+    I = CartesianIndex(i, k); J = I - P.lo; m = P.mem
+    stretch1!(Δ.axVx, m.axVx, Q.Sxx, P.gxc, I, J, i, dt); stretch1!(Δ.azVz, m.azVz, Q.Szz, P.gzc, I, J, k, dt)
+    stretch1!(Δ.axVz, m.axVz, Q.Sxz, P.gxe, I, J, i, dt); stretch1!(Δ.azVx, m.azVx, Q.Sxz, P.gze, I, J, k, dt)
+end
+Base.@propagate_inbounds function stretch_v_sh!(Δ, Q, P, dt, i, k)
+    I = CartesianIndex(i, k); J = I - P.lo; m = P.mem
+    stretch1!(Δ.azSyz, m.azSyz, Q.Vy, P.gzc, I, J, k, dt); stretch1!(Δ.axSxy, m.axSxy, Q.Vy, P.gxc, I, J, i, dt)
+end
+Base.@propagate_inbounds function stretch_s_sh!(Δ, Q, P, dt, i, k)
+    I = CartesianIndex(i, k); J = I - P.lo; m = P.mem
+    stretch1!(Δ.axVy, m.axVy, Q.Sxy, P.gxe, I, J, i, dt); stretch1!(Δ.azVy, m.azVy, Q.Syz, P.gze, I, J, k, dt)
+end
+Base.@propagate_inbounds function stretch_v_3d!(Δ, Q, P, dt, i, j, k)
+    I = CartesianIndex(i, j, k); J = I - P.lo; m = P.mem
+    stretch1!(Δ.axSxx, m.axSxx, Q.Vx, P.gxe, I, J, i, dt); stretch1!(Δ.aySxy, m.aySxy, Q.Vx, P.gyc, I, J, j, dt)
+    stretch1!(Δ.azSxz, m.azSxz, Q.Vx, P.gzc, I, J, k, dt); stretch1!(Δ.axSxy, m.axSxy, Q.Vy, P.gxc, I, J, i, dt)
+    stretch1!(Δ.aySyy, m.aySyy, Q.Vy, P.gye, I, J, j, dt); stretch1!(Δ.azSyz, m.azSyz, Q.Vy, P.gzc, I, J, k, dt)
+    stretch1!(Δ.axSxz, m.axSxz, Q.Vz, P.gxc, I, J, i, dt); stretch1!(Δ.aySyz, m.aySyz, Q.Vz, P.gyc, I, J, j, dt)
+    stretch1!(Δ.azSzz, m.azSzz, Q.Vz, P.gze, I, J, k, dt)
+end
+Base.@propagate_inbounds function stretch_s_3d!(Δ, Q, P, dt, i, j, k)
+    I = CartesianIndex(i, j, k); J = I - P.lo; m = P.mem
+    stretch1!(Δ.axVx, m.axVx, Q.Sxx, P.gxc, I, J, i, dt); stretch1!(Δ.ayVy, m.ayVy, Q.Syy, P.gyc, I, J, j, dt)
+    stretch1!(Δ.azVz, m.azVz, Q.Szz, P.gzc, I, J, k, dt); stretch1!(Δ.axVy, m.axVy, Q.Sxy, P.gxe, I, J, i, dt)
+    stretch1!(Δ.ayVx, m.ayVx, Q.Sxy, P.gye, I, J, j, dt); stretch1!(Δ.axVz, m.axVz, Q.Sxz, P.gxe, I, J, i, dt)
+    stretch1!(Δ.azVx, m.azVx, Q.Sxz, P.gze, I, J, k, dt); stretch1!(Δ.ayVz, m.ayVz, Q.Syz, P.gye, I, J, j, dt)
+    stretch1!(Δ.azVy, m.azVy, Q.Syz, P.gze, I, J, k, dt)
+end
+
+"Transposed difference of `A` (+ its PML correction `δ`, if any)."
+Base.@propagate_inbounds dt_(d, A, ::Nothing, I, e, a) = d(A, I, e, a)
+Base.@propagate_inbounds dt_(d, A, δ, I, e, a) = d(A, I, e, a) + d(δ, I, e, a)
+"PML correction `name` of `Δ` (`nothing` without PML)."
+@inline δof(::Nothing, ::Val) = nothing
+@inline δof(Δ, ::Val{name}) where {name} = getfield(Δ, name)
+
+"Forward difference `d` stretched as in the PML zone `Z` (`nothing`: interior), with the forward memory `Z.fm` of the step."
+@inline fst(::Nothing, ::Val, ::Val, I, ix, d) = d
+Base.@propagate_inbounds function fst(Z, ::Val{m}, ::Val{g}, I, ix, d) where {m,g}
+    γ = getfield(Z.P, g)[ix]
+    return γ[1] * d + γ[2] * getfield(Z.fm, m)[I-Z.P.lo]
+end
+
+# adjoint strains: transposed differences of the velocity kernel, applied to the adjoint velocities q
+Base.@propagate_inbounds function adjoint_strain_psv(d, Q, Δ, I)
+    ex, ez = CartesianIndex(1, 0), CartesianIndex(0, 1)
+    return (dt_(d, Q.Vx, δof(Δ, Val(:axSxx)), I - ex, ex, 1), dt_(d, Q.Vz, δof(Δ, Val(:azSzz)), I - ez, ez, 2),
+            dt_(d, Q.Vz, δof(Δ, Val(:axSxz)), I, ex, 1) + dt_(d, Q.Vx, δof(Δ, Val(:azSxz)), I, ez, 2))
+end
+Base.@propagate_inbounds adjoint_strain_sh(d, Q, Δ, I) =
+    (dt_(d, Q.Vy, δof(Δ, Val(:azSyz)), I, CartesianIndex(0, 1), 2), dt_(d, Q.Vy, δof(Δ, Val(:axSxy)), I, CartesianIndex(1, 0), 1))
+Base.@propagate_inbounds function adjoint_strain_3d(d, Q, Δ, I)
     ex, ey, ez = CartesianIndex(1, 0, 0), CartesianIndex(0, 1, 0), CartesianIndex(0, 0, 1)
-    return (d(Vx, I - ex, ex, 1), d(Vy, I - ey, ey, 2), d(Vz, I - ez, ez, 3),
-            d(Vz, I, ey, 2) + d(Vy, I, ez, 3), d(Vz, I, ex, 1) + d(Vx, I, ez, 3), d(Vy, I, ex, 1) + d(Vx, I, ey, 2))
+    return (dt_(d, Q.Vx, δof(Δ, Val(:axSxx)), I - ex, ex, 1), dt_(d, Q.Vy, δof(Δ, Val(:aySyy)), I - ey, ey, 2),
+            dt_(d, Q.Vz, δof(Δ, Val(:azSzz)), I - ez, ez, 3),
+            dt_(d, Q.Vz, δof(Δ, Val(:aySyz)), I, ey, 2) + dt_(d, Q.Vy, δof(Δ, Val(:azSyz)), I, ez, 3),
+            dt_(d, Q.Vz, δof(Δ, Val(:axSxz)), I, ex, 1) + dt_(d, Q.Vx, δof(Δ, Val(:azSxz)), I, ez, 3),
+            dt_(d, Q.Vy, δof(Δ, Val(:axSxy)), I, ex, 1) + dt_(d, Q.Vx, δof(Δ, Val(:aySxy)), I, ey, 2))
 end
 
-# ------------------------------------------------------------------ adjoint kernels: the forward kernels with the transposed
-# differences (in the PML zones with the same stretching, an approximation)
-Base.@propagate_inbounds function vel_psv_adj!(F, M, c, dt, P, i, k)
-    d, I, J = AdjD(M, c), CartesianIndex(i, k), zone_index(P, CartesianIndex(i, k))
+# ------------------------------------------------------------------ adjoint kernels: the transposed velocity and stress
+# kernels, on the whole model (`Δ`: PML corrections or `nothing`)
+Base.@propagate_inbounds function vel_psv_adj!(F, M, c, dt, Δ, i, k)
+    d, I = AdjD(M, c), CartesianIndex(i, k)
     ex, ez = CartesianIndex(1, 0), CartesianIndex(0, 1)
-    (; Sxx, Szz, Sxz) = F
-    dxSxx = ade(P, :axSxx, :gxe, J, i, d(Sxx, I, ex, 1), dt)
-    dzSzz = ade(P, :azSzz, :gze, J, k, d(Szz, I, ez, 2), dt)
-    dxSxz = ade(P, :axSxz, :gxc, J, i, d(Sxz, I - ex, ex, 1), dt)
-    dzSxz = ade(P, :azSxz, :gzc, J, k, d(Sxz, I - ez, ez, 2), dt)
-    vel_update_psv!(F, M, dt, i, k, dxSxx + dzSxz, dxSxz + dzSzz)
+    vel_update_psv!(F, M, dt, i, k, dt_(d, F.Sxx, δof(Δ, Val(:axVx)), I, ex, 1) + dt_(d, F.Sxz, δof(Δ, Val(:azVx)), I - ez, ez, 2),
+                    dt_(d, F.Sxz, δof(Δ, Val(:axVz)), I - ex, ex, 1) + dt_(d, F.Szz, δof(Δ, Val(:azVz)), I, ez, 2))
 end
+Base.@propagate_inbounds stress_psv_adj!(F, M, c, vc, dt, Δ, i, k) =
+    stress_update_psv!(F, M, vc, dt, i, k, adjoint_strain_psv(AdjD(M, c), F, Δ, CartesianIndex(i, k))...)
 
-Base.@propagate_inbounds function stress_psv_adj!(F, M, c, vc, dt, P, i, k)
-    d, I, J = AdjD(M, c), CartesianIndex(i, k), zone_index(P, CartesianIndex(i, k))
+Base.@propagate_inbounds function vel_sh_adj!(F, M, c, dt, Δ, i, k)
+    d, I = AdjD(M, c), CartesianIndex(i, k)
     ex, ez = CartesianIndex(1, 0), CartesianIndex(0, 1)
-    (; Vx, Vz) = F
-    dxVx = ade(P, :axVx, :gxc, J, i, d(Vx, I - ex, ex, 1), dt)
-    dzVz = ade(P, :azVz, :gzc, J, k, d(Vz, I - ez, ez, 2), dt)
-    dxVz = ade(P, :axVz, :gxe, J, i, d(Vz, I, ex, 1), dt)
-    dzVx = ade(P, :azVx, :gze, J, k, d(Vx, I, ez, 2), dt)
-    stress_update_psv!(F, M, vc, dt, i, k, dxVx, dzVz, dxVz + dzVx)
+    vel_update_sh!(F, M, dt, i, k, dt_(d, F.Sxy, δof(Δ, Val(:axVy)), I - ex, ex, 1) + dt_(d, F.Syz, δof(Δ, Val(:azVy)), I - ez, ez, 2))
 end
+Base.@propagate_inbounds stress_sh_adj!(F, M, c, vc, dt, Δ, i, k) =
+    stress_update_sh!(F, M, vc, dt, i, k, adjoint_strain_sh(AdjD(M, c), F, Δ, CartesianIndex(i, k))...)
 
-Base.@propagate_inbounds function vel_sh_adj!(F, M, c, dt, P, i, k)
-    d, I, J = AdjD(M, c), CartesianIndex(i, k), zone_index(P, CartesianIndex(i, k))
-    dzSyz = ade(P, :azSyz, :gzc, J, k, d(F.Syz, I - CartesianIndex(0, 1), CartesianIndex(0, 1), 2), dt)
-    dxSxy = ade(P, :axSxy, :gxc, J, i, d(F.Sxy, I - CartesianIndex(1, 0), CartesianIndex(1, 0), 1), dt)
-    vel_update_sh!(F, M, dt, i, k, dxSxy + dzSyz)
-end
-
-Base.@propagate_inbounds function stress_sh_adj!(F, M, c, vc, dt, P, i, k)
-    d, I, J = AdjD(M, c), CartesianIndex(i, k), zone_index(P, CartesianIndex(i, k))
-    dxVy = ade(P, :axVy, :gxe, J, i, d(F.Vy, I, CartesianIndex(1, 0), 1), dt)
-    dzVy = ade(P, :azVy, :gze, J, k, d(F.Vy, I, CartesianIndex(0, 1), 2), dt)
-    stress_update_sh!(F, M, vc, dt, i, k, dzVy, dxVy)
-end
-
-Base.@propagate_inbounds function vel_3d_adj!(F, M, c, dt, P, i, j, k)
-    d, I, J = AdjD(M, c), CartesianIndex(i, j, k), zone_index(P, CartesianIndex(i, j, k))
+Base.@propagate_inbounds function vel_3d_adj!(F, M, c, dt, Δ, i, j, k)
+    d, I = AdjD(M, c), CartesianIndex(i, j, k)
     ex, ey, ez = CartesianIndex(1, 0, 0), CartesianIndex(0, 1, 0), CartesianIndex(0, 0, 1)
     (; Sxx, Syy, Szz, Syz, Sxz, Sxy) = F
-    dSx = ade(P, :axSxx, :gxe, J, i, d(Sxx, I, ex, 1), dt) + ade(P, :aySxy, :gyc, J, j, d(Sxy, I - ey, ey, 2), dt) +
-          ade(P, :azSxz, :gzc, J, k, d(Sxz, I - ez, ez, 3), dt)
-    dSy = ade(P, :axSxy, :gxc, J, i, d(Sxy, I - ex, ex, 1), dt) + ade(P, :aySyy, :gye, J, j, d(Syy, I, ey, 2), dt) +
-          ade(P, :azSyz, :gzc, J, k, d(Syz, I - ez, ez, 3), dt)
-    dSz = ade(P, :axSxz, :gxc, J, i, d(Sxz, I - ex, ex, 1), dt) + ade(P, :aySyz, :gyc, J, j, d(Syz, I - ey, ey, 2), dt) +
-          ade(P, :azSzz, :gze, J, k, d(Szz, I, ez, 3), dt)
+    dSx = dt_(d, Sxx, δof(Δ, Val(:axVx)), I, ex, 1) + dt_(d, Sxy, δof(Δ, Val(:ayVx)), I - ey, ey, 2) + dt_(d, Sxz, δof(Δ, Val(:azVx)), I - ez, ez, 3)
+    dSy = dt_(d, Sxy, δof(Δ, Val(:axVy)), I - ex, ex, 1) + dt_(d, Syy, δof(Δ, Val(:ayVy)), I, ey, 2) + dt_(d, Syz, δof(Δ, Val(:azVy)), I - ez, ez, 3)
+    dSz = dt_(d, Sxz, δof(Δ, Val(:axVz)), I - ex, ex, 1) + dt_(d, Syz, δof(Δ, Val(:ayVz)), I - ey, ey, 2) + dt_(d, Szz, δof(Δ, Val(:azVz)), I, ez, 3)
     vel_update_3d!(F, M, dt, i, j, k, dSx, dSy, dSz)
 end
-
-Base.@propagate_inbounds function stress_3d_adj!(F, M, c, vc, dt, P, i, j, k)
-    d, I, J = AdjD(M, c), CartesianIndex(i, j, k), zone_index(P, CartesianIndex(i, j, k))
-    ex, ey, ez = CartesianIndex(1, 0, 0), CartesianIndex(0, 1, 0), CartesianIndex(0, 0, 1)
-    (; Vx, Vy, Vz) = F
-    dxVx = ade(P, :axVx, :gxc, J, i, d(Vx, I - ex, ex, 1), dt)
-    dyVy = ade(P, :ayVy, :gyc, J, j, d(Vy, I - ey, ey, 2), dt)
-    dzVz = ade(P, :azVz, :gzc, J, k, d(Vz, I - ez, ez, 3), dt)
-    exy = ade(P, :axVy, :gxe, J, i, d(Vy, I, ex, 1), dt) + ade(P, :ayVx, :gye, J, j, d(Vx, I, ey, 2), dt)
-    exz = ade(P, :axVz, :gxe, J, i, d(Vz, I, ex, 1), dt) + ade(P, :azVx, :gze, J, k, d(Vx, I, ez, 3), dt)
-    eyz = ade(P, :ayVz, :gye, J, j, d(Vz, I, ey, 2), dt) + ade(P, :azVy, :gze, J, k, d(Vy, I, ez, 3), dt)
-    stress_update_3d!(F, M, vc, dt, i, j, k, dxVx, dyVy, dzVz, eyz, exz, exy)
-end
+Base.@propagate_inbounds stress_3d_adj!(F, M, c, vc, dt, Δ, i, j, k) =
+    stress_update_3d!(F, M, vc, dt, i, j, k, adjoint_strain_3d(AdjD(M, c), F, Δ, CartesianIndex(i, j, k))...)
 
 # Unrolled (generated): `map` with a closure over the tuples of arrays would not vectorize.
 "Add `dt * q` to the adjoint strains `E` at `I` and return them."
@@ -137,12 +173,15 @@ end
 # velocities vⁿ and vⁿ⁻¹ (tuples). A stress component increases by Δt (C_U ε + Σ d1 R) with R driven by -c2 Δt A ε (A: the
 # moduli times τ); its adjoint weights are aU = Δt η (unrelaxed part) and aR (memory part).
 
-Base.@propagate_inbounds function grad_psv!(G, E, Rb, Q, Vn, Vp, M, c, vc, dt, i, k)
-    I = CartesianIndex(i, k)
+Base.@propagate_inbounds function grad_psv!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, k)
+    I, ex, ez = CartesianIndex(i, k), CartesianIndex(1, 0), CartesianIndex(0, 1)
     two = M.two[I]
-    η = adjoint_strain!(E, I, strain_psv(AdjD(M, c), Q.Vx, Q.Vz, I), dt)
+    η = adjoint_strain!(E, I, adjoint_strain_psv(AdjD(M, c), Q, Δ, I), dt)
     aU, aR = η .* dt, adjoint_memory!(Rb, I, η, vc, dt)
-    dxVx, dzVz, vxz = strain_psv(FwdD((fd(c[1], two), fd(c[2], two))), Vp[1], Vp[2], I)
+    f, Vx, Vz = FwdD((fd(c[1], two), fd(c[2], two))), Vp[1], Vp[2]
+    dxVx = fst(Z, Val(:axVx), Val(:gxc), I, i, f(Vx, I - ex, ex, 1))
+    dzVz = fst(Z, Val(:azVz), Val(:gzc), I, k, f(Vz, I - ez, ez, 2))
+    vxz = fst(Z, Val(:axVz), Val(:gxe), I, i, f(Vz, I, ex, 1)) + fst(Z, Val(:azVx), Val(:gze), I, k, f(Vx, I, ez, 2))
     tp, ts = M.taup[I], M.taus[I]
     tp1, ts1 = 1 + tp * (1 + vc[4]), 1 + ts * (1 + vc[4])
     P = aU .* tp1 .+ aR .* tp                    # weights of λ + 2μ
@@ -162,12 +201,14 @@ Base.@propagate_inbounds function grad_psv!(G, E, Rb, Q, Vn, Vp, M, c, vc, dt, i
     G.bz[I] += Q.Vz[I] * (Vn[2][I] - Vp[2][I])
 end
 
-Base.@propagate_inbounds function grad_sh!(G, E, Rb, Q, Vn, Vp, M, c, vc, dt, i, k)
+Base.@propagate_inbounds function grad_sh!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, k)
     I = CartesianIndex(i, k)
     two = M.two[I]
-    η = adjoint_strain!(E, I, strain_sh(AdjD(M, c), Q.Vy, I), dt)
+    η = adjoint_strain!(E, I, adjoint_strain_sh(AdjD(M, c), Q, Δ, I), dt)
     aU, aR = η .* dt, adjoint_memory!(Rb, I, η, vc, dt)
-    vyz, vxy = strain_sh(FwdD((fd(c[1], two), fd(c[2], two))), Vp[1], I)
+    f = FwdD((fd(c[1], two), fd(c[2], two)))
+    vyz = fst(Z, Val(:azVy), Val(:gze), I, k, f(Vp[1], I, CartesianIndex(0, 1), 2))
+    vxy = fst(Z, Val(:axVy), Val(:gxe), I, i, f(Vp[1], I, CartesianIndex(1, 0), 1))
     ts = M.taus[I]
     ts1 = 1 + ts * (1 + vc[4])
     S = aU .* ts1 .+ aR .* ts
@@ -178,12 +219,19 @@ Base.@propagate_inbounds function grad_sh!(G, E, Rb, Q, Vn, Vp, M, c, vc, dt, i,
     G.by[I] += Q.Vy[I] * (Vn[1][I] - Vp[1][I])
 end
 
-Base.@propagate_inbounds function grad_3d!(G, E, Rb, Q, Vn, Vp, M, c, vc, dt, i, j, k)
+Base.@propagate_inbounds function grad_3d!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, j, k)
     I = CartesianIndex(i, j, k)
+    ex, ey, ez = CartesianIndex(1, 0, 0), CartesianIndex(0, 1, 0), CartesianIndex(0, 0, 1)
     two = M.two[I]
-    η = adjoint_strain!(E, I, strain_3d(AdjD(M, c), Q.Vx, Q.Vy, Q.Vz, I), dt)
+    η = adjoint_strain!(E, I, adjoint_strain_3d(AdjD(M, c), Q, Δ, I), dt)
     aU, aR = η .* dt, adjoint_memory!(Rb, I, η, vc, dt)
-    dxVx, dyVy, dzVz, vyz, vxz, vxy = strain_3d(FwdD((fd(c[1], two), fd(c[2], two), fd(c[3], two))), Vp[1], Vp[2], Vp[3], I)
+    f, (Vx, Vy, Vz) = FwdD((fd(c[1], two), fd(c[2], two), fd(c[3], two))), Vp
+    dxVx = fst(Z, Val(:axVx), Val(:gxc), I, i, f(Vx, I - ex, ex, 1))
+    dyVy = fst(Z, Val(:ayVy), Val(:gyc), I, j, f(Vy, I - ey, ey, 2))
+    dzVz = fst(Z, Val(:azVz), Val(:gzc), I, k, f(Vz, I - ez, ez, 3))
+    vyz = fst(Z, Val(:ayVz), Val(:gye), I, j, f(Vz, I, ey, 2)) + fst(Z, Val(:azVy), Val(:gze), I, k, f(Vy, I, ez, 3))
+    vxz = fst(Z, Val(:axVz), Val(:gxe), I, i, f(Vz, I, ex, 1)) + fst(Z, Val(:azVx), Val(:gze), I, k, f(Vx, I, ez, 3))
+    vxy = fst(Z, Val(:axVy), Val(:gxe), I, i, f(Vy, I, ex, 1)) + fst(Z, Val(:ayVx), Val(:gye), I, j, f(Vx, I, ey, 2))
     tp, ts = M.taup[I], M.taus[I]
     tp1, ts1 = 1 + tp * (1 + vc[4]), 1 + ts * (1 + vc[4])
     P = aU .* tp1 .+ aR .* tp
@@ -243,10 +291,11 @@ end
 
 # kernels, accumulators and the staggering of shear moduli (offsets of the cells averaged) and buoyancies per mode
 const O2, O3 = CartesianIndex{2}, CartesianIndex{3}
-adjoint_setup(::Val{:psv}) = (vel_psv_adj!, stress_psv_adj!, grad_psv!, residual_psv!, (:lam, :mu, :xz, :tp, :ts, :bx, :bz), 3,
+adjoint_setup(::Val{:psv}) = (vel_psv_adj!, stress_psv_adj!, grad_psv!, residual_psv!, stretch_v_psv!, stretch_s_psv!, (:axVx, :azVz, :axVz, :azVx), (:lam, :mu, :xz, :tp, :ts, :bx, :bz), 3,
                               (xz=(O2(0, 0), O2(0, 1), O2(1, 0), O2(1, 1)),), (bx=O2(1, 0), bz=O2(0, 1)))
-adjoint_setup(::Val{:sh}) = (vel_sh_adj!, stress_sh_adj!, grad_sh!, residual_sh!, (:yz, :xy, :ts, :by), 2, (yz=(O2(0, 0), O2(0, 1)), xy=(O2(0, 0), O2(1, 0))), (by=nothing,))
-adjoint_setup(::Val{:p3d}) = (vel_3d_adj!, stress_3d_adj!, grad_3d!, residual_3d!, (:lam, :mu, :yz, :xz, :xy, :tp, :ts, :bx, :by, :bz), 6,
+adjoint_setup(::Val{:sh}) = (vel_sh_adj!, stress_sh_adj!, grad_sh!, residual_sh!, stretch_v_sh!, stretch_s_sh!, (:axVy, :azVy), (:yz, :xy, :ts, :by), 2, (yz=(O2(0, 0), O2(0, 1)), xy=(O2(0, 0), O2(1, 0))), (by=nothing,))
+adjoint_setup(::Val{:p3d}) = (vel_3d_adj!, stress_3d_adj!, grad_3d!, residual_3d!, stretch_v_3d!, stretch_s_3d!,
+                              (:axVx, :ayVy, :azVz, :axVy, :ayVx, :axVz, :azVx, :ayVz, :azVy), (:lam, :mu, :yz, :xz, :xy, :tp, :ts, :bx, :by, :bz), 6,
                               (yz=(O3(0, 0, 0), O3(0, 0, 1), O3(0, 1, 0), O3(0, 1, 1)), xz=(O3(0, 0, 0), O3(0, 0, 1), O3(1, 0, 0), O3(1, 0, 1)),
                                xy=(O3(0, 0, 0), O3(1, 0, 0), O3(0, 1, 0), O3(1, 1, 0))), (bx=O3(1, 0, 0), by=O3(0, 1, 0), bz=O3(0, 0, 1)))
 
@@ -259,7 +308,7 @@ end
 
 "Gradients with respect to rho, lam, mu (internal arrays) from the accumulators `G` and the shear modulus `mu` (host arrays)."
 function assemble_gradient(G, mu, mode)
-    shear, buoy = adjoint_setup(Val(mode))[7:8]
+    shear, buoy = adjoint_setup(Val(mode))[10:11]
     z = zero(mu)
     glam, gmu, grho = haskey(G, :lam) ? G.lam : copy(z), haskey(G, :mu) ? G.mu : copy(z), copy(z)
     R = CartesianIndices(mu)
@@ -316,13 +365,18 @@ end
 function (d::AdjointDriver)(s)
     o = observed_velocities(d.observed, s)
     (; F, M, St, rec, acc, regions, backend, nt, nown, c, vc, dtT, record_every) = s
-    vel!, stress!, grad!, residual!, names, nE = adjoint_setup(Val(s.mode))
+    vel!, stress!, grad!, residual!, stretch_v!, stretch_s!, fmnames, names, nE = adjoint_setup(Val(s.mode))
     V = velocities(F)
     new(A) = fill!(similar(A), 0)
     attenuation = maximum(abs, M.taup) > 0 || maximum(abs, M.taus) > 0
     state = attenuation ? (values(F)..., pml_state(regions)...) : (V..., stresses(F)..., pml_state(regions)...)
+    zones = Base.tail(regions)                                  # the PML zones (none with the Cerjan absorber)
+    # forward PML memory of the stress kernel, kept for every step of a segment (stretched strain rates in the gradient)
+    fmem() = map(z -> map(new, NamedTuple{fmnames}(z[3].mem)), zones)
+    copy_fmem!(dst) = map((m, z) -> map(copyto!, m, NamedTuple{fmnames}(z[3].mem)), dst, zones)
     # checkpoints every K steps (host memory) and a buffer of the K + 1 velocity fields of a segment (device)
-    K = something(d.checkpoint_steps, ceil(Int, sqrt(nt * sum(length, state) / sum(length, V))))
+    per_step = sum(length, V) + sum(m -> sum(length, m; init=0), fmem(); init=0)
+    K = something(d.checkpoint_steps, ceil(Int, sqrt(nt * sum(length, state) / per_step)))
     s.parallel && (K = MPI.Allreduce(K, max, IGG.comm()))      # the same segments (and halo exchanges) on all ranks
     step!(it, record) = forward_step!(F, M, s.Src, s.FSrc, St, rec, acc, regions, it, s, record)
 
@@ -345,31 +399,53 @@ function (d::AdjointDriver)(s)
     two = [second_order(last(Tuple(I)), map(f -> f[Base.front(Tuple(I))...], fs)...) | any(a -> o[a][I[a]], eachindex(o))
            for I in CartesianIndices(M.lam)]
     Ma = merge(M, (; two=copyto!(similar(M.lam, Bool), two)))
-    # adjoint fields, absorbing layers with their own memory variables, adjoint strains and accumulators
+    # adjoint fields, PML corrections and adjoint PML memory, adjoint strains, adjoint attenuation memory, accumulators
     Q = map(new, F)
-    aregions = map(((lo, ndr, P),) -> (lo, ndr, P === nothing ? nothing : merge(P, (; mem=map(new, P.mem)))), regions)
+    Δ = isempty(zones) ? nothing : map(_ -> new(M.lam), zones[1][3].mem)
+    azones = map(((lo, ndr, P),) -> (lo, ndr, merge(P, (; mem=map(new, P.mem)))), zones)
+    # corrections of the derivatives of the velocity kernel (used by the adjoint stress kernel) and of the stress kernel;
+    # kernels get only what they use (GPU kernel arguments are limited, e.g. to 4 kB on Metal)
+    Δv, Δs = Δ === nothing ? (nothing, nothing) : (Δ[filter(∉(fmnames), keys(Δ))], Δ[fmnames])
+    halo_v, halo_s = Δ === nothing ? ((), ()) : (values(Δv), values(Δs))
+    Qv = NamedTuple{filter(k -> first(string(k)) == 'V', keys(Q))}(Q)
+    Zp = map(z -> Base.structdiff(z[3], NamedTuple{(:mem,)}), zones)
+    # cells: the deep interior (stencils do not reach the PML: no corrections) and the rest (a band of 2 cells, the PML)
+    inner = (ntuple(_ -> H, ndims(M.lam)), size(M.lam) .- 2H)
+    deep, band = Δ === nothing ? (inner, ()) : split_box(regions[1][1], regions[1][2], 2)
+    rest = Δ === nothing ? () : (band..., map(z -> (z[1], z[2]), zones)...)
     E = ntuple(_ -> new(M.lam), nE)
     Rb = attenuation ? map(new, values(F)[end-nE+1:end]) : nothing
     G = NamedTuple{names}(map(_ -> new(M.lam), names))
-    buf = [map(new, V) for _ in 0:K]
-    inner = (ntuple(_ -> H, ndims(M.lam)), size(M.lam) .- 2H)
+    buf = [(map(new, V), fmem()) for _ in 0:K]
+    sync_halo!(A) = s.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, s.nb, A...))
     # backward, segment by segment: recompute the forward velocities, then the adjoint steps n = b … a
     for (seg, a) in Iterators.reverse(enumerate(1:K:nt))
         b = min(a + K - 1, nt - 1)
         map(copyto!, state, saved[seg])
-        map(copyto!, buf[1], V)
+        map(copyto!, buf[1][1], V)
+        copy_fmem!(buf[1][2])
         for it in a:b
             step!(it, false)
-            map(copyto!, buf[it-a+2], V)
+            map(copyto!, buf[it-a+2][1], V)
+            copy_fmem!(buf[it-a+2][2])
         end
         for n in b:-1:a
-            map(((lo, ndr, P),) -> foreach_cell!(backend, vel!, (Q, Ma, c, dtT, P), lo, ndr), aregions)
+            (Vn, _), (Vp, fm) = buf[n-a+2], buf[n-a+1]
+            foreach_cell!(backend, vel!, (Q, Ma, c, dtT, nothing), deep...)
+            map(((lo, ndr),) -> foreach_cell!(backend, vel!, (Q, Ma, c, dtT, Δs), lo, ndr), rest)
             itw = n % record_every == 0 ? n ÷ record_every + 1 : 0
             itw > 0 && nown > 0 && run_once!(backend, residual!, (Q, Ma, St, res, itw, nown))
-            s.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, s.nb, velocities(Q)...))
-            foreach_cell!(backend, grad!, (G, E, Rb, Q, buf[n-a+2], buf[n-a+1], Ma, c, vc, dtT), inner...)
-            map(((lo, ndr, P),) -> foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, P), lo, ndr), aregions)
-            s.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, s.nb, stresses(Q)...))
+            sync_halo!(velocities(Q))
+            map(((lo, ndr, P),) -> foreach_cell!(backend, stretch_v!, (Δv, Qv, P, dtT), lo, ndr), azones)
+            sync_halo!(halo_v)
+            foreach_cell!(backend, grad!, (G, E, Rb, Qv, nothing, Vn, Vp, nothing, Ma, c, vc, dtT), deep...)
+            map(((lo, ndr),) -> foreach_cell!(backend, grad!, (G, E, Rb, Qv, Δv, Vn, Vp, nothing, Ma, c, vc, dtT), lo, ndr), band)
+            map((z, P, m) -> foreach_cell!(backend, grad!, (G, E, Rb, Qv, Δv, Vn, Vp, (; P, fm=m), Ma, c, vc, dtT), z[1], z[2]), zones, Zp, fm)
+            foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, nothing), deep...)
+            map(((lo, ndr),) -> foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, Δv), lo, ndr), rest)
+            sync_halo!(stresses(Q))
+            map(((lo, ndr, P),) -> foreach_cell!(backend, stretch_s!, (Δs, Q, P, dtT), lo, ndr), azones)
+            sync_halo!(halo_s)
         end
     end
     KernelAbstractions.synchronize(backend)
@@ -378,6 +454,21 @@ function (d::AdjointDriver)(s)
     g = s.me == 0 ? model_gradient(s, assemble_gradient(Gg, s.med.mu, s.mode)) : nothing
     s.parallel && (g = MPI.bcast(g, 0, IGG.comm()))
     return J, g
+end
+
+"""
+The box `lo .+ (1:ndr)` as the box shrunk by `w` cells on every side, and up to 2N slabs (tuple) covering the rest.
+"""
+function split_box(lo, ndr, w)
+    N = length(lo)
+    n1 = min.(w, ndr)
+    ilo, indr = lo .+ n1, max.(ndr .- 2w, 0)
+    slabs = ntuple(2N) do q
+        a, hi = (q + 1) ÷ 2, iseven(q)
+        l, n = hi ? (ilo[a] + indr[a], ndr[a] - n1[a] - indr[a]) : (lo[a], n1[a])
+        (ntuple(b -> b < a ? ilo[b] : b == a ? l : lo[b], N), ntuple(b -> b < a ? indr[b] : b == a ? n : ndr[b], N))
+    end
+    return (ilo, indr), slabs
 end
 
 "The cells of `A` owned by this rank, gathered on rank 0 into an array of the global (padded) grid; `nothing` on other ranks."

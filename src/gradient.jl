@@ -14,11 +14,11 @@ g/cm³ with `density_unit = :g_cm3`), per km/s, per unit Q). Cells in the absorb
 simulation, so their sensitivity is added to the cells next to the layers.
 
 `method`
-- `:adjoint` (default): adjoint-state method with adjoint kernels (transposed stencils, adjoint memory variables of
-  attenuation), on all backends (CPU threads, GPUs); about 5 forward simulations. It is the exact gradient of the discrete
-  simulation (to rounding errors) as long as the waves do not interact with the PML, whose adjoint is approximated by the
-  PML itself (as usual): the sensitivity next to the absorbing layers and of stations close to them is then approximate.
-- `:ad`: reverse-mode automatic differentiation of the whole simulation (needs `using Enzyme`): exact also with the PML, but
+- `:adjoint` (default): adjoint-state method with adjoint kernels (transposed stencils, including the free-surface cells
+  and the PML with adjoint PML memory variables, and adjoint memory variables of attenuation), on all backends (CPU
+  threads, GPUs); about 5 forward simulations. It is the exact gradient of the discrete simulation (to rounding errors),
+  except for the Cerjan sponge, the side extrapolation of plane waves and the density in the source cell of P-SV forces.
+- `:ad`: reverse-mode automatic differentiation of the whole simulation (needs `using Enzyme`): exact in all cases, but
   ~20-50 forward simulations, CPU and one process only. Use `T = Float64` with it.
 
 The wavefields are saved every `checkpoint_steps` steps (default: balances the memory of the checkpoints, kept in host

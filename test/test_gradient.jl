@@ -24,6 +24,14 @@ misfit(m, obs, kw) = (r = simulate(m; kw..., stations=obs.stations, verbose=fals
         @test g.fields[field][I] ≈ fd rtol = 1e-4
     end
     @test all(iszero, g.fields.vs[:, 1, end-5:end])                           # air
+    # waves in the PML: the adjoint of the PML is exact too (cell next to the bottom absorber, whose cells copy it)
+    kwp = (; kw..., nt=500)
+    obsp = observed(m, kwp, :psv)
+    gp = misfit_gradient(m, obsp; kwp...)[2]
+    for (field, h, Ip) in ((:vp, 1e-4, CartesianIndex(94, 1, 21)), (:rho, 1e-1, CartesianIndex(30, 1, 50)))
+        fd = (misfit(perturbed(m, field, Ip, h), obsp, kwp) - misfit(perturbed(m, field, Ip, -h), obsp, kwp)) / 2h
+        @test gp.fields[field][Ip] ≈ fd rtol = 1e-4
+    end
     # Float32, other checkpoint intervals, record_every, Cerjan
     J32, g32 = misfit_gradient(m, obs; kw..., T=Float32, checkpoint_steps=7)
     @test J32 ≈ J rtol = 1e-3
@@ -39,7 +47,6 @@ end
 @testset "misfit gradient SH, 3D" begin
     for (mode, I) in ((:sh, CartesianIndex(110, 1, 75)), (:p3d, CartesianIndex(45, 30, 40)))
         m = test_model(mode)
-        # 3D: thin absorbers, so that the stations are away from them (the adjoint of the PML is approximate)
         kw = (; dt=DT, nt=mode === :sh ? 150 : 100, sources=test_source(), T=Float64, wave=mode === :sh ? :sh : :psv, na=mode === :sh ? 20 : 8)
         obs = observed(m, kw, mode)
         J, g = misfit_gradient(m, obs; kw...)
