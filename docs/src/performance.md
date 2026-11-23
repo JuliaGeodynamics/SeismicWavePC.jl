@@ -2,13 +2,8 @@
 
 ## Marmousi2
 
-The elastic Marmousi2 model (Martin et al., 2006; 17 km × 3.5 km, 451 m of water) is the classic benchmark of seismic wave
-propagation codes. [`examples/Marmousi2.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/Marmousi2.jl) downloads it, simulates a marine shot and makes a movie of
-the waves over the P-wave velocity while the simulation runs (10 m grid, 5 s, 12 s on a laptop):
-
-![Waves in Marmousi2](assets/Marmousi2.gif)
-
-![Marmousi2](assets/Marmousi2.png)
+The elastic Marmousi2 model (Martin et al., 2006) is the classic benchmark of seismic wave propagation codes (movie and
+figures: [Examples](examples.md)).
 
 Benchmark ([`examples/benchmark_marmousi2.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl)): 2D P-SV on a 5 m grid (3401 × 703 cells),
 2 s (5317 steps), PML, an explosion 10 m below the sea surface and 641 receivers; time loop only, the better of two runs, on the

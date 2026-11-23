@@ -40,8 +40,18 @@ record weaker S waves and a longer coda.*
 
 ## Marmousi2
 
-[`Marmousi2.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/Marmousi2.jl): the elastic Marmousi2 benchmark model (downloaded on first use), a marine shot and its
-shot gather; see [Performance](@ref).
+The elastic Marmousi2 model (Martin et al., 2006; 17 km × 3.5 km, 451 m of water) is the classic benchmark of seismic wave
+propagation codes. [`Marmousi2.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/Marmousi2.jl) downloads
+it on first use, simulates a marine shot (explosion 10 m below the sea surface, 5 Hz Ricker wavelet) and makes a movie of the
+waves over the P-wave velocity while the simulation runs (10 m grid, 5 s, 12 s on a laptop):
+
+![Waves in Marmousi2](assets/Marmousi2.gif)
+
+![Marmousi2](assets/Marmousi2.png)
+
+*P-wave velocity, a snapshot of the vertical velocity, and the shot gather recorded 10 m below the sea surface.* The same
+model is the benchmark in [Performance](@ref), and the comparison with OpenSWPC and SeismicWaves.jl is in
+[Validation](@ref).
 
 ## Waveform inversion and Hamiltonian Monte Carlo
 
