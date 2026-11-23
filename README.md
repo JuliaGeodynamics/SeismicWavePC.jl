@@ -201,7 +201,10 @@ The tests also check:
 ### Marmousi2
 
 The elastic Marmousi2 model (Martin et al., 2006; 17 km × 3.5 km, 451 m of water) is the classic benchmark of seismic wave
-propagation codes. [`examples/Marmousi2.jl`](examples/Marmousi2.jl) downloads it and simulates a marine shot:
+propagation codes. [`examples/Marmousi2.jl`](examples/Marmousi2.jl) downloads it, simulates a marine shot and makes a movie of
+the waves over the P-wave velocity while the simulation runs (10 m grid, 5 s, 12 s on a laptop):
+
+![Waves in Marmousi2](docs/src/assets/Marmousi2.gif)
 
 ![Marmousi2](docs/src/assets/Marmousi2.png)
 
