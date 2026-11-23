@@ -1,0 +1,20 @@
+# Running simulations
+
+All options are keyword arguments of [`simulate`](@ref):
+
+```julia
+result = simulate(model; dt, nt, sources, stations, stf=:kupper, absorber=:pml, backend=CPU(), T=Float32, nproc=1)
+```
+
+- **Time step:** `dt` and `nt`. The Courant number is checked: an unstable `dt` gives an error with the largest stable value.
+- **Absorbing boundary:** `absorber = :pml` (default; perfectly matched layer, as recommended for OpenSWPC) or `:cerjan`
+  (sponge), `na = 20` cells thick at the sides and the bottom. The PML absorbs much better; it costs 15–100 % more time,
+  depending on how much of the model lies in the absorbing layers.
+- **Precision:** `T = Float32` (default) or `Float64`.
+- **CPU threads:** start Julia with `-t auto` (or `-t n`).
+- **GPUs:** `backend = CUDABackend()`, `ROCBackend()` or `MetalBackend()` (after `using CUDA`, `AMDGPU` or `Metal`).
+- **MPI:** start with `mpiexecjl -n 4 julia script.jl` and pass `nproc = 4` in 2D (subdomains in x) or `nproc = (2, 2)` in
+  3D (x and y). This works on CPUs and on CUDA or AMD GPUs, one GPU per process, and gives the same results as a serial run.
+- **Checkpoints:** `checkpoint = "run1", checkpoint_every = 1000` saves the state; `restart = true` continues from it (also
+  with MPI).
+- **Progress:** `verbose = true` (default) prints a summary and the progress.

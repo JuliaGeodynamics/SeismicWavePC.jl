@@ -1,0 +1,13 @@
+[deps]
+AdvancedHMC = "0bf59076-c3b1-5ca4-86bd-e02cd72cde3d"
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+GeophysicalModelGenerator = "3700c31b-fa53-48a6-808a-ef22d5a84742"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
+Optim = "429524aa-4258-5aef-a3af-852621145aeb"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SeismicWavePC = "2a62f5b1-65eb-4f43-9ac1-72d262d189d8"
+Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
+
+[sources]
+SeismicWavePC = {path = "../.."}

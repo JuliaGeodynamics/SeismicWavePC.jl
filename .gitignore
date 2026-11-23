@@ -12,3 +12,4 @@ examples/MagmaThermoKinematics/HighRes2D_*/
 *.log
 !docs/src/assets/*
 examples/data/
+docs/build/
