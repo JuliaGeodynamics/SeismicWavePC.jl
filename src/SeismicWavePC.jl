@@ -12,6 +12,7 @@ using GeophysicalModelGenerator: CartData, GeoData, ProjectionPoint, convert2Car
 import ImplicitGlobalGrid as IGG
 import MPI
 using Printf
+using Serialization: serialize, deserialize
 
 include("viscoelastic.jl")
 include("sources.jl")

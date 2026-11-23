@@ -26,12 +26,12 @@ end
 
 # ------------------------------------------------------------------ PML (OpenSWPC m_absorb_p: ADE CFS-PML, Zhang & Shen, 2010)
 # The kernels take a zone `P`: `nothing` in the interior (no PML terms), or a PML zone with the first cell `lo`, memory
-# variables `ax*`, `ay*`, `az*` (one per derivative) and damping profiles `g?c`, `g?e` (cell centres and edges).
+# variables `mem.ax*`, `mem.ay*`, `mem.az*` (one per derivative) and damping profiles `g?c`, `g?e` (cell centres and edges).
 
 "Derivative `d` along a PML axis: stretched with the profile `P.g[i]` and the memory variable `P.a[J]` (which is updated)."
 @inline ade(::Nothing, ::Symbol, ::Symbol, J, i, d, dt) = d
 Base.@propagate_inbounds function ade(P, a::Symbol, g::Symbol, J, i, d, dt)
-    A, γ = getfield(P, a), getfield(P, g)[i]
+    A, γ = getfield(P.mem, a), getfield(P, g)[i]
     m = A[J]
     A[J] = γ[3] * m + γ[4] * d * dt
     return γ[1] * d + γ[2] * m

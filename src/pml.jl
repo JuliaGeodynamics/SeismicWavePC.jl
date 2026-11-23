@@ -66,7 +66,11 @@ function pml_regions(::Val{mode}, g::Grid{N}, na, dt, fcut, off, nl, R, dev, bac
     pml = map(boxes) do b
         lo, ndr = local_range(b, off, nl)
         memory = pml_memory(Val(mode), () -> KernelAbstractions.zeros(backend, T, ndr...))
-        (lo, ndr, merge((; lo=CartesianIndex(lo)), profiles, memory))
+        (lo, ndr, merge((; lo=CartesianIndex(lo)), profiles, (; mem=memory)))
     end
     return ((local_range(inner, off, nl)..., nothing), pml...)
 end
+
+"All PML memory variables of the `regions`, as a tuple of arrays (for checkpoints)."
+pml_state(regions) = flatten_tuple(map(r -> r[3] === nothing ? () : values(r[3].mem), regions))
+flatten_tuple(t::Tuple) = isempty(t) ? () : (first(t)..., flatten_tuple(Base.tail(t))...)

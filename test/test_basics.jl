@@ -92,3 +92,17 @@ end
     r = simulate(elastic; dt=DT, nt=300, sources=test_source(), stations=[Station("S", 0.0, 0.0, 0.0; surface=true)], verbose=false)
     @test all(isfinite, r.v) && maximum(abs, r.v) > 0
 end
+
+@testset "checkpoint and restart" begin
+    dir = mktempdir()
+    file = joinpath(dir, "run")
+    kw = (; dt=DT, nt=200, sources=test_source(), stations=test_stations(:p3d), verbose=false)
+    model = test_model(:p3d)
+    full = simulate(model; kw...)
+    simulate(model; kw..., checkpoint=file, checkpoint_every=120)          # writes the state after step 120
+    @test isfile(file * ".jls")
+    restarted = simulate(model; kw..., checkpoint=file, restart=true)       # continues from step 121
+    @test restarted.v == full.v && restarted.strain == full.strain
+    @test_throws ErrorException simulate(model; kw..., checkpoint=joinpath(dir, "none"), restart=true)
+    @test_throws ErrorException simulate(model; kw..., nt=100, checkpoint=file, restart=true)   # another simulation
+end

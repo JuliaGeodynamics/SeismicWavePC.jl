@@ -130,6 +130,7 @@ record weaker S waves and a longer coda.*
 - **Absorbing boundary:** `absorber=:pml` (default; perfectly matched layer, as recommended for OpenSWPC) or `:cerjan` (sponge),
   `na=20` cells thick at the sides and the bottom. The PML absorbs much better; it costs 15–100% more time, depending on how
   much of the model lies in the absorbing layers.
+- **Checkpoints:** `checkpoint="run1", checkpoint_every=1000` saves the state; `restart=true` continues from it (also with MPI).
 - **Snapshots:** `snapshot_every=100` writes the velocity field to `snapshot_dir` as a ParaView movie (`wavefield.pvd`).
   With `callback=(wavefield, t) -> ...` the wavefield (a `CartData`) is passed to your function instead, e.g. to plot it while the
   simulation runs.
@@ -211,7 +212,7 @@ The laptop was also busy with other work, so single runs varied a lot; take the 
 
 ## Not (yet) supported
 
-- From OpenSWPC: checkpoint/restart, plane-wave sources, reciprocal Green's functions, netCDF snapshots.
+- From OpenSWPC: plane-wave sources, reciprocal Green's functions, netCDF snapshots.
 - OpenSWPC's random-medium generator; perturb the GMG model yourself instead.
 - Near vertical topography steps, the 2D results differ by 7–28% from the `swpc_psv`/`swpc_sh` binaries. They agree to 10⁻⁶ for flat
   surfaces, and for the same step in 3D, so the difference appears to lie in the 2D Fortran codes.

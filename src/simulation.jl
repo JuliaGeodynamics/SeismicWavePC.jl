@@ -95,6 +95,8 @@ Keyword arguments
 - `snapshot_every = 0`: if > 0, write the velocity field every so many steps to ParaView files in `snapshot_dir = "snapshots"`.
 - `callback = nothing`: a function `callback(wavefield::CartData, t)` that is called every `snapshot_every` steps (on rank 0)
   instead of writing ParaView files, e.g. to plot the wavefield while the simulation runs. `wavefield` has the field `V` [m/s].
+- `checkpoint = nothing`: file name (without extension) for checkpoints, written every `checkpoint_every` steps (one file per
+  MPI rank); with `restart = true` the simulation continues from the last checkpoint. Snapshots before it are not rewritten.
 - `backend = CPU()`: KernelAbstractions backend, e.g. `CUDABackend()`, `ROCBackend()`, `MetalBackend()`.
 - `T = Float32`: floating point type of the wavefield.
 - `nproc = 1`: MPI processes in x (2D), or `(npx, npy)` (3D); start julia with `mpiexec -n npx*npy`.
@@ -109,7 +111,8 @@ end
 # Function barrier on the solver type: from here on the dimension N is known to the compiler.
 function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
                   absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
-                  density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
+                  density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
+                  checkpoint=nothing, checkpoint_every=0, restart=false, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa Union{MomentTensorSource,ForceSource} ? [sources] : collect(sources)
     all(s -> s isa Union{MomentTensorSource,ForceSource}, sources) || error("sources must be MomentTensorSource or ForceSource")
@@ -211,8 +214,10 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     wall = time()
     # cell ranges (offset, size, zone): the whole model (Cerjan), or the interior and the PML zones
     head = (F, M, Src, FSrc, St, rec, acc, c, vc, FT(dt), kernels(mode))
+    ckp = checkpoint === nothing ? nothing : parallel ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
+    restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")
     tail = (nt, isempty(S), isempty(FS), length(own), record_every, snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt,
-            verbose && me == 0, parallel, nb, backend)
+            verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, backend)
     movie_out = absorber === :cerjan ? timeloop!(head..., ((ntuple(_ -> H, N), nl .- 2H, nothing),), tail...) :
                 timeloop!(head..., pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT), tail...)
     movie_out === nothing || movie_paraview(pvd=movie_out, Finalize=true)
@@ -225,6 +230,23 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     part(r, f) = traces[:, r, :] .* (scale * f)  # wavefield units -> m/s, m, Pa, strain (OpenSWPC)
     return Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), part(1:nc, 1), part(nc+1:2nc, 1),
                        part(2nc+1:2nc+ns, 1e6), part(2nc+ns+1:2nc+2ns, 1e-3), stations, components, tensor_components, wavefield)
+end
+
+"Write the simulation state (all arrays in `state`) after step `it` to `file`."
+function save_state(file, it, nt, state::Tuple)
+    data = collect(map(a -> vec(Array(a)), state))
+    open(io -> serialize(io, (it, nt, data)), file * ".tmp", "w")
+    mv(file * ".tmp", file; force=true)                  # never leave a half-written checkpoint
+end
+
+"Read a checkpoint into the arrays of `state` (which must match); returns its step."
+function load_state!(state::Tuple, file, nt)
+    T = eltype(first(state))
+    it, nt0, data = open(deserialize, file)::Tuple{Int,Int,Vector{Vector{T}}}
+    nt0 == nt && length(data) == length(state) && sum(length, data) == sum(length, state) ||
+        error("checkpoint $file does not belong to this simulation")
+    ntuple(i -> copyto!(state[i], reshape(data[i], size(state[i]))), Val(length(state)))
+    return it
 end
 
 "Cell indices (local) of the sources `S` as a `NamedTuple` `(i, [j,] k)` of device vectors."
@@ -250,10 +272,14 @@ stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, 
 
 # Function barrier: everything below is concretely typed.
 function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, force!, record!), regions, nt, nosource, noforce, nown, record_every,
-                   snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, backend)
+                   snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, ckp, checkpoint_every, restart,
+                   backend)
     V, Σ = velocities(F), stresses(F)
     report = max(nt ÷ 10, 1)
-    for it in 1:nt
+    state = (values(F)..., pml_state(regions)..., acc, rec)
+    it0 = restart ? load_state!(state, ckp, nt) + 1 : 1
+    restart && verbose && @printf("  restart from step %d\n", it0 - 1)
+    for it in it0:nt
         itw = (it - 1) % record_every == 0 ? (it - 1) ÷ record_every + 1 : 0
         nown > 0 && foreach_item!(backend, record!, (rec, acc, F, St, c, dtT, itw), nown)
         if snapshot_every > 0 && (it - 1) % snapshot_every == 0
@@ -275,6 +301,10 @@ function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, in
             KernelAbstractions.synchronize(backend)
             vmax = maximum(A -> maximum(abs, A), V) * out.scale
             @printf("  step %*d/%d  t = %8.4f s  max|v| = %.3e m/s\n", ndigits(nt), it, nt, tbeg + it * dt, vmax)
+        end
+        if ckp !== nothing && checkpoint_every > 0 && it % checkpoint_every == 0 && it < nt
+            KernelAbstractions.synchronize(backend)
+            save_state(ckp, it, nt, state)
         end
     end
     KernelAbstractions.synchronize(backend)
