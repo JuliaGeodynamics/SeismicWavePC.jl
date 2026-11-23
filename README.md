@@ -2,29 +2,43 @@
 
 # SeismicWavePC.jl
 
-**Seismic wave propagation in 2D and 3D visco-elastic media, in pure Julia, on CPUs, GPUs and MPI clusters.**
+**Seismic wave propagation and waveform-inversion gradients in 2D and 3D visco-elastic media, in pure Julia, on CPUs, GPUs and MPI clusters.**
 
-SeismicWavePC.jl is a Julia version of the finite-difference code [OpenSWPC](https://openswpc.github.io)
-(Maeda et al., 2017). It uses the same numerical method: a staggered grid that is 4th order in space and 2nd order in time,
-a generalized Zener body for constant Q, free surfaces and topography from an air layer, moment-tensor point sources and a
-perfectly matched layer (PML) or Cerjan absorbing boundary. It reproduces OpenSWPC seismograms to single-precision round-off; see [Validation](#validation).
-Models are [GeophysicalModelGenerator.jl](https://github.com/JuliaGeodynamics/GeophysicalModelGenerator.jl) (GMG) `CartData`
-objects, so any GMG model setup can be used directly.
+SeismicWavePC.jl simulates seismic waves through any model built with
+[GeophysicalModelGenerator.jl](https://github.com/JuliaGeodynamics/GeophysicalModelGenerator.jl) (GMG) and computes exact misfit
+gradients for full-waveform inversion. It started as a Julia port of the finite-difference code
+[OpenSWPC](https://openswpc.github.io) (Maeda et al., 2017) and still reproduces its seismograms to single-precision round-off
+(see [Validation](#validation)). It has since grown well beyond it.
 
-## What is new compared with OpenSWPC / OpenSWPC.jl
+## Features
 
-| | OpenSWPC (Fortran, via OpenSWPC.jl) | SeismicWavePC.jl |
-|---|---|---|
-| Code | Fortran binaries, input files | pure Julia: no binaries, no input files |
-| Operating systems | Linux, macOS (Windows via WSL) | Linux, macOS, Windows |
-| GPUs | NVIDIA only (OpenACC build) | NVIDIA, AMD, Apple (and more) via [KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl) |
-| Parallel CPU | MPI processes, single-threaded each | Julia threads, plus MPI |
-| Multi-node / multi-GPU | MPI | MPI via [ImplicitGlobalGrid.jl](https://github.com/eth-cscs/ImplicitGlobalGrid.jl) (CUDA- and ROCm-aware MPI) |
-| Model input | netCDF velocity file written from GMG | the GMG `CartData` itself |
-| Output | SAC and netCDF files | seismograms in memory, final wavefield as a `CartData`, ParaView snapshot movies |
-| Geographic coordinates | own projection | the same GMG `ProjectionPoint` used to build the model |
-| Safety | | stability (Courant) check, sources and stations outside the model are rejected |
-| Waveform inversion | | misfit gradients (adjoint-state method, CPU and GPU) |
+- **Physics:** P-SV and SH (2D) and 3D visco-elastic waves on a staggered grid, 4th order in space and 2nd order in time, as in
+  OpenSWPC.
+  - Constant Q from a generalized Zener body.
+  - Free surfaces and topography from an air layer; oceans (`vs = 0`).
+  - Perfectly matched layer (PML) or Cerjan absorbing boundaries.
+- **Sources:** moment tensors, double couples, point forces and incoming plane waves, in Cartesian or geographic coordinates.
+- **Seismograms:** velocity, displacement, stress and strain at any number of stations. Reciprocal Green's functions give
+  seismograms for many source positions at the cost of one simulation.
+- **Waveform inversion:** `misfit_gradient` returns the least-squares misfit and its gradient with respect to `rho`, `vp`, `vs`,
+  `Qp` and `Qs`.
+  - It uses the adjoint-state method with checkpointing and costs about 5 forward simulations.
+  - It is the exact gradient of the discrete simulation, including attenuation, free surfaces and the PML: it agrees with
+    automatic differentiation (Enzyme.jl, also available as `method=:ad`) to round-off.
+  - It runs on CPUs, GPUs and MPI, like the forward simulation.
+- **Hardware:** Julia threads on CPUs (faster than OpenSWPC per core and in total), and GPUs from NVIDIA, AMD and Apple through
+  [KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl). MPI domain decomposition for several GPUs or nodes
+  uses [ImplicitGlobalGrid.jl](https://github.com/eth-cscs/ImplicitGlobalGrid.jl).
+- **Models:** any GMG `CartData`, so models can come from GMG's geology tools, geographic data and projections, from
+  [MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl) thermal models, or from
+  [MAGEMin](https://github.com/ComputationalThermodynamics/MAGEMin_C.jl) phase diagrams (velocities, density, melt). Random
+  media (Gaussian, exponential, von Kármán) can be added.
+- **Output:** seismograms in memory and the final wavefield as a `CartData`, ParaView movies, or your own plots while the
+  simulation runs (`callback`).
+- **OpenSWPC compatibility:** its velocity models (netCDF, layered `lhm`/`lgm`/`grd`), SAC seismograms and netCDF snapshots
+  can be read and written, so existing workflows carry over; see [Coming from OpenSWPC](#coming-from-openswpc).
+- **Checks:** a Courant stability check, sources and stations outside the model are reported, checkpoint/restart, a test suite
+  against OpenSWPC and automatic differentiation, and type stability checked with JET.
 
 ## Installation
 
@@ -133,19 +147,7 @@ record weaker S waves and a longer coda.*
 - **Absorbing boundary:** `absorber=:pml` (default; perfectly matched layer, as recommended for OpenSWPC) or `:cerjan` (sponge),
   `na=20` cells thick at the sides and the bottom. The PML absorbs much better; it costs 15–100% more time, depending on how
   much of the model lies in the absorbing layers.
-- **Gradients (for waveform inversion):** `J, grad = misfit_gradient(model, observed; dt, nt, sources)` returns the
-  least-squares misfit of the velocity seismograms and its gradient with respect to `rho`, `vp`, `vs`, `Qp`, `Qs` (a `CartData`).
-  - It uses the adjoint-state method with checkpointing, on CPUs and GPUs, at the cost of about 4–5 forward simulations
-    ([benchmark](#marmousi2)).
-  - The adjoint kernels transpose the stencils exactly, including the 2nd-order cells at free surfaces and the PML (with
-    adjoint PML memory variables), and use adjoint memory variables for attenuation. The result is the exact gradient of the
-    discrete simulation: it agrees with automatic differentiation to round-off (1e-15) in 2D and 3D, with attenuation and
-    with waves in the PML.
-  - Still approximate: the Cerjan sponge (`absorber=:cerjan`), the side extrapolation of plane waves, and the density
-    gradient in the source cell of P-SV body forces.
-  - `method=:ad` (with `using Enzyme`) differentiates the whole simulation automatically (exact for all of these), but costs
-    20–50 forward simulations and runs only on the CPU, on one process.
-  - Works with MPI (`nproc`, CPUs or GPUs) like `simulate`; every process gets the misfit and the whole gradient.
+- **Gradients:** see [Waveform-inversion gradients](#waveform-inversion-gradients).
 - **Random media:** `xi = random_medium(x, y, z; spectrum=:vonkarman, a=0.5, epsilon=0.05, kappa=0.3)` makes fluctuations with a
   Gaussian, exponential or von Kármán spectrum (anisotropic with `a=(ax, ay, az)`), and `perturb(model, xi)` applies them to any
   GMG model as OpenSWPC does (vp, vs × (1 + ξ), ρ × (1 + 0.8 ξ) in solid rock).
@@ -158,6 +160,31 @@ record weaker S waves and a longer coda.*
   surface, ocean bottom) in OpenSWPC's netCDF format instead, including peak ground velocity maps (needs `using NCDatasets`).
   With `callback=(wavefield, t) -> ...` the wavefield (a `CartData`) is passed to your function instead, e.g. to plot it while the
   simulation runs.
+
+## Waveform-inversion gradients
+
+```julia
+using SeismicWavePC, GeophysicalModelGenerator
+observed = simulate(true_model; dt, nt, sources=source, stations)      # or recorded data, as Seismograms
+J, grad = misfit_gradient(start_model, observed; dt, nt, sources=source)
+grad.fields.vs                                                          # ∂J/∂vs on the grid of the model (per km/s)
+```
+
+- `J = ½ Σ (v - v_observed)²` over all samples, components and stations of `observed`, whose stations are used. `grad` is a
+  `CartData` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`.
+- All keywords of `simulate` work: GPUs (`backend`), MPI (`nproc`; every process gets `J` and the whole gradient), `T`,
+  `absorber`, `record_every`, ….
+- **Method:** adjoint-state method with checkpointing. The forward wavefield is saved every few steps (balancing host and device
+  memory) and the steps in between are recomputed; the adjoint simulation runs backwards.
+- **Exactness:** the adjoint kernels are the exact transposes of the forward kernels. They include the 2nd-order cells at free
+  surfaces and the PML (with adjoint PML memory variables), and adjoint memory variables of attenuation give the `Qp`, `Qs`
+  gradients. The result agrees with reverse-mode automatic differentiation to round-off (10⁻¹⁵ with `T = Float64`) in 2D and 3D.
+  It is approximate only for the Cerjan sponge, the side extrapolation of plane waves, and the density in the source cell of
+  P-SV body forces.
+- **Cost:** about 5 forward simulations. On Marmousi2 with 641 receivers a gradient takes 80 s on 12 CPU threads and 30 s on
+  an Apple GPU, 5× and 13× faster than [SeismicWaves.jl](https://github.com/GinvLab/SeismicWaves.jl) ([benchmark](#marmousi2)).
+- `method=:ad` (with `using Enzyme`) differentiates the whole simulation automatically instead: exact in all cases, but 20–50
+  forward simulations, on the CPU and one process.
 
 ## Coming from OpenSWPC
 
@@ -173,6 +200,23 @@ result = simulate(model; dt, nt, sources=source, stations)
 write_sac(result, "out/wav"; title="swpc", source, quantities=(:v, :u, :stress, :strain))   # swpc.psv.<station>.Vx.sac, …
 t, v, header = read_sac("old_run/wav/swpc.psv.ST01.Vz.sac")   # e.g. to compare with an earlier OpenSWPC run
 ```
+
+Compared with the Fortran code:
+
+| | OpenSWPC (Fortran, via OpenSWPC.jl) | SeismicWavePC.jl |
+|---|---|---|
+| Code | Fortran binaries, input files | pure Julia: no binaries, no input files |
+| Operating systems | Linux, macOS (Windows via WSL) | Linux, macOS, Windows |
+| GPUs | NVIDIA only (OpenACC build) | NVIDIA, AMD, Apple (and more) via [KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl) |
+| Parallel CPU | MPI processes, single-threaded each | Julia threads, plus MPI |
+| Multi-node / multi-GPU | MPI | MPI via [ImplicitGlobalGrid.jl](https://github.com/eth-cscs/ImplicitGlobalGrid.jl) (CUDA- and ROCm-aware MPI) |
+| Model input | netCDF velocity file written from GMG | the GMG `CartData` itself |
+| Output | SAC and netCDF files | seismograms in memory, final wavefield as a `CartData`, ParaView snapshot movies |
+| Geographic coordinates | own projection | the same GMG `ProjectionPoint` used to build the model |
+| Safety | | stability (Courant) check, sources and stations outside the model are rejected |
+| Waveform inversion | | exact misfit gradients (adjoint-state method; CPU, GPU, MPI) |
+
+How OpenSWPC's options map to SeismicWavePC.jl:
 
 | OpenSWPC | SeismicWavePC.jl |
 |---|---|
@@ -209,7 +253,9 @@ receivers are snapped to grid points, which changes amplitudes close to a free s
 ![Code comparison on Marmousi2](docs/src/assets/Marmousi2_codes.png)
 
 The tests also check:
-- MPI runs with 4 processes against serial runs (identical);
+- misfit gradients against automatic differentiation (Enzyme, agree to round-off) and finite differences of whole simulations,
+  in 2D and 3D, with attenuation and waves in the PML;
+- MPI runs with 4 processes against serial runs (identical; also the gradients);
 - CPU against Metal (agree to 10⁻⁶);
 - type stability with [JET.jl](https://github.com/aviatesk/JET.jl).
 
@@ -299,7 +345,7 @@ The laptop was also busy with other work, so single runs varied a lot; take the 
 
 ## Differences to OpenSWPC
 
-All features of OpenSWPC are available. Differences:
+All features of OpenSWPC are available. Differences in the results:
 
 - Plane waves agree with `swpc_3d` to 10⁻⁵. `swpc_psv` and `swpc_sh` give 1–5% different plane waves (even at vertical incidence),
   while the 2D initial wavefield here equals the analytic formula and uses the same code as 3D; the difference appears to lie in the
@@ -313,4 +359,4 @@ All features of OpenSWPC are available. Differences:
 Maeda, T., Takemura, S., and Furumura, T. (2017). OpenSWPC: an open-source integrated parallel simulation code for modeling seismic
 wave propagation in 3D heterogeneous viscoelastic media. *Earth, Planets and Space*, 69, 102. doi:10.1186/s40623-017-0687-2
 
-MIT license. The numerical algorithms are ported from OpenSWPC, © Takuto Maeda, MIT license.
+MIT license. The forward numerical algorithms are ported from OpenSWPC, © Takuto Maeda, MIT license.
