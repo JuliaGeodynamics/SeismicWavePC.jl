@@ -121,3 +121,18 @@ end
     @test_throws ErrorException PlaneWave(:love; depth=1, length=1)
     @test_throws ErrorException simulate(test_model(:sh); dt=DT, nt=1, sources=pw, wave=:sh, verbose=false)   # no P in SH
 end
+
+@testset "reciprocal Green's functions" begin
+    model = test_model(:psv)
+    p, rcv = (0.5, 0.0, -1.5), (-1.2, 0.0, -0.3)
+    src = DoubleCoupleSource(p...; Mw=3.0, strike=30, dip=60, rake=70, trise=0.3)
+    forward = simulate(model; dt=DT, nt=NT, sources=src, stations=[Station("R", rcv...)], verbose=false)
+    g = reciprocal_green(model, rcv, [Station("P", p...)]; component=:z, trise=0.3, displacement=true, dt=DT, nt=NT, verbose=false)
+    @test g.components == (:xx, :zz, :xz, :fx, :fz)
+    v = seismogram(g, 1, src)                                         # reciprocity
+    @test maximum(abs, v .- forward.v[:, 2, 1]) < 0.06 * maximum(abs, forward.v[:, 2, 1])
+    @test occursin("ReciprocalGreen", sprint(show, MIME"text/plain"(), g))
+    files = write_sac(g, mktempdir(); station="R")
+    @test basename(files[1]) == "swpc__00000001__R__z__mxx__.sac" && basename(files[end]) == "swpc__00000001__R__z__fz___.sac"
+    @test_throws ErrorException reciprocal_green(model, rcv, [Station("P", p...)]; component=:w, dt=DT, nt=10, verbose=false)
+end

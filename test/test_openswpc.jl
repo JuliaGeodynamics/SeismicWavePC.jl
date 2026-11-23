@@ -53,3 +53,15 @@ end
         @test maximum(abs, reshape(r.v[1:4:end, :, :], size(b, 1), :) .- b) / maximum(abs, b) < 1e-3
     end
 end
+
+@testset "agrees with OpenSWPC: reciprocal Green's functions" begin
+    ref = readdlm(joinpath(@__DIR__, "reference", "3d_green.txt"), comments=true)
+    points = [Station("1", 0.0, 0.0, -1.0), Station("2", 0.5, -0.3, -1.5), Station("3", -0.4, 0.1, -0.8)]
+    g = reciprocal_green(test_model(:p3d), (-1.2, 0.3, -0.3), points; component=:z, trise=0.3, displacement=true,
+                         dt=DT, nt=NT, absorber=:cerjan, verbose=false)
+    G = reshape(g.G[1:4:end, :, :], size(ref, 1), :)
+    for c in 1:9                                   # each component relative to its own size
+        a, b = G[:, c:9:end], ref[:, c:9:end]
+        @test maximum(abs, a .- b) / maximum(abs, b) < 1e-3
+    end
+end
