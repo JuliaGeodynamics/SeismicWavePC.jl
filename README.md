@@ -86,7 +86,8 @@ More examples are in [`examples/`](examples):
 - [`2D_PSV_hill.jl`](examples/2D_PSV_hill.jl): layered crust under a hill, with a record section plot.
 - [`3D_volcano.jl`](examples/3D_volcano.jl): a GMG volcano (`add_volcano!`) with a magma chamber, and stations in longitude and latitude.
 - [`3D_mpi.jl`](examples/3D_mpi.jl): the same on 4 MPI processes.
-- [`benchmark.jl`](examples/benchmark.jl): the timings below.
+- [`Marmousi2.jl`](examples/Marmousi2.jl): the elastic Marmousi2 model (downloaded on first use), a marine shot and its shot gather.
+- [`benchmark.jl`](examples/benchmark.jl), [`benchmark_marmousi2.jl`](examples/benchmark_marmousi2.jl): the timings below.
 
 Run them with `julia -t auto --project=examples examples/<name>.jl [cuda|amdgpu|metal]`.
 
@@ -196,6 +197,32 @@ The tests also check:
 - type stability with [JET.jl](https://github.com/aviatesk/JET.jl).
 
 ## Performance
+
+### Marmousi2
+
+The elastic Marmousi2 model (Martin et al., 2006; 17 km × 3.5 km, 451 m of water) is the classic benchmark of seismic wave
+propagation codes. [`examples/Marmousi2.jl`](examples/Marmousi2.jl) downloads it and simulates a marine shot:
+
+![Marmousi2](docs/src/assets/Marmousi2.png)
+
+Benchmark ([`examples/benchmark_marmousi2.jl`](examples/benchmark_marmousi2.jl)): 2D P-SV on a 5 m grid (3401 × 703 cells),
+2 s (5317 steps), PML, an explosion 10 m below the sea surface and 641 receivers; time loop only, the better of two runs, on the
+Apple M4 Max laptop. [SeismicWaves.jl](https://github.com/GinvLab/SeismicWaves.jl) (v0.9.1, elastic, without attenuation) ran the
+same grid, time step and receivers with its threaded CPU backend.
+
+| Code | Time | Million cell updates / s |
+|---|---:|---:|
+| OpenSWPC, 1 core | 152 s | 84 |
+| OpenSWPC, 12 MPI ranks | 16.5 s | 770 |
+| SeismicWaves.jl, 12 threads | 170 s (29 s with 1 receiver) | 75 (439) |
+| SeismicWavePC.jl, 1 thread | 106 s | 120 |
+| SeismicWavePC.jl, 12 threads | 14.9 s | 851 |
+| SeismicWavePC.jl, Apple M4 Max GPU (Metal) | 5.0 s | 2552 |
+
+SeismicWavePC.jl and OpenSWPC also update the memory variables of attenuation (Q is infinite here). In SeismicWaves.jl most of
+the time goes to recording the 641 receivers; with a single receiver it reaches 439 million updates per second.
+
+### Examples
 
 Seconds per simulation for the two examples, on an Apple M4 Max laptop (12 performance cores, 40-core GPU). These are
 wall-clock times of a whole run, including setup (and, for OpenSWPC, writing and reading its input files), without snapshots,

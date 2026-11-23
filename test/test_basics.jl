@@ -8,6 +8,8 @@ using Test
         @test moment_rate(stf, 0.4, 0.5, 1.0) == 0
     end
     @test_throws ErrorException moment_rate(:nonsense, 1.0, 0.0, 1.0)
+    t = 0:dt:4.0                                                           # Ricker: integral 0, peak 1/tr at t0 + tr
+    @test abs(sum(moment_rate.(:ricker, t, 0.5, 0.2)) * dt) < 1e-6 && moment_rate(:ricker, 0.7, 0.5, 0.2) ≈ 5
 end
 
 @testset "double couple" begin

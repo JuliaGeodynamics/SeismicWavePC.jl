@@ -87,12 +87,17 @@ seismic_moment(Mw) = 10^(1.5Mw + 9.05)
     moment_rate(stf::Symbol, t, t0, tr)
 
 Normalized moment-rate function (integral 1). `stf` is one of
-`:kupper` (default in OpenSWPC), `:boxcar`, `:triangle`, `:herrmann`, `:cosine`, `:texp`.
+`:kupper` (default in OpenSWPC), `:boxcar`, `:triangle`, `:herrmann`, `:cosine`, `:texp`, or `:ricker`: a Ricker wavelet with the
+peak frequency `1/tr`, centred at `t0 + tr` (integral 0, peak value `1/tr`; common in benchmarks).
 """
 function moment_rate(stf::Symbol, t, t0, tr)
     τ = t - t0
     if stf === :texp
         return τ >= 0 ? (2π)^2 * τ / tr^2 * exp(-2π * τ / tr) : 0.0
+    end
+    if stf === :ricker
+        a = (π * (τ - tr) / tr)^2
+        return (1 - 2a) * exp(-a) / tr
     end
     (0 <= τ <= tr) || return 0.0
     stf === :kupper && return 3π * sin(π * τ / tr)^3 / (4tr)

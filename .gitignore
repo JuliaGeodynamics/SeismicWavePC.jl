@@ -11,3 +11,4 @@ examples/MagmaThermoKinematics/HighRes2D_*/
 *.mp4
 *.log
 !docs/src/assets/*
+examples/data/
