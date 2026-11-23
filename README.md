@@ -136,6 +136,8 @@ record weaker S waves and a longer coda.*
   receiver seismogram for a source at any of the points, without a simulation per source.
 - **Checkpoints:** `checkpoint="run1", checkpoint_every=1000` saves the state; `restart=true` continues from it (also with MPI).
 - **Snapshots:** `snapshot_every=100` writes the velocity field to `snapshot_dir` as a ParaView movie (`wavefield.pvd`).
+  With `snapshots=Snapshots(xy=-5.0, xz=0.0, fs=true, quantities=(:v, :u, :ps))` it writes planes (horizontal, vertical, free
+  surface, ocean bottom) in OpenSWPC's netCDF format instead, including peak ground velocity maps (needs `using NCDatasets`).
   With `callback=(wavefield, t) -> ...` the wavefield (a `CartData`) is passed to your function instead, e.g. to plot it while the
   simulation runs.
 
@@ -160,10 +162,11 @@ t, v, header = read_sac("old_run/wav/swpc.psv.ST01.Vz.sac")   # e.g. to compare 
 | velocity model (`vmodel_type`) | any GMG `CartData`; `read_netcdf` (`velm`), `read_lhm` (`lhm`), `read_lgm` (`lgm`), `read_grd` (`grd`); `velm` and `grd` need `using NCDatasets` |
 | source and station files | `DoubleCoupleSource`, `MomentTensorSource`, `ForceSource` (`bf_mode`), `PlaneWave` (`pw_mode`), `Station` (in x, y or longitude, latitude) |
 | `green_mode` (reciprocal Green's functions) | `reciprocal_green(model, receiver, points; component)`, `seismogram(green, n, source)`, `write_sac(green, dir)` |
+| netCDF in general | optional: NCDatasets is only loaded with `using NCDatasets` (package extension) |
 | `vcut`, `munk_profile`, `earth_flattening` | keywords of `read_lhm`, `read_lgm`, `read_grd`; `flatten_earth(model)` for any model, `flatten_depth` for sources |
 | seismograms (`sw_wav_v`, `_u`, `_stress`, `_strain`) | always recorded: `result.v` [m/s], `result.u` [m], `result.stress` [Pa], `result.strain` |
 | SAC files in `odir/wav` | `write_sac(result, dir; quantities)`: same file names and units (nm/s, nm, Pa), z positive up |
-| snapshots (netCDF) | ParaView movie (`snapshot_every`) or your own plots (`callback`) |
+| snapshots (netCDF, `xy_v_sw`, `fs_ps_sw`, …) | `snapshots=Snapshots(xy, xz, yz, fs, ob; quantities=(:v, :u, :ps))`: same files (needs `using NCDatasets`); or a ParaView movie, or your own plots (`callback`) |
 | x north, y east, z down | x east, y north, z up (as in GMG) |
 | density in g/cm³ | kg/m³ (`density_unit=:g_cm3` for g/cm³) |
 
@@ -227,7 +230,6 @@ The laptop was also busy with other work, so single runs varied a lot; take the 
 
 ## Not (yet) supported
 
-- From OpenSWPC: netCDF snapshots.
 - Plane waves agree with `swpc_3d` to 10⁻⁵. `swpc_psv` and `swpc_sh` give 1–5% different plane waves (even at vertical incidence),
   while the 2D initial wavefield here equals the analytic formula and uses the same code as 3D; the difference appears to lie in the
   2D Fortran codes. OpenSWPC's 3D P-wave formula for `sxy` has `sd·cd·sf` where `sd²·sf·cf` is correct (only for inclined waves);

@@ -69,4 +69,49 @@ function bilinear(gx, gy, d, px, py)
     return (1 - u) * (1 - v) * d[i, j] + u * (1 - v) * d[i+1, j] + (1 - u) * v * d[i, j+1] + u * v * d[i+1, j+1]
 end
 
+# Snapshot files in OpenSWPC's netCDF layout: coordinates, time (unlimited), medium, and one variable per field
+function SeismicWavePC.snapshot_create(file, axes, vars, unit, medium)
+    NCDataset(file, "c") do ds
+        ds.attrib["title"] = "SeismicWavePC.jl snapshot (OpenSWPC format)"
+        ds.attrib["convention"] = "components at cell centres, x east, y north, z up; coordinate z is the depth"
+        for (name, c) in axes
+            defDim(ds, name, length(c))
+            defVar(ds, name, Float32.(c), (name,), attrib=["long_name" => name, "units" => "km"])
+        end
+        dims = (first(axes[1]), first(axes[2]))
+        defDim(ds, "t", Inf)
+        defVar(ds, "t", Float32, ("t",), attrib=["long_name" => "time", "units" => "s"])
+        units = (rho="g/cm^3", lambda="GPa", mu="GPa")
+        for (name, A) in pairs(medium)
+            defVar(ds, String(name), Float32.(A), dims, attrib=["long_name" => String(name), "units" => units[name]])
+        end
+        for v in vars
+            defVar(ds, v, Float32, (dims..., "t"), attrib=["long_name" => v, "units" => unit])
+        end
+    end
+    return nothing
+end
+
+function SeismicWavePC.snapshot_append(file, n, t, data)
+    NCDataset(file, "a") do ds
+        ds["t"][n] = t
+        for (v, A) in data
+            ds[v][:, :, n] = Float32.(A)
+        end
+    end
+    return nothing
+end
+
+function SeismicWavePC.snapshot_peaks(file, (V, Hz, A))
+    NCDataset(file, "a") do ds
+        dims = dimnames(ds["rho"])
+        for (name, X, long) in (("max-V", V, "Maximum amplitude of the vertical component"),
+                                ("max-H", Hz, "Maximum amplitude of the horizontal components"),
+                                ("max-A", A, "Maximum amplitude of the vector motion"))
+            defVar(ds, name, Float32.(X), dims, attrib=["long_name" => long, "units" => "m/s"])
+        end
+    end
+    return nothing
+end
+
 end

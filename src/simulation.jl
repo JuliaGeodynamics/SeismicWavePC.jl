@@ -93,6 +93,8 @@ Keyword arguments
 - `fq_min = 0.05`, `fq_max = 5.0`, `fq_ref = 1.0`: frequency band [Hz] of constant Q, and reference frequency of the velocities.
 - `density_unit = :kg_m3`: unit of `rho`, or `:g_cm3` (as in OpenSWPC).
 - `snapshot_every = 0`: if > 0, write the velocity field every so many steps to ParaView files in `snapshot_dir = "snapshots"`.
+- `snapshots = nothing`: [`Snapshots`](@ref) of planes as netCDF files (OpenSWPC format; needs `using NCDatasets`), written
+  every `snapshot_every` steps into `snapshot_dir` instead of the ParaView files.
 - `callback = nothing`: a function `callback(wavefield::CartData, t)` that is called every `snapshot_every` steps (on rank 0)
   instead of writing ParaView files, e.g. to plot the wavefield while the simulation runs. `wavefield` has the field `V` [m/s].
 - `checkpoint = nothing`: file name (without extension) for checkpoints, written every `checkpoint_every` steps (one file per
@@ -112,7 +114,7 @@ end
 function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
                   absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
-                  checkpoint=nothing, checkpoint_every=0, restart=false, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
+                  snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave} ? [sources] : collect(sources)
     all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave}, sources) ||
@@ -224,17 +226,19 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
                 isempty(forces) ? @sprintf("M0 = %.3e N m", M0) : @sprintf("%d moment tensor(s), %d force(s)", length(moments), length(forces)),
                 length(stations), backend isa CPU ? "CPU ($(Threads.nthreads()) threads)" : string(nameof(typeof(backend))), T, prod(dims))
     end
-    movie = (snapshot_every > 0 && me == 0 && callback === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
+    planes = snapshots === nothing ? nothing : setup_planes(snapshots, Val(mode), g, med, off, nl, dev, backend, FT, snapshot_dir, me)
+    movie = (snapshot_every > 0 && me == 0 && callback === nothing && snapshots === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     wall = time()
     # cell ranges (offset, size, zone): the whole model (Cerjan), or the interior and the PML zones
     head = (F, M, Src, FSrc, St, rec, acc, c, vc, FT(dt), kernels(mode))
     ckp = checkpoint === nothing ? nothing : parallel ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")
     tail = (nt, isempty(S), isempty(FS), length(own), record_every, snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt,
-            verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, pw_edges, edges, backend)
+            verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, pw_edges, edges, planes, backend)
     movie_out = absorber === :cerjan ? timeloop!(head..., ((ntuple(_ -> H, N), nl .- 2H, nothing),), tail...) :
                 timeloop!(head..., pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT), tail...)
     movie_out === nothing || movie_paraview(pvd=movie_out, Finalize=true)
+    planes === nothing || write_peaks(planes, snapshots.quantities, mode, scale, parallel, me)
     verbose && me == 0 && @printf("  finished in %.2f s\n", time() - wall)
 
     traces = zeros(nrec, 2nc + 2ns, length(stations))
@@ -277,17 +281,17 @@ function density_scale(unit, rho_max)
     return unit === :kg_m3 ? 1000.0 : 1.0
 end
 
-kernels(mode) = mode === :psv ? (vel_psv!, stress_psv!, inject_psv!, force_psv!, record_psv!) :
-                mode === :sh ? (vel_sh!, stress_sh!, inject_sh!, force_sh!, record_sh!) :
-                (vel_3d!, stress_3d!, inject_3d!, force_3d!, record_3d!)
+kernels(mode) = mode === :psv ? (vel_psv!, stress_psv!, inject_psv!, force_psv!, record_psv!, plane_psv!) :
+                mode === :sh ? (vel_sh!, stress_sh!, inject_sh!, force_sh!, record_sh!, plane_sh!) :
+                (vel_3d!, stress_3d!, inject_3d!, force_3d!, record_3d!, plane_3d!)
 
 velocities(F) = haskey(F, :Vx) ? (haskey(F, :Vy) ? (F.Vx, F.Vy, F.Vz) : (F.Vx, F.Vz)) : (F.Vy,)
 stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, F.Sxz, F.Sxy) : (F.Sxx, F.Szz, F.Sxz)) : (F.Syz, F.Sxy)
 
 # Function barrier: everything below is concretely typed.
-function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, force!, record!), regions, nt, nosource, noforce, nown, record_every,
+function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, force!, record!, plane!), regions, nt, nosource, noforce, nown, record_every,
                    snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, ckp, checkpoint_every, restart,
-                   pw_edges, edges, backend)
+                   pw_edges, edges, planes, backend)
     V, Σ = velocities(F), stresses(F)
     report = max(nt ÷ 10, 1)
     state = (values(F)..., pml_state(regions)..., acc, rec)
@@ -296,7 +300,17 @@ function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, in
     for it in it0:nt
         itw = (it - 1) % record_every == 0 ? (it - 1) ÷ record_every + 1 : 0
         nown > 0 && foreach_item!(backend, record!, (rec, acc, F, St, c, dtT, itw), nown)
-        if snapshot_every > 0 && (it - 1) % snapshot_every == 0
+        if planes !== nothing
+            store = snapshot_every > 0 && (it - 1) % snapshot_every == 0
+            for p in planes
+                isempty(p.own) || foreach_item!(backend, plane!, (p.B, p.U, p.PK, F, M, c, p.pts, dtT, store), length(p.own))
+            end
+            if store
+                KernelAbstractions.synchronize(backend)
+                write_planes(planes, solver(out), (it - 1) ÷ snapshot_every + 1, tbeg + (it - 1) * dt, out.scale, parallel, out.me)
+            end
+        end
+        if snapshot_every > 0 && (it - 1) % snapshot_every == 0 && (planes === nothing || callback !== nothing)
             KernelAbstractions.synchronize(backend)
             data = velocity(out, F)
             t = tbeg + (it - 1) * dt
@@ -359,6 +373,8 @@ struct Output{N,mode}
     me::Int
     scale::Float64
 end
+
+solver(::Output{N,mode}) where {N,mode} = mode
 
 "Cell-centred velocity field `V` [m/s, z up] as `CartData` on rank 0 (`nothing` on other ranks)."
 function velocity(o::Output{N,mode}, F) where {N,mode}

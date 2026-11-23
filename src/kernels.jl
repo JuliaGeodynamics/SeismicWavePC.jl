@@ -301,6 +301,59 @@ Base.@propagate_inbounds function record_3d!(rec, acc, F, st, c, dt, itw, n)
                                     a[4], a[5], a[6], a[7], a[8], a[9]))
 end
 
+# ------------------------------------------------------------------ snapshot planes (OpenSWPC m_snap)
+# Every step at every point of a plane: displacement (U) and peak velocities (PK: vertical, horizontal, vector). At snapshot
+# steps (`store`): velocity, displacement and divergence / rotation (2nd order, as OpenSWPC; zero in air / fluid) into B.
+# z positive up: the rotation is that of the (x east, y north, z up) frame.
+
+Base.@propagate_inbounds function store_row!(B, n, q)
+    for m in eachindex(q)
+        B[n, m] = q[m]
+    end
+end
+Base.@propagate_inbounds function peaks!(PK, n, vz, vh, va)
+    PK[n, 1] = max(PK[n, 1], abs(vz)); PK[n, 2] = max(PK[n, 2], vh); PK[n, 3] = max(PK[n, 3], va)
+end
+
+Base.@propagate_inbounds function plane_psv!(B, U, PK, F, M, c, pts, dt, store, n)
+    (; Vx, Vz) = F
+    I, ex, ez = CartesianIndex(pts.i[n], pts.k[n]), CartesianIndex(1, 0), CartesianIndex(0, 1)
+    vx, vz = (Vx[I] + Vx[I-ex]) / 2, -(Vz[I] + Vz[I-ez]) / 2
+    U[n, 1] += vx * dt; U[n, 2] += vz * dt
+    peaks!(PK, n, vz, abs(vx), hypot(vx, vz))
+    if store
+        cx, cz = c[1][3], c[2][3]
+        div = ((Vx[I] - Vx[I-ex]) * cx + (Vz[I] - Vz[I-ez]) * cz) * (M.lam[I] + 2M.mu[I] > 0)
+        rot = -((Vx[I+ez] - Vx[I]) * cz - (Vz[I+ex] - Vz[I]) * cx) * (M.mu[I] > 0)
+        store_row!(B, n, (vx, vz, U[n, 1], U[n, 2], div, rot))
+    end
+end
+
+Base.@propagate_inbounds function plane_sh!(B, U, PK, F, M, c, pts, dt, store, n)
+    vy = F.Vy[pts.i[n], pts.k[n]]
+    U[n, 1] += vy * dt
+    peaks!(PK, n, zero(vy), abs(vy), abs(vy))
+    store && store_row!(B, n, (vy, U[n, 1]))
+end
+
+Base.@propagate_inbounds function plane_3d!(B, U, PK, F, M, c, pts, dt, store, n)
+    (; Vx, Vy, Vz) = F
+    I = CartesianIndex(pts.i[n], pts.j[n], pts.k[n])
+    ex, ey, ez = CartesianIndex(1, 0, 0), CartesianIndex(0, 1, 0), CartesianIndex(0, 0, 1)
+    vx, vy, vz = (Vx[I] + Vx[I-ex]) / 2, (Vy[I] + Vy[I-ey]) / 2, -(Vz[I] + Vz[I-ez]) / 2
+    U[n, 1] += vx * dt; U[n, 2] += vy * dt; U[n, 3] += vz * dt
+    peaks!(PK, n, vz, hypot(vx, vy), hypot(hypot(vx, vy), vz))   # hypot: no underflow of tiny values
+    if store
+        cx, cy, cz = c[1][3], c[2][3], c[3][3]
+        solid = M.mu[I] > 0
+        div = ((Vx[I] - Vx[I-ex]) * cx + (Vy[I] - Vy[I-ey]) * cy + (Vz[I] - Vz[I-ez]) * cz) * (M.lam[I] + 2M.mu[I] > 0)
+        rx = -((Vz[I+ey] - Vz[I]) * cy - (Vy[I+ez] - Vy[I]) * cz) * solid
+        ry = -((Vx[I+ez] - Vx[I]) * cz - (Vz[I+ex] - Vz[I]) * cx) * solid
+        rz = ((Vy[I+ex] - Vy[I]) * cx - (Vx[I+ey] - Vx[I]) * cy) * solid
+        store_row!(B, n, (vx, vy, vz, U[n, 1], U[n, 2], U[n, 3], div, rx, ry, rz))
+    end
+end
+
 # ------------------------------------------------------------------ launching
 # The physics lives in the @inline cell functions above. On GPUs they are wrapped in one generic
 # KernelAbstractions kernel; on the CPU plain threaded/SIMD loops are used (much faster than POCL).

@@ -111,7 +111,7 @@ function surface_zones(lam, mu, n::NTuple{N}) where {N}
         return top, bot
     end
     (fs_top, fs_bot), (ob_top, ob_bot) = zone(kfs), zone(kob)
-    return (; fs_top, fs_bot, ob_top, ob_bot, kfs)   # kfs is indexed by padded column
+    return (; fs_top, fs_bot, ob_top, ob_bot, kfs, kob)   # kfs, kob are indexed by padded column
 end
 
 """

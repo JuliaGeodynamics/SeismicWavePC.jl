@@ -93,3 +93,38 @@ end
     @test col(:vp, 6)[findfirst(≈(-3.5), z)] == 6.0 && col(:vp, 6)[findfirst(≈(-2.5), z)] == 4.0   # boundary at 3 km in the centre
     @test count(==(6.0), col(:vp, 1)) > count(==(6.0), col(:vp, 11))                              # deeper towards the east
 end
+
+@testset "netCDF snapshots (OpenSWPC format)" begin
+    dir = mktempdir()
+    m = test_model(:p3d)
+    x, y, z = m.x.val[30, 1, 1], m.y.val[1, 31, 1], m.z.val[1, 1, 40]           # a cell centre on the xz plane y = y
+    st = [Station("P", x, y, z), Station("S", x, y, 0.0; surface=true)]
+    every = 50
+    r = simulate(m; dt=DT, nt=151, sources=test_source(), stations=st, snapshot_every=every, snapshot_dir=dir, verbose=false,
+                 snapshots=Snapshots(xy=-1.0, xz=y, yz=0.0, fs=true, ob=true, quantities=(:v, :u, :ps)))
+    @test length(readdir(dir)) == 15 && isfile(joinpath(dir, "swpc.3d.fs.v.nc"))
+    NCDataset(joinpath(dir, "swpc.3d.xz.v.nc")) do ds
+        @test size(ds["Vz"]) == (80, 60, 4) && ds["t"][:] ≈ (0:3) .* every * DT
+        k = findfirst(≈(-z), ds["z"][:])                                       # z is the depth
+        for n in 1:4
+            @test ds["Vx"][30, k, n] ≈ r.v[(n-1)*every+1, 1, 1] rtol = 1e-5 atol = 1e-12
+            @test ds["Vz"][30, k, n] ≈ r.v[(n-1)*every+1, 3, 1] rtol = 1e-5 atol = 1e-12
+        end
+    end
+    NCDataset(joinpath(dir, "swpc.3d.xz.u.nc")) do ds
+        k = findfirst(≈(-z), ds["z"][:])
+        @test ds["Uz"][30, k, 4] ≈ r.u[3every+1, 3, 1] rtol = 1e-4
+    end
+    NCDataset(joinpath(dir, "swpc.3d.fs.v.nc")) do ds
+        @test ds["Vz"][30, 31, 3] ≈ r.v[2every+1, 3, 2] rtol = 1e-5 atol = 1e-12          # free surface = surface station
+        @test all(ds["max-A"][:, :] .>= ds["max-V"][:, :] .* (1 - 1e-6)) && maximum(ds["max-A"][:, :]) > 0
+    end
+    simulate(test_model(:psv); dt=DT, nt=11, sources=test_source(), snapshot_every=10, snapshot_dir=dir, verbose=false,
+             snapshots=Snapshots(xz=true, quantities=(:v, :ps)))
+    NCDataset(joinpath(dir, "swpc.psv.xz.ps.nc")) do ds
+        @test haskey(ds, "divergence") && haskey(ds, "rotation") && size(ds["rotation"]) == (200, 100, 2)
+    end
+    @test_throws ErrorException simulate(test_model(:sh); dt=DT, nt=11, sources=test_source(), wave=:sh, verbose=false,
+                                         snapshot_every=10, snapshot_dir=dir, snapshots=Snapshots(xz=true, quantities=(:ps,)))
+    @test_throws ErrorException Snapshots(xy=0.0, quantities=(:energy,))
+end

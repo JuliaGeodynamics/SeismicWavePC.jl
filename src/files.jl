@@ -14,6 +14,10 @@ Requires `using NCDatasets`.
 """
 function read_netcdf end
 
+# NCDatasets is an optional dependency (package extension): a clear error without it
+const NETCDF_HINT = "netCDF files need the optional package NCDatasets: add it and load it with `using NCDatasets`"
+read_netcdf(file::Any...) = error(NETCDF_HINT)
+
 const SAC_UNDEF = -12345
 
 """

@@ -62,6 +62,10 @@ end
     @test sprint(show, f) == "ForceSource at (0.3, 0, -1.5) km, F = (2.000e+13, 0.000e+00, -1.000e+13) N, t0 = 0 s, trise = 0.3 s"
 end
 
+@testset "netCDF needs NCDatasets" begin
+    isdefined(Main, :NCDatasets) || @test_throws "NCDatasets" read_netcdf("model.nc")
+end
+
 @testset "density units" begin
     m = test_model(:sh)
     kw = (; dt=DT, nt=50, sources=test_source(), wave=:sh, verbose=false)

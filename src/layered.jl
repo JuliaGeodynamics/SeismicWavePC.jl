@@ -123,3 +123,4 @@ bicubic). Above the first boundary the model is air (z > 0) or sea water (`ocean
 Requires `using NCDatasets`.
 """
 function read_grd end
+read_grd(args::Any...; kwargs...) = error(NETCDF_HINT)
