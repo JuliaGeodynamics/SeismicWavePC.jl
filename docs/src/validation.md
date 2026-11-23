@@ -1,7 +1,7 @@
 # Validation
 
 The test suite compares seismograms (velocity, displacement, stress and strain) with the Fortran OpenSWPC code (`swpc_psv`,
-`swpc_sh`, `swpc_3d`; reference traces are in [`test/reference`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/test/reference)):
+`swpc_sh`, `swpc_3d`; reference traces are in [`test/reference`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/test/reference)):
 
 | Solver | Model | Max. difference to OpenSWPC (Cerjan / PML) |
 |---|---|---|
@@ -22,9 +22,9 @@ The tests also check:
   in 2D and 3D, with attenuation and waves in the PML; source gradients, misfit options and several shots against finite
   differences;
 - MPI runs with 4 processes against serial runs (identical; also the gradients);
-- CPU against Metal (agree to 10⁻⁶) and against CUDA on an NVIDIA A100 ([`examples/check_cuda.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/check_cuda.jl):
+- CPU against Metal (agree to 10⁻⁶) and against CUDA on an NVIDIA A100 ([`examples/check_cuda.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/check_cuda.jl):
   forward simulations and gradients agree to 10⁻¹⁴ in double precision), and MPI on two A100 GPUs against a serial run
-  ([`examples/check_cuda_mpi.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/check_cuda_mpi.jl), also 10⁻¹⁴);
+  ([`examples/check_cuda_mpi.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/check_cuda_mpi.jl), also 10⁻¹⁴);
 - the interfaces to Optim, LogDensityProblems, ChainRules and ForwardDiff;
 - type stability with [JET.jl](https://github.com/aviatesk/JET.jl).
 

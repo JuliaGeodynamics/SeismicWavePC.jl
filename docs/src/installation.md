@@ -5,7 +5,7 @@
 2. Install the package (it is not registered yet):
    ```julia
    julia> ]
-   pkg> add https://github.com/boriskaus/SeismicWavePC.jl
+   pkg> add https://github.com/JuliaGeodynamics/SeismicWavePC.jl
    ```
 3. To use all CPU cores, start Julia with threads: `julia -t auto`. On machines with very many cores that are shared with
    other jobs, a moderate number of threads (e.g. `-t 8`) can be faster.
@@ -40,7 +40,7 @@ These are loaded only when you load them yourself (package extensions):
 
 The examples need Julia 1.11 or newer. Clone the repository and install their environments:
 ```
-git clone https://github.com/boriskaus/SeismicWavePC.jl
+git clone https://github.com/JuliaGeodynamics/SeismicWavePC.jl
 cd SeismicWavePC.jl
 julia --project=examples -e 'using Pkg; Pkg.instantiate()'
 julia --project=examples/MagmaThermoKinematics -e 'using Pkg; Pkg.instantiate()'   # MTK and MAGEMin examples

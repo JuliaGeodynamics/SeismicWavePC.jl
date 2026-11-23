@@ -1,12 +1,12 @@
 # Examples
 
-The examples are in the [`examples`](https://github.com/boriskaus/SeismicWavePC.jl/tree/main/examples) folder of the
+The examples are in the [`examples`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/tree/main/examples) folder of the
 repository (see [Installation](@ref) for their environments). Most take `cuda`, `amdgpu` or `metal` as last argument to run
 on a GPU.
 
 ## 3D: waves through the magmatic system below an Unzen-like volcano
 
-[`MagmaThermoKinematics/Unzen_3D.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/MagmaThermoKinematics/Unzen_3D.jl): a volcano on a peninsula, with a temperature
+[`MagmaThermoKinematics/Unzen_3D.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/MagmaThermoKinematics/Unzen_3D.jl): a volcano on a peninsula, with a temperature
 field from a linear geotherm and superposed Gaussian anomalies (a deep mush reservoir, a body rising from it, a reservoir
 below the summit). MAGEMin phase diagrams give density, velocities and melt fraction; partially molten rock has a low Q.
 The movie of a Mw 4 earthquake is made while the simulation runs.
@@ -15,15 +15,15 @@ The movie of a Mw 4 earthquake is made while the simulation runs.
 
 ## 3D: a volcano with a magma chamber
 
-[`3D_volcano.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/3D_volcano.jl) builds a volcano with GMG (`add_volcano!`), a magma chamber and stations given in
-longitude and latitude; [`3D_mpi.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/3D_mpi.jl) runs it on 4 MPI processes, and
-[`3D_volcano_movie.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/3D_volcano_movie.jl) makes a movie of it:
+[`3D_volcano.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/3D_volcano.jl) builds a volcano with GMG (`add_volcano!`), a magma chamber and stations given in
+longitude and latitude; [`3D_mpi.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/3D_mpi.jl) runs it on 4 MPI processes, and
+[`3D_volcano_movie.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/3D_volcano_movie.jl) makes a movie of it:
 
 ![Waves in a volcano](assets/3D_volcano.gif)
 
 ## 2D: Unzen from MagmaThermoKinematics.jl and MAGEMin
 
-[`MagmaThermoKinematics/Unzen_2D.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/MagmaThermoKinematics/Unzen_2D.jl) runs the 2D Unzen model of
+[`MagmaThermoKinematics/Unzen_2D.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/MagmaThermoKinematics/Unzen_2D.jl) runs the 2D Unzen model of
 [MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl) (about 6 minutes at 100 m resolution),
 computes density, velocities and melt fraction with [MAGEMin](https://github.com/ComputationalThermodynamics/MAGEMin_C.jl),
 and simulates an earthquake recorded by seismometers just below the surface:
@@ -41,7 +41,7 @@ record weaker S waves and a longer coda.*
 ## Marmousi2
 
 The elastic Marmousi2 model (Martin et al., 2006; 17 km × 3.5 km, 451 m of water) is the classic benchmark of seismic wave
-propagation codes. [`Marmousi2.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/Marmousi2.jl) downloads
+propagation codes. [`Marmousi2.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/Marmousi2.jl) downloads
 it on first use, simulates a marine shot (explosion 10 m below the sea surface, 5 Hz Ricker wavelet) and makes a movie of the
 waves over the P-wave velocity while the simulation runs (10 m grid, 5 s, 12 s on a laptop):
 
@@ -55,11 +55,11 @@ model is the benchmark in [Performance](@ref), and the comparison with OpenSWPC 
 
 ## Waveform inversion and Hamiltonian Monte Carlo
 
-In [`examples/Inversion`](https://github.com/boriskaus/SeismicWavePC.jl/tree/main/examples/Inversion) (own environment),
+In [`examples/Inversion`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/tree/main/examples/Inversion) (own environment),
 noisy seismograms of one earthquake at 11 stations are inverted for the shear velocity in three depth bands:
-- [`inversion_turing.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/Inversion/inversion_turing.jl): L-BFGS with Optim.jl, then Hamiltonian Monte Carlo (NUTS) with
+- [`inversion_turing.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/Inversion/inversion_turing.jl): L-BFGS with Optim.jl, then Hamiltonian Monte Carlo (NUTS) with
   Turing.jl;
-- [`inversion_hmc.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/Inversion/inversion_hmc.jl): NUTS with AdvancedHMC.jl directly, without Turing and without AD.
+- [`inversion_hmc.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/Inversion/inversion_hmc.jl): NUTS with AdvancedHMC.jl directly, without Turing and without AD.
 
 ![Posterior of the inversion](assets/inversion_turing.png)
 
@@ -67,7 +67,7 @@ noisy seismograms of one earthquake at 11 stations are inverted for the shear ve
 
 ## Others
 
-- [`2D_PSV_hill.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/2D_PSV_hill.jl): layered crust under a hill, with a record section ([Getting started](@ref)).
-- [`benchmark.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/benchmark.jl), [`benchmark_marmousi2.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl): the timings in
+- [`2D_PSV_hill.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/2D_PSV_hill.jl): layered crust under a hill, with a record section ([Getting started](@ref)).
+- [`benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark.jl), [`benchmark_marmousi2.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl): the timings in
   [Performance](@ref).
-- [`check_cuda.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/check_cuda.jl), [`check_cuda_mpi.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/check_cuda_mpi.jl): checks of NVIDIA GPUs and of MPI on GPUs.
+- [`check_cuda.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/check_cuda.jl), [`check_cuda_mpi.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/check_cuda_mpi.jl): checks of NVIDIA GPUs and of MPI on GPUs.

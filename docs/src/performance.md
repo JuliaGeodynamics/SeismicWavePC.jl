@@ -5,7 +5,7 @@
 The elastic Marmousi2 model (Martin et al., 2006) is the classic benchmark of seismic wave propagation codes (movie and
 figures: [Examples](examples.md)).
 
-Benchmark ([`examples/benchmark_marmousi2.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl)): 2D P-SV on a 5 m grid (3401 × 703 cells),
+Benchmark ([`examples/benchmark_marmousi2.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl)): 2D P-SV on a 5 m grid (3401 × 703 cells),
 2 s (5317 steps), PML, an explosion 10 m below the sea surface and 641 receivers; time loop only, the better of two runs, on the
 Apple M4 Max laptop. [SeismicWaves.jl](https://github.com/GinvLab/SeismicWaves.jl) (v0.9.1, elastic, without attenuation) ran the
 same grid, time step and receivers with its threaded CPU backend.
@@ -23,7 +23,7 @@ SeismicWavePC.jl and OpenSWPC also update the memory variables of attenuation (Q
 the time goes to recording the 641 receivers; with a single receiver it reaches 439 million updates per second.
 
 Misfit gradient (adjoint-state method, L2 misfit of all receivers) on the same problem.
-[`examples/benchmark_marmousi2.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl) with `gradient` as second argument:
+[`examples/benchmark_marmousi2.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl) with `gradient` as second argument:
 
 | Code | Forward | Gradient | Gradient / forward |
 |---|---:|---:|---:|
@@ -46,8 +46,8 @@ With the PML (the default of both codes):
 
 | Example | OpenSWPC, 1 core | OpenSWPC, MPI | Julia, 1 thread | Julia, MPI | Julia, 12 threads | Julia, Metal GPU |
 |---|---:|---:|---:|---:|---:|---:|
-| [2D P-SV hill](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/2D_PSV_hill.jl): 600 × 281 cells, 3000 steps | 6.2 s | 1.7 s (4 ranks) | 4.4 s | 1.9 s (4 ranks) | 1.2 s | 0.28 s |
-| [3D volcano](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/3D_volcano.jl): 160 × 160 × 126 cells, 1000 steps | 109 s | 18 s (8 ranks) | 91 s | 22 s (8 ranks) | 14 s | 4.4 s |
+| [2D P-SV hill](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/2D_PSV_hill.jl): 600 × 281 cells, 3000 steps | 6.2 s | 1.7 s (4 ranks) | 4.4 s | 1.9 s (4 ranks) | 1.2 s | 0.28 s |
+| [3D volcano](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/3D_volcano.jl): 160 × 160 × 126 cells, 1000 steps | 109 s | 18 s (8 ranks) | 91 s | 22 s (8 ranks) | 14 s | 4.4 s |
 
 With the Cerjan sponge (`absorber=:cerjan`):
 
@@ -62,7 +62,7 @@ With the Cerjan sponge (`absorber=:cerjan`):
 
 Time loop only, with the Cerjan absorber, in million cell updates per second (higher is better), on an Apple M4 Max laptop (12 performance cores, 40-core GPU).
 The model is a half-space with Q and a free surface. Both codes ran through their normal drivers; the times have setup subtracted
-and are the minimum of three runs. You can reproduce them with [`examples/benchmark.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/benchmark.jl).
+and are the minimum of three runs. You can reproduce them with [`examples/benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark.jl).
 
 | Case | OpenSWPC, 1 core | OpenSWPC, MPI | Julia, 1 thread | Julia, 12 threads | Julia, Metal GPU |
 |---|---:|---:|---:|---:|---:|

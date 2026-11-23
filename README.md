@@ -1,5 +1,5 @@
-[![CI](https://github.com/boriskaus/SeismicWavePC.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/boriskaus/SeismicWavePC.jl/actions/workflows/CI.yml)
-[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://boriskaus.github.io/SeismicWavePC.jl/dev/)
+[![CI](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/actions/workflows/CI.yml)
+[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/)
 
 # SeismicWavePC.jl
 
@@ -44,7 +44,7 @@ anomalies) turned into velocities and melt with MAGEMin; orange marks partially 
 
 ```julia
 julia> ]
-pkg> add https://github.com/boriskaus/SeismicWavePC.jl
+pkg> add https://github.com/JuliaGeodynamics/SeismicWavePC.jl
 ```
 Start Julia with `julia -t auto` to use all cores; for GPUs add `CUDA`, `AMDGPU` or `Metal`.
 
@@ -67,10 +67,10 @@ J, gradient = misfit_gradient(model, observed; dt=0.004, nt=1500, sources=source
 
 ## Documentation
 
-The [documentation](https://boriskaus.github.io/SeismicWavePC.jl/dev/) covers models, sources, GPUs and MPI, gradients,
-inversion with Turing, AdvancedHMC and Optim, the [examples](https://boriskaus.github.io/SeismicWavePC.jl/dev/examples/)
+The [documentation](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/) covers models, sources, GPUs and MPI, gradients,
+inversion with Turing, AdvancedHMC and Optim, the [examples](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/examples/)
 (3D volcanoes, Unzen, Marmousi2, Bayesian inversion), the transition from OpenSWPC, validation and
-[performance](https://boriskaus.github.io/SeismicWavePC.jl/dev/performance/): on the Marmousi2 benchmark a laptop GPU is 3×
+[performance](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/performance/): on the Marmousi2 benchmark a laptop GPU is 3×
 faster than OpenSWPC on 12 MPI ranks, and a misfit gradient is 13× faster than with SeismicWaves.jl.
 
 ## References and license

@@ -5,7 +5,7 @@ makedocs(;
     sitename="SeismicWavePC.jl",
     modules=[SeismicWavePC],
     authors="Boris Kaus and contributors",
-    format=Documenter.HTML(; prettyurls=get(ENV, "CI", nothing) == "true", canonical="https://boriskaus.github.io/SeismicWavePC.jl",
+    format=Documenter.HTML(; prettyurls=get(ENV, "CI", nothing) == "true", canonical="https://juliageodynamics.github.io/SeismicWavePC.jl",
                            size_threshold_ignore=["api.md"], edit_link="main"),
     pages=[
         "Home" => "index.md",
@@ -31,4 +31,4 @@ makedocs(;
     warnonly=[:missing_docs, :cross_references],
 )
 
-deploydocs(; repo="github.com/boriskaus/SeismicWavePC.jl.git", devbranch="main", push_preview=true)
+deploydocs(; repo="github.com/JuliaGeodynamics/SeismicWavePC.jl.git", devbranch="main", push_preview=true)

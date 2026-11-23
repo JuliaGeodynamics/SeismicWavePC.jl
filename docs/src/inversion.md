@@ -37,11 +37,11 @@ chain = sample(inversion(problem), NUTS(), 1000)
 These connections are package extensions: they load automatically with Optim, Turing, LogDensityProblems, ForwardDiff,
 Mooncake, ReverseDiff or ChainRulesCore, and cost nothing otherwise.
 
-Examples, in their own environment [`examples/Inversion`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/Inversion), invert noisy seismograms of one earthquake
+Examples, in their own environment [`examples/Inversion`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/Inversion), invert noisy seismograms of one earthquake
 at 11 stations for the shear velocity in three depth bands:
-- [`inversion_turing.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/Inversion/inversion_turing.jl): L-BFGS with Optim, then Hamiltonian Monte Carlo (NUTS)
+- [`inversion_turing.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/Inversion/inversion_turing.jl): L-BFGS with Optim, then Hamiltonian Monte Carlo (NUTS)
   with Turing;
-- [`inversion_hmc.jl`](https://github.com/boriskaus/SeismicWavePC.jl/blob/main/examples/Inversion/inversion_hmc.jl): Hamiltonian Monte Carlo (NUTS, or classic HMC) with AdvancedHMC
+- [`inversion_hmc.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/Inversion/inversion_hmc.jl): Hamiltonian Monte Carlo (NUTS, or classic HMC) with AdvancedHMC
   directly, without Turing and without AD.
 
 ```
