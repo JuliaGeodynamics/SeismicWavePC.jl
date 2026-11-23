@@ -29,6 +29,7 @@ include("layered.jl")
 include("green.jl")
 include("randommedium.jl")
 include("gradient.jl")
+include("adjoint.jl")
 
 export MomentTensorSource, DoubleCoupleSource, ForceSource, PlaneWave, Station, Seismograms, simulate, moment_rate, CPU
 export ReciprocalGreen, reciprocal_green, seismogram, Snapshots, random_medium, perturb, read_random_medium, misfit_gradient

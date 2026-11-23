@@ -1,8 +1,9 @@
 # Benchmark on Marmousi2 (elastic 2D P-SV): 5 m grid (3401 × 703 cells including the air), 2 s (5319 steps, Courant number 0.5),
 # PML, explosion 10 m below the sea surface, 641 receivers. Time loop only (setup subtracted), the better of two runs.
 #
-#   julia -t auto --project=examples examples/benchmark_marmousi2.jl [cuda|amdgpu|metal]
+#   julia -t auto --project=examples examples/benchmark_marmousi2.jl [cpu|cuda|amdgpu|metal] [gradient]
 #
+# With `gradient`: the misfit gradient (adjoint-state method) of all seismograms instead, compared with the forward run.
 using SeismicWavePC, GeophysicalModelGenerator, Printf
 include("backend.jl")
 include("marmousi2_model.jl")
@@ -12,6 +13,18 @@ source = MomentTensorSource(8.5, 0.0, -0.01, 1e13, (1, 0, 1, 0, 0, 0) ./ sqrt(2)
 stations = [Station("R$i", x, 0.0, -0.01) for (i, x) in enumerate(0.5:0.025:16.5)]
 dt = 0.5 * 0.005 / (4.7 * sqrt(2))
 nt = round(Int, 2.0 / dt)
+if "gradient" in ARGS
+    obs = simulate(model; dt, nt, sources=source, stations, stf=:ricker, backend, verbose=false)
+    obs.v .= 0                                                  # misfit: the energy of the seismograms
+    let o = simulate(model; dt, nt=10, sources=source, stations, stf=:ricker, backend, verbose=false)
+        misfit_gradient(model, o; dt, nt=10, sources=source, stf=:ricker, backend)   # compile
+    end
+    tf =@elapsed simulate(model; dt, nt, sources=source, stations, stf=:ricker, backend, verbose=false)
+    tg = @elapsed misfit_gradient(model, obs; dt, nt, sources=source, stf=:ricker, backend)
+    @printf("Marmousi2 gradient, %s: forward %.1f s, gradient %.1f s (%.1f forward runs)\n", backend isa CPU ?
+            "CPU, $(Threads.nthreads()) threads" : nameof(typeof(backend)), tf, tg, tg / tf)
+    exit()
+end
 run(nt) = @elapsed simulate(model; dt, nt, sources=source, stations, stf=:ricker, backend, verbose=false)
 run(2)
 t0 = minimum(run(2) for _ in 1:2)

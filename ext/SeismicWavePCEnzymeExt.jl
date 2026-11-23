@@ -5,7 +5,6 @@ module SeismicWavePCEnzymeExt
 # it with Enzyme (the adjoint of the state is carried from segment to segment) and accumulates the gradient of the medium.
 
 using SeismicWavePC, Enzyme
-using GeophysicalModelGenerator: CartData
 const S = SeismicWavePC
 
 struct GradientDriver
@@ -15,25 +14,16 @@ end
 
 "Run the steps `a:b` (as `timeloop!`, without output) and return their part of the misfit."
 function steps!(F, M, Src, FSrc, St, rec, acc, regions, obs, a, b, p)
-    (; c, vc, dtT, nosource, noforce, nown, record_every, pw_edges, edges, backend, scale, nc) = p
-    vel!, stress!, inject!, force!, record! = p.kernels
-    V, Σ = S.velocities(F), S.stresses(F)
     J = 0.0
     for it in a:b
-        itw = (it - 1) % record_every == 0 ? (it - 1) ÷ record_every + 1 : 0
-        nown > 0 && S.foreach_item!(backend, record!, (rec, acc, F, St, c, dtT, itw), nown)
+        S.forward_step!(F, M, Src, FSrc, St, rec, acc, regions, it, p)
+        itw = (it - 1) % p.record_every == 0 ? (it - 1) ÷ p.record_every + 1 : 0
         if itw > 0
-            for n in 1:nown, k in 1:nc
-                r = rec[itw, k, n] * scale - obs[itw, k, n]
+            for n in 1:p.nown, k in 1:p.nc
+                r = rec[itw, k, n] * p.scale - obs[itw, k, n]
                 J += r * r / 2
             end
         end
-        pw_edges && S.extrapolate_sides!(V, edges)
-        map(((lo, ndr, P),) -> S.foreach_cell!(backend, stress!, (F, M, c, vc, dtT, P), lo, ndr), regions)
-        nosource || S.run_once!(backend, inject!, (F, Src, it))
-        pw_edges && S.extrapolate_sides!(Σ, edges)
-        map(((lo, ndr, P),) -> S.foreach_cell!(backend, vel!, (F, M, c, dtT, P), lo, ndr), regions)
-        noforce || S.run_once!(backend, force!, (F, M, FSrc, it))
     end
     return J
 end
@@ -42,10 +32,7 @@ state(s) = (values(s.F)..., s.acc, S.pml_state(s.regions)...)
 
 function (d::GradientDriver)(s)
     s.backend isa S.CPU || error("misfit_gradient runs on the CPU so far")
-    obs = d.observed
-    length(obs.t) == s.nrec && obs.components == s.components ||
-        error("the observed seismograms do not match the simulation (samples $(length(obs.t)) vs $(s.nrec), components)")
-    o = obs.v[:, :, s.own]
+    o = S.observed_velocities(d.observed, s)
     p = (; s.c, s.vc, s.dtT, s.nosource, s.noforce, s.nown, s.record_every, s.pw_edges, s.edges, s.backend, s.scale, s.nc,
          kernels=s.kernels[1:5])
     K = something(d.checkpoint_steps, ceil(Int, sqrt(s.nt)))
@@ -74,11 +61,6 @@ function (d::GradientDriver)(s)
     return J, S.model_gradient(s, dM)
 end
 
-function S.misfit_gradient(model::CartData, observed::Seismograms; checkpoint_steps=nothing, kwargs...)
-    bad = intersect(keys(kwargs), (:stations, :snapshots, :callback, :checkpoint, :restart, :driver, :nproc))
-    isempty(bad) || error("misfit_gradient does not take the keywords $(join(bad, ", "))")
-    return simulate(model; kwargs..., stations=observed.stations, verbose=false,
-                    driver=GradientDriver(observed, checkpoint_steps === nothing ? nothing : Int(checkpoint_steps)))
-end
+S.ad_driver(observed::Seismograms, K) = GradientDriver(observed, K)
 
 end

@@ -1,22 +1,52 @@
-# Misfit gradients (Enzyme extension) against finite differences of whole simulations
+# Misfit gradients: adjoint-state method and automatic differentiation (Enzyme extension), against each other and against
+# finite differences of whole simulations
 using Enzyme
 
-@testset "misfit gradient (Enzyme)" begin
+perturbed(m, field, I, d) = CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, NamedTuple{(field,)}(((A = copy(m.fields[field]); A[I] += d; A),))))
+observed(m, kw, mode) = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kw...,
+                                 stations=test_stations(mode), verbose=false)
+misfit(m, obs, kw) = (r = simulate(m; kw..., stations=obs.stations, verbose=false); sum(abs2, r.v .- obs.v) / 2)
+
+@testset "misfit gradient" begin
     m = test_model(:psv)
     kw = (; dt=DT, nt=150, sources=test_source(), T=Float64)
-    obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kw...,
-                   stations=test_stations(:psv), verbose=false)
-    J, g = misfit_gradient(m, obs; kw..., checkpoint_steps=20)
-    misfit(mm) = (r = simulate(mm; kw..., stations=obs.stations, verbose=false); sum(abs2, r.v .- obs.v) / 2)
-    @test J ≈ misfit(m)
+    obs = observed(m, kw, :psv)
+    J, g = misfit_gradient(m, obs; kw...)
+    Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=20)
+    @test J ≈ misfit(m, obs, kw) ≈ Jad
     @test g isa CartData && size(g) == size(m) && keys(g.fields) == (:rho, :vp, :vs, :Qp, :Qs)
+    for f in keys(g.fields)                                         # the adjoint is the exact gradient of the discrete scheme
+        @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+    end
     I = CartesianIndex(110, 1, 75)
     for (field, h) in ((:vs, 1e-4), (:rho, 1e-1), (:Qp, 1e-2))
-        pert(d) = CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, NamedTuple{(field,)}(((A = copy(m.fields[field]); A[I] += d; A),))))
-        fd = (misfit(pert(h)) - misfit(pert(-h))) / 2h
+        fd = (misfit(perturbed(m, field, I, h), obs, kw) - misfit(perturbed(m, field, I, -h), obs, kw)) / 2h
         @test g.fields[field][I] ≈ fd rtol = 1e-4
     end
     @test all(iszero, g.fields.vs[:, 1, end-5:end])                           # air
+    # Float32, other checkpoint intervals, record_every, Cerjan
+    J32, g32 = misfit_gradient(m, obs; kw..., T=Float32, checkpoint_steps=7)
+    @test J32 ≈ J rtol = 1e-3
+    @test g32.fields.vs ≈ g.fields.vs rtol = 1e-2
+    kw2 = (; kw..., record_every=3, absorber=:cerjan)
+    obs2 = observed(m, kw2, :psv)
+    @test misfit_gradient(m, obs2; kw2...)[2].fields.vp ≈ misfit_gradient(m, obs2; kw2..., method=:ad)[2].fields.vp rtol = 1e-10
     @test_throws ErrorException misfit_gradient(m, obs; kw..., nproc=2)
     @test_throws ErrorException misfit_gradient(m, obs; kw..., nt=100)        # does not match the observed seismograms
+    @test_throws ErrorException misfit_gradient(m, obs; kw..., method=:fd)
+end
+
+@testset "misfit gradient SH, 3D" begin
+    for (mode, I) in ((:sh, CartesianIndex(110, 1, 75)), (:p3d, CartesianIndex(45, 30, 40)))
+        m = test_model(mode)
+        # 3D: thin absorbers, so that the stations are away from them (the adjoint of the PML is approximate)
+        kw = (; dt=DT, nt=mode === :sh ? 150 : 100, sources=test_source(), T=Float64, wave=mode === :sh ? :sh : :psv, na=mode === :sh ? 20 : 8)
+        obs = observed(m, kw, mode)
+        J, g = misfit_gradient(m, obs; kw...)
+        @test J ≈ misfit(m, obs, kw)
+        for (field, h) in ((:vs, 1e-4), (:rho, 1e-1), (:Qs, 1e-2))
+            fd = (misfit(perturbed(m, field, I, h), obs, kw) - misfit(perturbed(m, field, I, -h), obs, kw)) / 2h
+            @test g.fields[field][I] ≈ fd rtol = 1e-4
+        end
+    end
 end

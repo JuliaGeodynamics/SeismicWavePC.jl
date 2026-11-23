@@ -24,6 +24,7 @@ objects, so any GMG model setup can be used directly.
 | Output | SAC and netCDF files | seismograms in memory, final wavefield as a `CartData`, ParaView snapshot movies |
 | Geographic coordinates | own projection | the same GMG `ProjectionPoint` used to build the model |
 | Safety | | stability (Courant) check, sources and stations outside the model are rejected |
+| Waveform inversion | | misfit gradients (adjoint-state method, CPU and GPU) |
 
 ## Installation
 
@@ -132,11 +133,18 @@ record weaker S waves and a longer coda.*
 - **Absorbing boundary:** `absorber=:pml` (default; perfectly matched layer, as recommended for OpenSWPC) or `:cerjan` (sponge),
   `na=20` cells thick at the sides and the bottom. The PML absorbs much better; it costs 15–100% more time, depending on how
   much of the model lies in the absorbing layers.
-- **Gradients (for waveform inversion):** with `using Enzyme`, `J, grad = misfit_gradient(model, observed; dt, nt, sources, T=Float64)`
-  returns the least-squares misfit of the velocity seismograms and its exact gradient with respect to `rho`, `vp`, `vs`, `Qp`, `Qs`
-  (a `CartData`), by reverse-mode automatic differentiation of the time loop with checkpointing. Checked against finite
-  differences of whole simulations (2D, 3D, PML, Cerjan, forces, plane waves). CPU only so far, one process; a gradient takes about
-  20 (2D) to 50 (3D) times as long as the forward simulation.
+- **Gradients (for waveform inversion):** `J, grad = misfit_gradient(model, observed; dt, nt, sources)` returns the
+  least-squares misfit of the velocity seismograms and its gradient with respect to `rho`, `vp`, `vs`, `Qp`, `Qs` (a `CartData`).
+  - It uses the adjoint-state method with checkpointing, on CPUs and GPUs, at the cost of about 4–5 forward simulations
+    ([benchmark](#marmousi2)).
+  - The adjoint kernels use the transposed stencils, including the 2nd-order cells at free surfaces, and adjoint memory
+    variables for attenuation. The result is therefore the exact gradient of the discrete simulation: it agrees with automatic
+    differentiation to round-off in 2D and 3D, with attenuation.
+  - The exception is the part of the waves that interacts with the PML, whose adjoint is approximated by the PML itself, as is
+    usual. Keep stations a few wavelengths away from the absorbing layers.
+  - `method=:ad` (with `using Enzyme`) differentiates the whole simulation automatically. It is exact in the PML too, but costs
+    20–50 forward simulations and runs only on the CPU.
+  - One process only (no MPI).
 - **Random media:** `xi = random_medium(x, y, z; spectrum=:vonkarman, a=0.5, epsilon=0.05, kappa=0.3)` makes fluctuations with a
   Gaussian, exponential or von Kármán spectrum (anisotropic with `a=(ax, ay, az)`), and `perturb(model, xi)` applies them to any
   GMG model as OpenSWPC does (vp, vs × (1 + ξ), ρ × (1 + 0.8 ξ) in solid rock).
@@ -232,6 +240,19 @@ same grid, time step and receivers with its threaded CPU backend.
 
 SeismicWavePC.jl and OpenSWPC also update the memory variables of attenuation (Q is infinite here). In SeismicWaves.jl most of
 the time goes to recording the 641 receivers; with a single receiver it reaches 439 million updates per second.
+
+Misfit gradient (adjoint-state method, L2 misfit of all receivers) on the same problem.
+[`examples/benchmark_marmousi2.jl`](examples/benchmark_marmousi2.jl) with `gradient` as second argument:
+
+| Code | Forward | Gradient | Gradient / forward |
+|---|---:|---:|---:|
+| SeismicWaves.jl, 12 threads, 641 receivers | 169 s | 403 s | 2.4 |
+| SeismicWaves.jl, 12 threads, 1 receiver | 30 s | 121 s | 4.0 |
+| SeismicWavePC.jl, 12 threads, 641 receivers | 17.6 s | 68 s | 3.9 |
+| SeismicWavePC.jl, Apple M4 Max GPU (Metal), 641 receivers | 5.3 s | 29 s | 5.4 |
+
+Both codes save the wavefield every √nt steps or so and recompute the steps in between. The forward times here include the
+setup.
 
 ### Examples
 

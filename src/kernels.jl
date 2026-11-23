@@ -54,8 +54,13 @@ Base.@propagate_inbounds function vel_psv!(F, M, c, dt, P, i, k)
     dzSzz = ade(P, :azSzz, :gze, J, k, (Szz[i, k+1] - Szz[i, k]) * az - (Szz[i, k+2] - Szz[i, k-1]) * bz, dt)
     dxSxz = ade(P, :axSxz, :gxc, J, i, (Sxz[i, k] - Sxz[i-1, k]) * ax - (Sxz[i+1, k] - Sxz[i-2, k]) * bx, dt)
     dzSxz = ade(P, :azSxz, :gzc, J, k, (Sxz[i, k] - Sxz[i, k-1]) * az - (Sxz[i, k+1] - Sxz[i, k-2]) * bz, dt)
-    Vx[i, k] = (Vx[i, k] + 2 / (M.rho[i, k] + M.rho[i+1, k]) * (dxSxx + dzSxz) * dt) * M.gx_b[i] * M.gz_c[k]
-    Vz[i, k] = (Vz[i, k] + 2 / (M.rho[i, k] + M.rho[i, k+1]) * (dxSxz + dzSzz) * dt) * M.gx_c[i] * M.gz_b[k]
+    vel_update_psv!(F, M, dt, i, k, dxSxx + dzSxz, dxSxz + dzSzz)
+end
+
+"Velocity update from the stress divergence `sx`, `sz` (shared with the adjoint kernels)."
+Base.@propagate_inbounds function vel_update_psv!(F, M, dt, i, k, sx, sz)
+    F.Vx[i, k] = (F.Vx[i, k] + 2 / (M.rho[i, k] + M.rho[i+1, k]) * sx * dt) * M.gx_b[i] * M.gz_c[k]
+    F.Vz[i, k] = (F.Vz[i, k] + 2 / (M.rho[i, k] + M.rho[i, k+1]) * sz * dt) * M.gx_c[i] * M.gz_b[k]
 end
 
 Base.@propagate_inbounds function stress_psv!(F, M, c, vc, dt, P, i, k)
@@ -68,6 +73,12 @@ Base.@propagate_inbounds function stress_psv!(F, M, c, vc, dt, P, i, k)
     dzVz = ade(P, :azVz, :gzc, J, k, (Vz[i, k] - Vz[i, k-1]) * az - (Vz[i, k+1] - Vz[i, k-2]) * bz, dt)
     dxVz = ade(P, :axVz, :gxe, J, i, (Vz[i+1, k] - Vz[i, k]) * ax - (Vz[i+2, k] - Vz[i-1, k]) * bx, dt)
     dzVx = ade(P, :azVx, :gze, J, k, (Vx[i, k+1] - Vx[i, k]) * az - (Vx[i, k+2] - Vx[i, k-1]) * bz, dt)
+    stress_update_psv!(F, M, vc, dt, i, k, dxVx, dzVz, dxVz + dzVx)
+end
+
+"Stress update from the strain rates (shared with the adjoint kernels)."
+Base.@propagate_inbounds function stress_update_psv!(F, M, vc, dt, i, k, dxVx, dzVz, e)
+    (; Sxx, Szz, Sxz) = F
     I = CartesianIndex(i, k)
     mu2 = 2M.mu[I]
     l2m = M.lam[I] + mu2
@@ -80,7 +91,6 @@ Base.@propagate_inbounds function stress_psv!(F, M, c, vc, dt, P, i, k)
     Sxx[I] = (Sxx[I] + (l2m * tp1 * div - mu2 * ts1 * dzVz + Rx) * dt) * gc
     Szz[I] = (Szz[I] + (l2m * tp1 * div - mu2 * ts1 * dxVx + Rz) * dt) * gc
     muxz = havg4(M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])
-    e = dxVz + dzVx
     Rxz = memvar!(F.Rxz, I, muxz * ts * e, vc, dt)
     Sxz[I] = (Sxz[I] + (muxz * ts1 * e + Rxz) * dt) * M.gx_b[i] * M.gz_b[k]
 end
@@ -116,8 +126,10 @@ Base.@propagate_inbounds function vel_sh!(F, M, c, dt, P, i, k)
     J = zone_index(P, CartesianIndex(i, k))
     dzSyz = ade(P, :azSyz, :gzc, J, k, (Syz[i, k] - Syz[i, k-1]) * az - (Syz[i, k+1] - Syz[i, k-2]) * bz, dt)
     dxSxy = ade(P, :axSxy, :gxc, J, i, (Sxy[i, k] - Sxy[i-1, k]) * ax - (Sxy[i+1, k] - Sxy[i-2, k]) * bx, dt)
-    Vy[i, k] = (Vy[i, k] + (dxSxy + dzSyz) / M.rho[i, k] * dt) * M.gx_c[i] * M.gz_c[k]
+    vel_update_sh!(F, M, dt, i, k, dxSxy + dzSyz)
 end
+
+Base.@propagate_inbounds vel_update_sh!(F, M, dt, i, k, s) = F.Vy[i, k] = (F.Vy[i, k] + s / M.rho[i, k] * dt) * M.gx_c[i] * M.gz_c[k]
 
 Base.@propagate_inbounds function stress_sh!(F, M, c, vc, dt, P, i, k)
     (; Vy, Syz, Sxy) = F
@@ -127,6 +139,11 @@ Base.@propagate_inbounds function stress_sh!(F, M, c, vc, dt, P, i, k)
     J = zone_index(P, CartesianIndex(i, k))
     dxVy = ade(P, :axVy, :gxe, J, i, (Vy[i+1, k] - Vy[i, k]) * ax - (Vy[i+2, k] - Vy[i-1, k]) * bx, dt)
     dzVy = ade(P, :azVy, :gze, J, k, (Vy[i, k+1] - Vy[i, k]) * az - (Vy[i, k+2] - Vy[i, k-1]) * bz, dt)
+    stress_update_sh!(F, M, vc, dt, i, k, dzVy, dxVy)
+end
+
+Base.@propagate_inbounds function stress_update_sh!(F, M, vc, dt, i, k, dzVy, dxVy)
+    (; Syz, Sxy) = F
     I = CartesianIndex(i, k)
     ts = M.taus[I]
     ts1 = 1 + ts * (1 + vc[4])
@@ -172,6 +189,11 @@ Base.@propagate_inbounds function vel_3d!(F, M, c, dt, P, i, j, k)
     dSz = ade(P, :axSxz, :gxc, J, i, (Sxz[i, j, k] - Sxz[i-1, j, k]) * ax - (Sxz[i+1, j, k] - Sxz[i-2, j, k]) * bx, dt) +
           ade(P, :aySyz, :gyc, J, j, (Syz[i, j, k] - Syz[i, j-1, k]) * ay - (Syz[i, j+1, k] - Syz[i, j-2, k]) * by, dt) +
           ade(P, :azSzz, :gze, J, k, (Szz[i, j, k+1] - Szz[i, j, k]) * az - (Szz[i, j, k+2] - Szz[i, j, k-1]) * bz, dt)
+    vel_update_3d!(F, M, dt, i, j, k, dSx, dSy, dSz)
+end
+
+Base.@propagate_inbounds function vel_update_3d!(F, M, dt, i, j, k, dSx, dSy, dSz)
+    (; Vx, Vy, Vz) = F
     ρ = M.rho
     Vx[i, j, k] = (Vx[i, j, k] + 2 / (ρ[i, j, k] + ρ[i+1, j, k]) * dSx * dt) * M.gx_b[i] * M.gy_c[j] * M.gz_c[k]
     Vy[i, j, k] = (Vy[i, j, k] + 2 / (ρ[i, j, k] + ρ[i, j+1, k]) * dSy * dt) * M.gx_c[i] * M.gy_b[j] * M.gz_c[k]
@@ -194,6 +216,11 @@ Base.@propagate_inbounds function stress_3d!(F, M, c, vc, dt, P, i, j, k)
           ade(P, :azVx, :gze, J, k, (Vx[i, j, k+1] - Vx[i, j, k]) * az - (Vx[i, j, k+2] - Vx[i, j, k-1]) * bz, dt)
     eyz = ade(P, :ayVz, :gye, J, j, (Vz[i, j+1, k] - Vz[i, j, k]) * ay - (Vz[i, j+2, k] - Vz[i, j-1, k]) * by, dt) +
           ade(P, :azVy, :gze, J, k, (Vy[i, j, k+1] - Vy[i, j, k]) * az - (Vy[i, j, k+2] - Vy[i, j, k-1]) * bz, dt)
+    stress_update_3d!(F, M, vc, dt, i, j, k, dxVx, dyVy, dzVz, eyz, exz, exy)
+end
+
+Base.@propagate_inbounds function stress_update_3d!(F, M, vc, dt, i, j, k, dxVx, dyVy, dzVz, eyz, exz, exy)
+    (; Sxx, Syy, Szz, Syz, Sxz, Sxy) = F
     I = CartesianIndex(i, j, k)
     mu = M.mu
     mu2 = 2mu[I]

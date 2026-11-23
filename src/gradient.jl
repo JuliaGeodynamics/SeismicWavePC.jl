@@ -1,25 +1,42 @@
-# Misfit gradients: the time loop is differentiated with Enzyme (extension SeismicWavePCEnzymeExt); here the documentation
-# and the chain rule from the internal moduli back to the fields of the model.
+# Misfit gradients: the adjoint-state method (adjoint.jl) or automatic differentiation with Enzyme (SeismicWavePCEnzymeExt);
+# here the documentation and the chain rule from the internal moduli back to the fields of the model.
 
 """
-    J, gradient = misfit_gradient(model, observed::Seismograms; checkpoint_steps=nothing, kwargs...)
+    J, gradient = misfit_gradient(model, observed::Seismograms; method=:adjoint, checkpoint_steps=nothing, kwargs...)
 
 Least-squares misfit `J = ½ Σ (v - v_observed)²` of the velocity seismograms [m/s] (all samples, components and stations
-of `observed`), and its gradient with respect to the model, computed exactly (for the discrete simulation) with reverse-mode
-automatic differentiation (Enzyme.jl). Requires `using Enzyme`.
+of `observed`), and its gradient with respect to the model.
 
 `kwargs` are those of [`simulate`](@ref) (`dt`, `nt`, `sources`, `record_every`, `absorber`, `T`, `backend`, …) and must
-describe the simulation that `observed` is compared with; its stations are `observed.stations`. Use `T = Float64` for
-accurate gradients. `gradient` is a `CartData` on the grid of `model` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`:
-∂J/∂ of the model field in its units (per kg/m³ (or g/cm³ with `density_unit = :g_cm3`), per km/s, per unit Q). Cells in
-the absorbing layers are homogenized in the simulation, so their sensitivity is added to the cells next to the layers.
+describe the simulation that `observed` is compared with; its stations are `observed.stations`. `gradient` is a `CartData`
+on the grid of `model` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`: ∂J/∂ of the model field in its units (per kg/m³ (or
+g/cm³ with `density_unit = :g_cm3`), per km/s, per unit Q). Cells in the absorbing layers are homogenized in the
+simulation, so their sensitivity is added to the cells next to the layers.
 
-The wavefields are saved every `checkpoint_steps` steps (default `√nt`) and the steps in between are recomputed in the
-reverse pass, so that the memory stays small. So far on the CPU (threaded) and one process (no MPI). Plane waves enter as a
-fixed initial wavefield (their dependence on the medium is not differentiated).
+`method`
+- `:adjoint` (default): adjoint-state method with adjoint kernels (transposed stencils, adjoint memory variables of
+  attenuation), on all backends (CPU threads, GPUs); about 5 forward simulations. It is the exact gradient of the discrete
+  simulation (to rounding errors) as long as the waves do not interact with the PML, whose adjoint is approximated by the
+  PML itself (as usual): the sensitivity next to the absorbing layers and of stations close to them is then approximate.
+- `:ad`: reverse-mode automatic differentiation of the whole simulation (needs `using Enzyme`): exact also with the PML, but
+  ~20-50 forward simulations, CPU only. Use `T = Float64` with it.
+
+The wavefields are saved every `checkpoint_steps` steps (default: balances the memory of the checkpoints, kept in host
+memory, and of the velocity fields of the steps in between, kept on the device), and the steps in between are recomputed in
+the reverse pass. One process (no MPI). Plane waves enter as a fixed initial wavefield (their dependence on the medium is
+not differentiated).
 """
-function misfit_gradient end
-misfit_gradient(args...; kwargs...) = error("misfit_gradient needs the optional package Enzyme: add it and load it with `using Enzyme`")
+function misfit_gradient(model::CartData, observed::Seismograms; method=:adjoint, checkpoint_steps=nothing, kwargs...)
+    bad = intersect(keys(kwargs), (:stations, :snapshots, :callback, :checkpoint, :restart, :driver, :nproc))
+    isempty(bad) || error("misfit_gradient does not take the keywords $(join(bad, ", "))")
+    method in (:adjoint, :ad) || error("method must be :adjoint or :ad, got :$method")
+    K = checkpoint_steps === nothing ? nothing : Int(checkpoint_steps)
+    driver = method === :adjoint ? AdjointDriver(observed, K) : ad_driver(observed, K)
+    return simulate(model; kwargs..., stations=observed.stations, verbose=false, driver)
+end
+
+"Driver of `simulate` for `method = :ad` (Enzyme extension)."
+ad_driver(args...) = error("misfit_gradient(...; method = :ad) needs the optional package Enzyme: add it and load it with `using Enzyme`")
 
 "d chi / d tau of `visco_chi(ts, tau, f)`."
 function visco_dchi(ts, tau, f)
