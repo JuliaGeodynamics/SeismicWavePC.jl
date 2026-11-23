@@ -16,7 +16,7 @@ function test_model(mode; step=mode === :p3d)
     layer = Z .< -1.5
     vp = ifelse.(air, 0.0, ifelse.(layer, 4.0, 3.0))
     vs = ifelse.(air, 0.0, ifelse.(layer, 2.3, 1.7))
-    rho = ifelse.(air, 0.001, ifelse.(layer, 2.6, 2.3))
+    rho = ifelse.(air, 1.0, ifelse.(layer, 2600.0, 2300.0))   # kg/m³
     Qp = ifelse.(air, 10.0, 50.0)
     Qs = copy(Qp)
     return CartData(X, Y, Z, (; rho, vp, vs, Qp, Qs))

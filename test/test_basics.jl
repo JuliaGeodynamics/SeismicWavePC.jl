@@ -50,6 +50,23 @@ end
     @test_throws ErrorException simulate(model; dt=DT, nt=10, sources=s, nproc=3, verbose=false)       # 200 cells / 3
 end
 
+@testset "density units" begin
+    m = test_model(:sh)
+    kw = (; dt=DT, nt=50, sources=test_source(), wave=:sh, verbose=false)
+    g = CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; rho=m.fields.rho ./ 1000)))
+    @test simulate(g; density_unit=:g_cm3, kw...).v == simulate(m; kw...).v
+    @test_throws ErrorException simulate(g; kw...)                          # g/cm³ given as kg/m³
+    @test_throws ErrorException simulate(m; density_unit=:g_cm3, kw...)
+    @test_throws ErrorException simulate(m; density_unit=:kg, kw...)
+end
+
+@testset "callback" begin
+    times = Float64[]
+    simulate(test_model(:psv); dt=DT, nt=21, sources=test_source(), snapshot_every=10, verbose=false,
+             callback=(w, t) -> (@assert w isa CartData && haskey(w.fields, :V); push!(times, t)))
+    @test times ≈ [0, 10DT, 20DT]
+end
+
 @testset "snapshots" begin
     dir = mktempdir()
     simulate(test_model(:sh); dt=DT, nt=21, sources=test_source(), wave=:sh, snapshot_every=10, snapshot_dir=dir, verbose=false)

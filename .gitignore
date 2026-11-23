@@ -6,3 +6,7 @@ snapshots/
 .claude/
 *.png
 *_snapshots/
+
+examples/MagmaThermoKinematics/HighRes2D_*/
+*.mp4
+*.log

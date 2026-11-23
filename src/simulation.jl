@@ -72,7 +72,7 @@ end
 Run a visco-elastic wave propagation simulation (OpenSWPC algorithm) on the velocity model `model` and return
 [`Seismograms`](@ref).
 
-`model` is a regular `CartData` (coordinates in km, z up) with fields `rho` [g/cm³], `vp`, `vs` [km/s] and optionally
+`model` is a regular `CartData` (coordinates in km, z up) with fields `rho` [kg/m³], `vp`, `vs` [km/s] and optionally
 `Qp`, `Qs` (default: no attenuation). Cells with `vp = vs = 0` are air: the free surface and topography follow from that.
 Cells with `vs = 0` and `vp > 0` are water. A `CartData` of size `(nx, 1, nz)` gives a 2D simulation in the x-z plane.
 
@@ -83,7 +83,10 @@ Keyword arguments
 - `wave = :psv`: `:psv` or `:sh`, for 2D models.
 - `na = 20`: thickness of the Cerjan absorbing layer (sides and bottom) in cells.
 - `fq_min = 0.05`, `fq_max = 5.0`, `fq_ref = 1.0`: frequency band [Hz] of constant Q, and reference frequency of the velocities.
+- `density_unit = :kg_m3`: unit of `rho`, or `:g_cm3` (as in OpenSWPC).
 - `snapshot_every = 0`: if > 0, write the velocity field every so many steps to ParaView files in `snapshot_dir = "snapshots"`.
+- `callback = nothing`: a function `callback(wavefield::CartData, t)` that is called every `snapshot_every` steps (on rank 0)
+  instead of writing ParaView files, e.g. to plot the wavefield while the simulation runs. `wavefield` has the field `V` [m/s].
 - `backend = CPU()`: KernelAbstractions backend, e.g. `CUDABackend()`, `ROCBackend()`, `MetalBackend()`.
 - `T = Float32`: floating point type of the wavefield.
 - `nproc = 1`: MPI processes in x (2D), or `(npx, npy)` (3D); start julia with `mpiexec -n npx*npy`.
@@ -98,12 +101,13 @@ end
 # Function barrier on the solver type: from here on the dimension N is known to the compiler.
 function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
                   na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
-                  snapshot_every=0, snapshot_dir="snapshots", backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
+                  density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa MomentTensorSource ? [sources] : collect(MomentTensorSource, sources)
     stations = collect(Station, stations)
     isempty(sources) && error("at least one source is required")
     m = model_arrays(model)
+    m = merge(m, (; rho=m.rho ./ density_scale(density_unit, maximum(m.rho))))     # internal unit: g/cm³
     g = Grid(m, Val(N))
     med = setup_medium(m, g, na, fq_min, fq_max, fq_ref)
     courant = med.vmax * dt * sqrt(sum(1 ./ g.d .^ 2))
@@ -121,6 +125,7 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
                                             device_type=igg_device(backend), quiet=true)
         coords = ntuple(a -> Int(c3[a]), N)
     end
+    nb = ntuple(a -> parallel ? (IGG.neighbor(1, a), IGG.neighbor(2, a)) : (-1, -1), N - 1)   # MPI neighbours (left, right)
     off = coords .* (nl .- 2H)
     R = ntuple(a -> off[a]+1:off[a]+nl[a], N)
     dev(A) = (B = KernelAbstractions.allocate(backend, eltype(A), size(A)); copyto!(B, A); B)
@@ -182,10 +187,10 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
         @printf("  %d source(s) (M0 = %.3e N m), %d station(s), backend %s, %s, %d MPI rank(s)\n", length(sources), M0,
                 length(stations), backend isa CPU ? "CPU ($(Threads.nthreads()) threads)" : string(nameof(typeof(backend))), T, prod(dims))
     end
-    movie = (snapshot_every > 0 && me == 0) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
+    movie = (snapshot_every > 0 && me == 0 && callback === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     wall = time()
     movie = timeloop!(F, M, Src, St, rec, c, vc, FT(dt), kernels(mode), nl, nt, isempty(S), length(own), record_every,
-                      snapshot_every, snapshot_dir, movie, out, tbeg, dt, verbose && me == 0, parallel, backend)
+                      snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose && me == 0, parallel, nb, backend)
     movie === nothing || movie_paraview(pvd=movie, Finalize=true)
     verbose && me == 0 && @printf("  finished in %.2f s\n", time() - wall)
 
@@ -196,6 +201,14 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     return Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), v, stations, components, wavefield)
 end
 
+"Factor from `unit` to g/cm³; `rho_max` guards against densities given in the other unit."
+function density_scale(unit, rho_max)
+    unit === :kg_m3 || unit === :g_cm3 || error("density_unit must be :kg_m3 or :g_cm3, got :$unit")
+    unit === :kg_m3 && rho_max < 100 && error("densities up to $rho_max look like g/cm³: use kg/m³, or pass density_unit=:g_cm3")
+    unit === :g_cm3 && rho_max > 100 && error("densities up to $rho_max look like kg/m³: drop density_unit=:g_cm3")
+    return unit === :kg_m3 ? 1000.0 : 1.0
+end
+
 kernels(mode) = mode === :psv ? (vel_psv!, stress_psv!, inject_psv!, record_psv!) :
                 mode === :sh ? (vel_sh!, stress_sh!, inject_sh!, record_sh!) : (vel_3d!, stress_3d!, inject_3d!, record_3d!)
 
@@ -204,7 +217,7 @@ stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, 
 
 # Function barrier: everything below is concretely typed.
 function timeloop!(F, M, Src, St, rec, c, vc, dtT, (vel!, stress!, inject!, record!), nl, nt, nosource, nown, record_every,
-                   snapshot_every, snapshot_dir, movie, out, tbeg, dt, verbose, parallel, backend)
+                   snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, backend)
     ndr = nl .- 2H
     V, Σ = velocities(F), stresses(F)
     report = max(nt ÷ 10, 1)
@@ -215,14 +228,17 @@ function timeloop!(F, M, Src, St, rec, c, vc, dtT, (vel!, stress!, inject!, reco
         if snapshot_every > 0 && (it - 1) % snapshot_every == 0
             KernelAbstractions.synchronize(backend)
             data = velocity(out, F)
-            data === nothing || (movie = write_paraview(data, "wavefield_$(lpad(it - 1, 6, '0'))"; directory=snapshot_dir,
-                                                        pvd=movie, time=tbeg + (it - 1) * dt, verbose=false))
+            t = tbeg + (it - 1) * dt
+            if data !== nothing
+                callback === nothing ? (movie = write_paraview(data, "wavefield_$(lpad(it - 1, 6, '0'))"; directory=snapshot_dir,
+                                                               pvd=movie, time=t, verbose=false)) : callback(data, t)
+            end
         end
         foreach_cell!(backend, stress!, (F, M, c, vc, dtT), ndr)
         nosource || run_once!(backend, inject!, (F, Src, it))
-        parallel && (KernelAbstractions.synchronize(backend); IGG.update_halo!(Σ...))
+        parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, Σ...))
         foreach_cell!(backend, vel!, (F, M, c, dtT), ndr)
-        parallel && (KernelAbstractions.synchronize(backend); IGG.update_halo!(V...))
+        parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, V...))
         if verbose && it % report == 0
             KernelAbstractions.synchronize(backend)
             vmax = maximum(A -> maximum(abs, A), V) * out.scale
@@ -231,6 +247,28 @@ function timeloop!(F, M, Src, St, rec, c, vc, dtT, (vel!, stress!, inject!, reco
     end
     KernelAbstractions.synchronize(backend)
     return movie
+end
+
+# Halo exchange between MPI ranks along the decomposed axes (x, and y in 3D): ImplicitGlobalGrid on GPUs. On CPUs it
+# costs ~0.4 ms per call (a task per field and neighbour), more than the time step of a small model: plain MPI there.
+exchange_halo!(backend, nb, A...) = IGG.update_halo!(A...)
+function exchange_halo!(::CPU, nb, A::Vararg{Array{T,N}}) where {T,N}
+    comm = IGG.comm()
+    for a in 1:N-1
+        left, right = nb[a]
+        n = size(A[1], a)
+        sel(r) = ntuple(b -> b == a ? r : 1:size(A[1], b), Val(N))
+        pack(r) = reduce(vcat, (vec(f[sel(r)...]) for f in A))     # one message per neighbour with all fields
+        sl, sr = pack(H+1:2H), pack(n-2H+1:n-H)                     # cells next to the ghost cells go to the neighbour's ghost cells
+        rl, rr = similar(sl), similar(sr)
+        MPI.Waitall([MPI.Irecv!(rl, comm; source=left, tag=0), MPI.Irecv!(rr, comm; source=right, tag=1),
+                     MPI.Isend(sl, comm; dest=left, tag=1), MPI.Isend(sr, comm; dest=right, tag=0)])
+        m = length(sl) ÷ length(A)
+        for (i, f) in enumerate(A)
+            left == MPI.PROC_NULL || copyto!(view(f, sel(1:H)...), view(rl, (i-1)*m+1:i*m))
+            right == MPI.PROC_NULL || copyto!(view(f, sel(n-H+1:n)...), view(rr, (i-1)*m+1:i*m))
+        end
+    end
 end
 
 "How to turn the local wavefields into a `CartData` of the whole model."

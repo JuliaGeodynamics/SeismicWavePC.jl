@@ -11,7 +11,7 @@ function halfspace(n)
     x = range(0, step=dx, length=n[1]); y = range(0, step=dx, length=n[2]); z = range(-(n[3] - 11) * dx, step=dx, length=n[3])
     X, Y, Z = xyz_grid(x, n[2] == 1 ? 0.0 : y, z)
     air = Z .> 0
-    return CartData(X, Y, Z, (rho=ifelse.(air, 0.001, 2.7), vp=ifelse.(air, 0.0, 5.0), vs=ifelse.(air, 0.0, 2.9),
+    return CartData(X, Y, Z, (rho=ifelse.(air, 1.0, 2700.0), vp=ifelse.(air, 0.0, 5.0), vs=ifelse.(air, 0.0, 2.9),
                               Qp=fill(200.0, size(X)), Qs=fill(100.0, size(X))))
 end
 

@@ -17,7 +17,7 @@ X, Y, Z = xyz_grid(x, 0, z)
 Phase[Z .> 1.5 .* exp.(-(X ./ 3) .^ 2)] .= 0                                # air above a 1.5 km high hill
 
 #            air     sediments  upper crust  lower crust
-rho_ = Dict(0 => 0.001, 1 => 2.2, 2 => 2.6, 3 => 2.8)
+rho_ = Dict(0 => 1.0,   1 => 2200.0, 2 => 2600.0, 3 => 2800.0)   # kg/m³
 vp_  = Dict(0 => 0.0,   1 => 2.5, 2 => 5.0, 3 => 6.2)
 vs_  = Dict(0 => 0.0,   1 => 1.2, 2 => 2.9, 3 => 3.5)
 Q_   = Dict(0 => 10.0,  1 => 50.0, 2 => 300.0, 3 => 500.0)

@@ -27,11 +27,26 @@ objects, so any GMG model setup can be used directly.
 
 ## Installation
 
-```julia
-julia> ]
-pkg> add https://github.com/boriskaus/SeismicWavePC.jl
-```
-For GPUs also add `CUDA`, `AMDGPU` or `Metal`. To use all CPU cores, start Julia with threads: `julia -t auto`.
+1. Install Julia 1.10 or newer, for example with [juliaup](https://github.com/JuliaLang/juliaup):
+   `curl -fsSL https://install.julialang.org | sh` (Linux, macOS) or `winget install julia -s msstore` (Windows).
+2. Install the package (it is not registered yet):
+   ```julia
+   julia> ]
+   pkg> add https://github.com/boriskaus/SeismicWavePC.jl
+   ```
+3. To use all CPU cores, start Julia with threads: `julia -t auto`.
+4. For GPUs also add `CUDA` (NVIDIA), `AMDGPU` (AMD) or `Metal` (Apple), load it with `using CUDA` and pass `backend=CUDABackend()`
+   (or `ROCBackend()`, `MetalBackend()`) to `simulate`.
+5. For MPI add `MPI` and install the launcher once with `using MPI; MPI.install_mpiexecjl()`; then run
+   `mpiexecjl -n 4 julia script.jl`. On a cluster, use its MPI library with
+   [`MPIPreferences.use_system_binary()`](https://juliaparallel.org/MPI.jl/stable/configuration/) (needed for CUDA-aware MPI).
+6. To run the examples (Julia 1.11 or newer), clone the repository and install their environment:
+   ```
+   git clone https://github.com/boriskaus/SeismicWavePC.jl
+   cd SeismicWavePC.jl
+   julia --project=examples -e 'using Pkg; Pkg.instantiate()'
+   julia --project=examples/MagmaThermoKinematics -e 'using Pkg; Pkg.instantiate()'    # MTK + MAGEMin example only
+   ```
 
 ## Example
 
@@ -45,7 +60,7 @@ Phase, Temp = fill(2, size(model)), zeros(size(model))                  # 2: cru
 add_layer!(Phase, Temp, model; zlim=(-2, 2), phase=ConstantPhase(1))     # 1: sediments
 X, _, Z = xyz_grid(x, 0, z)
 Phase[Z .> exp.(-(X ./ 2) .^ 2)] .= 0                                   # 0: air above a 1 km high hill
-rho = [0.001, 2.2, 2.7][Phase .+ 1]; vp = [0.0, 2.5, 5.5][Phase .+ 1]; vs = [0.0, 1.2, 3.2][Phase .+ 1]
+rho = [1.0, 2200.0, 2700.0][Phase .+ 1]; vp = [0.0, 2.5, 5.5][Phase .+ 1]; vs = [0.0, 1.2, 3.2][Phase .+ 1]
 model = addfield(model, (; rho, vp, vs, Qp=fill(200.0, size(X)), Qs=fill(100.0, size(X))))
 
 source   = DoubleCoupleSource(-3.0, 0.0, -4.0; Mw=3.5, strike=0, dip=45, rake=90, trise=0.4)
@@ -75,9 +90,18 @@ More examples are in [`examples/`](examples):
 
 Run them with `julia -t auto --project=examples examples/<name>.jl [cuda|amdgpu|metal]`.
 
+[`MagmaThermoKinematics/Unzen_2D.jl`](examples/MagmaThermoKinematics/Unzen_2D.jl) (own environment) sends seismic waves through the
+magmatic system below Unzen volcano: it runs the 2D Unzen model of [MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl)
+(about 6 minutes on a laptop at 100 m resolution), computes density, velocities and melt fraction from the temperature with
+[MAGEMin](https://github.com/ComputationalThermodynamics/MAGEMin_C.jl) phase diagrams, sets a low Q in partially molten rock,
+and makes a movie of the wavefield while the simulation runs (no ParaView files), with seismometers just below the surface:
+```
+julia -t auto --project=examples/MagmaThermoKinematics examples/MagmaThermoKinematics/Unzen_2D.jl [resolution in m]
+```
+
 ## Usage
 
-- **Model:** a regular GMG `CartData` with fields `rho` [g/cm³] and `vp`, `vs` [km/s]; `Qp`, `Qs` are optional
+- **Model:** a regular GMG `CartData` with fields `rho` [kg/m³] and `vp`, `vs` [km/s]; `Qp`, `Qs` are optional (`density_unit=:g_cm3` for densities in g/cm³, as in OpenSWPC)
   (without them the model is elastic).
   - Air has `vp = vs = 0`; the free surface and topography follow from it.
   - Water has `vs = 0`.
@@ -91,6 +115,8 @@ Run them with `julia -t auto --project=examples examples/<name>.jl [cuda|amdgpu|
   - Pass `nproc=(2, 2)` in 3D (subdomains in x and y) or `nproc=4` in 2D.
   - This works on CPUs and on CUDA or AMD GPUs, one GPU per process; the results are identical to a serial run.
 - **Snapshots:** `snapshot_every=100` writes the velocity field to `snapshot_dir` as a ParaView movie (`wavefield.pvd`).
+  With `callback=(wavefield, t) -> ...` the wavefield (a `CartData`) is passed to your function instead, e.g. to plot it while the
+  simulation runs.
 
 ## Validation
 

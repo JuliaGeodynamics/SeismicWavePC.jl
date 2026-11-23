@@ -19,7 +19,7 @@ add_volcano!(Phase, Temp, model; volcanic_phase=2, center=(0, 0, 0), height=2.0,
 add_sphere!(Phase, Temp, model; cen=(0, 0, -4), radius=1.5, phase=ConstantPhase(3))      # magma chamber
 
 #             air     crust    volcanic   magma
-rho_ = Dict(0 => 0.001, 1 => 2.7, 2 => 2.3, 3 => 2.5)
+rho_ = Dict(0 => 1.0,   1 => 2700.0, 2 => 2300.0, 3 => 2500.0)   # kg/m³
 vp_  = Dict(0 => 0.0,   1 => 5.5, 2 => 3.0, 3 => 3.5)
 vs_  = Dict(0 => 0.0,   1 => 3.2, 2 => 1.6, 3 => 1.0)
 Q_   = Dict(0 => 10.0,  1 => 300.0, 2 => 60.0, 3 => 20.0)
