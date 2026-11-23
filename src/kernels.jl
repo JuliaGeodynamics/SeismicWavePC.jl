@@ -75,11 +75,6 @@ Base.@propagate_inbounds function inject_psv!(F, S, it)
     end
 end
 
-Base.@propagate_inbounds function record_psv!(rec, F, st, itw, n)
-    i, k = st.i[n], st.k[n]
-    rec[itw, 1, n] = (F.Vx[i, k] + F.Vx[i-1, k]) / 2
-    rec[itw, 2, n] = -(F.Vz[i, k] + F.Vz[i, k-1]) / 2     # positive up
-end
 
 # ------------------------------------------------------------------ SH (x, z), out-of-plane y
 
@@ -119,9 +114,6 @@ Base.@propagate_inbounds function inject_sh!(F, S, it)
     end
 end
 
-Base.@propagate_inbounds function record_sh!(rec, F, st, itw, n)
-    rec[itw, 1, n] = F.Vy[st.i[n], st.k[n]]
-end
 
 # ------------------------------------------------------------------ 3D (x, y, z)
 
@@ -201,11 +193,60 @@ Base.@propagate_inbounds function inject_3d!(F, S, it)
     end
 end
 
-Base.@propagate_inbounds function record_3d!(rec, F, st, itw, n)
-    i, j, k = st.i[n], st.j[n], st.k[n]
-    rec[itw, 1, n] = (F.Vx[i, j, k] + F.Vx[i-1, j, k]) / 2
-    rec[itw, 2, n] = (F.Vy[i, j, k] + F.Vy[i, j-1, k]) / 2
-    rec[itw, 3, n] = -(F.Vz[i, j, k] + F.Vz[i, j, k-1]) / 2   # positive up
+
+# ------------------------------------------------------------------ stations (OpenSWPC m_wav)
+# Every step: displacement and strain are integrated from the velocity (`acc`). At the recording steps (`itw > 0`) velocity,
+# displacement, stress and strain at the cell centre are stored in `rec[itw, :, n]` (z positive up: z-shear components flip).
+
+"4th-order difference of `A` along `e` (unit `CartesianIndex`) at `I + e/2`; `ca` are the coefficients of that axis."
+Base.@propagate_inbounds Dp(A, I, e, ca) = (A[I+e] - A[I]) * ca[1] - (A[I+2e] - A[I-e]) * ca[2]
+"Derivative along `eb` at the cell centre `I` of a component staggered along `ea`."
+Base.@propagate_inbounds Dm(A, I, ea, eb, cb) = (Dp(A, I, eb, cb) + Dp(A, I - ea, eb, cb) + Dp(A, I - eb, eb, cb) + Dp(A, I - ea - eb, eb, cb)) / 4
+Base.@propagate_inbounds function store!(rec, itw, n, q)
+    for m in eachindex(q)
+        rec[itw, m, n] = q[m]
+    end
+end
+
+Base.@propagate_inbounds function record_psv!(rec, acc, F, st, c, dt, itw, n)
+    (; Vx, Vz, Sxx, Szz, Sxz) = F
+    I, ex, ez = CartesianIndex(st.i[n], st.k[n]), CartesianIndex(1, 0), CartesianIndex(0, 1)
+    v = ((Vx[I] + Vx[I-ex]) / 2, -(Vz[I] + Vz[I-ez]) / 2)
+    e = (Dp(Vx, I - ex, ex, c[1]), Dp(Vz, I - ez, ez, c[2]), -(Dm(Vz, I, ez, ex, c[1]) + Dm(Vx, I, ex, ez, c[2])) / 2)
+    a = ntuple(m -> acc[m, n] + (m <= 2 ? v[m] : e[m-2]) * dt, Val(5))
+    for m in 1:5
+        acc[m, n] = a[m]
+    end
+    itw > 0 && store!(rec, itw, n, (v..., a[1], a[2], Sxx[I], Szz[I], -(Sxz[I] + Sxz[I-ex] + Sxz[I-ez] + Sxz[I-ex-ez]) / 4, a[3], a[4], a[5]))
+end
+
+Base.@propagate_inbounds function record_sh!(rec, acc, F, st, c, dt, itw, n)
+    (; Vy, Syz, Sxy) = F
+    I, ex, ez = CartesianIndex(st.i[n], st.k[n]), CartesianIndex(1, 0), CartesianIndex(0, 1)
+    v = Vy[I]
+    eyz = -(Dp(Vy, I, ez, c[2]) + Dp(Vy, I - ez, ez, c[2])) / 4
+    exy = (Dp(Vy, I, ex, c[1]) + Dp(Vy, I - ex, ex, c[1])) / 4
+    a = (acc[1, n] + v * dt, acc[2, n] + eyz * dt, acc[3, n] + exy * dt)
+    acc[1, n], acc[2, n], acc[3, n] = a
+    itw > 0 && store!(rec, itw, n, (v, a[1], -(Syz[I] + Syz[I-ez]) / 2, (Sxy[I] + Sxy[I-ex]) / 2, a[2], a[3]))
+end
+
+Base.@propagate_inbounds function record_3d!(rec, acc, F, st, c, dt, itw, n)
+    (; Vx, Vy, Vz, Sxx, Syy, Szz, Syz, Sxz, Sxy) = F
+    I = CartesianIndex(st.i[n], st.j[n], st.k[n])
+    ex, ey, ez = CartesianIndex(1, 0, 0), CartesianIndex(0, 1, 0), CartesianIndex(0, 0, 1)
+    v = ((Vx[I] + Vx[I-ex]) / 2, (Vy[I] + Vy[I-ey]) / 2, -(Vz[I] + Vz[I-ez]) / 2)
+    e = (Dp(Vx, I - ex, ex, c[1]), Dp(Vy, I - ey, ey, c[2]), Dp(Vz, I - ez, ez, c[3]),
+         -(Dm(Vz, I, ez, ey, c[2]) + Dm(Vy, I, ey, ez, c[3])) / 2,
+         -(Dm(Vz, I, ez, ex, c[1]) + Dm(Vx, I, ex, ez, c[3])) / 2,
+         (Dm(Vy, I, ey, ex, c[1]) + Dm(Vx, I, ex, ey, c[2])) / 2)
+    a = ntuple(m -> acc[m, n] + (m <= 3 ? v[m] : e[m-3]) * dt, Val(9))
+    for m in 1:9
+        acc[m, n] = a[m]
+    end
+    avg(S, e1, e2) = (S[I] + S[I-e1] + S[I-e2] + S[I-e1-e2]) / 4
+    itw > 0 && store!(rec, itw, n, (v..., a[1], a[2], a[3], Sxx[I], Syy[I], Szz[I], -avg(Syz, ey, ez), -avg(Sxz, ex, ez), avg(Sxy, ex, ey),
+                                    a[4], a[5], a[6], a[7], a[8], a[9]))
 end
 
 # ------------------------------------------------------------------ launching

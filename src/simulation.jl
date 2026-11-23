@@ -29,8 +29,11 @@ end
 Result of [`simulate`](@ref). Fields:
 - `t`: times [s] of the samples
 - `v`: velocities `v[it, component, station]` [m/s], components along `components` (z positive up)
+- `u`: displacements [m], like `v`
+- `stress` [Pa] and `strain`: `stress[it, component, station]`, components along `tensor_components`
 - `stations`: the `Station`s
 - `components`: `(:x, :z)` (P-SV), `(:y,)` (SH) or `(:x, :y, :z)` (3D)
+- `tensor_components`: `(:xx, :zz, :xz)` (P-SV), `(:yz, :xy)` (SH) or `(:xx, :yy, :zz, :yz, :xz, :xy)` (3D)
 - `wavefield`: velocity field `V` [m/s] at the end of the simulation as `CartData` (on MPI rank 0; `nothing` elsewhere)
 
 `r["name"]` returns the `(nt, ncomponents)` matrix of the station called `"name"`.
@@ -38,8 +41,12 @@ Result of [`simulate`](@ref). Fields:
 struct Seismograms
     t::Vector{Float64}
     v::Array{Float64,3}
+    u::Array{Float64,3}
+    stress::Array{Float64,3}
+    strain::Array{Float64,3}
     stations::Vector{Station}
     components::Tuple{Vararg{Symbol}}
+    tensor_components::Tuple{Vararg{Symbol}}
     wavefield::Union{CartData,Nothing}
 end
 
@@ -79,7 +86,7 @@ Cells with `vs = 0` and `vp > 0` are water. A `CartData` of size `(nx, 1, nz)` g
 Keyword arguments
 - `dt`, `nt`: time step [s] and number of steps; `tbeg = 0.0` is the start time.
 - `sources`: `MomentTensorSource` or vector of them (see `DoubleCoupleSource`); `stf = :kupper` source time function (see `moment_rate`).
-- `stations = Station[]`; seismograms are recorded every `record_every = 1` steps.
+- `stations = Station[]`; seismograms (velocity, displacement, stress, strain) are recorded every `record_every = 1` steps.
 - `wave = :psv`: `:psv` or `:sh`, for 2D models.
 - `na = 20`: thickness of the Cerjan absorbing layer (sides and bottom) in cells.
 - `fq_min = 0.05`, `fq_max = 5.0`, `fq_ref = 1.0`: frequency band [Hz] of constant Q, and reference frequency of the velocities.
@@ -109,6 +116,7 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     m = model_arrays(model)
     m = merge(m, (; rho=m.rho ./ density_scale(density_unit, maximum(m.rho))))     # internal unit: g/cm³
     g = Grid(m, Val(N))
+    all(ntuple(a -> g.n[a] > (a < N ? 2na : na), N)) || error("the model ($(join(g.n, "×")) cells) must be larger than the absorbing layers (na = $na cells)")
     med = setup_medium(m, g, na, fq_min, fq_max, fq_ref)
     courant = med.vmax * dt * sqrt(sum(1 ./ g.d .^ 2))
     courant < 6 / 7 || error("unstable time step: Courant number $courant ≥ 6/7, use dt < $(dt * 6 / 7 / courant)")
@@ -169,8 +177,11 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     own = [n for n in eachindex(SI) if all(H + 1 .<= Base.front(SI[n]) .- Base.front(off) .<= Base.front(nl) .- H)]
     St = NamedTuple{ijk}(ntuple(a -> dev(Int32[SI[n][a] - off[a] for n in own]), N))
     components = mode === :psv ? (:x, :z) : mode === :sh ? (:y,) : (:x, :y, :z)
+    tensor_components = mode === :psv ? (:xx, :zz, :xz) : mode === :sh ? (:yz, :xy) : (:xx, :yy, :zz, :yz, :xz, :xy)
+    nc, ns = length(components), length(tensor_components)
     nrec = (nt - 1) ÷ record_every + 1
-    rec = KernelAbstractions.zeros(backend, FT, nrec, length(components), max(length(own), 1))
+    rec = KernelAbstractions.zeros(backend, FT, nrec, 2nc + 2ns, max(length(own), 1))   # velocity, displacement, stress, strain
+    acc = KernelAbstractions.zeros(backend, FT, nc + ns, max(length(own), 1))           # displacement and strain, integrated every step
 
     # wavefields
     z() = KernelAbstractions.zeros(backend, FT, nl...)
@@ -190,16 +201,18 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     end
     movie = (snapshot_every > 0 && me == 0 && callback === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     wall = time()
-    movie = timeloop!(F, M, Src, St, rec, c, vc, FT(dt), kernels(mode), nl, nt, isempty(S), length(own), record_every,
+    movie = timeloop!(F, M, Src, St, rec, acc, c, vc, FT(dt), kernels(mode), nl, nt, isempty(S), length(own), record_every,
                       snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose && me == 0, parallel, nb, backend)
     movie === nothing || movie_paraview(pvd=movie, Finalize=true)
     verbose && me == 0 && @printf("  finished in %.2f s\n", time() - wall)
 
-    v = zeros(nrec, length(components), length(stations))
-    v[:, :, own] .= Array(rec)[:, :, 1:length(own)] .* scale
+    traces = zeros(nrec, 2nc + 2ns, length(stations))
+    traces[:, :, own] .= Array(rec)[:, :, 1:length(own)]
     wavefield = velocity(out, F)
-    parallel && (MPI.Allreduce!(v, +, MPI.COMM_WORLD); IGG.finalize_global_grid(finalize_MPI=false))
-    return Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), v, stations, components, wavefield)
+    parallel && (MPI.Allreduce!(traces, +, MPI.COMM_WORLD); IGG.finalize_global_grid(finalize_MPI=false))
+    part(r, f) = traces[:, r, :] .* (scale * f)  # wavefield units -> m/s, m, Pa, strain (OpenSWPC)
+    return Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), part(1:nc, 1), part(nc+1:2nc, 1),
+                       part(2nc+1:2nc+ns, 1e6), part(2nc+ns+1:2nc+2ns, 1e-3), stations, components, tensor_components, wavefield)
 end
 
 "Factor from `unit` to g/cm³; `rho_max` guards against densities given in the other unit."
@@ -217,15 +230,14 @@ velocities(F) = haskey(F, :Vx) ? (haskey(F, :Vy) ? (F.Vx, F.Vy, F.Vz) : (F.Vx, F
 stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, F.Sxz, F.Sxy) : (F.Sxx, F.Szz, F.Sxz)) : (F.Syz, F.Sxy)
 
 # Function barrier: everything below is concretely typed.
-function timeloop!(F, M, Src, St, rec, c, vc, dtT, (vel!, stress!, inject!, record!), nl, nt, nosource, nown, record_every,
+function timeloop!(F, M, Src, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, record!), nl, nt, nosource, nown, record_every,
                    snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, backend)
     ndr = nl .- 2H
     V, Σ = velocities(F), stresses(F)
     report = max(nt ÷ 10, 1)
     for it in 1:nt
-        if (it - 1) % record_every == 0 && nown > 0
-            foreach_item!(backend, record!, (rec, F, St, (it - 1) ÷ record_every + 1), nown)
-        end
+        itw = (it - 1) % record_every == 0 ? (it - 1) ÷ record_every + 1 : 0
+        nown > 0 && foreach_item!(backend, record!, (rec, acc, F, St, c, dtT, itw), nown)
         if snapshot_every > 0 && (it - 1) % snapshot_every == 0
             KernelAbstractions.synchronize(backend)
             data = velocity(out, F)

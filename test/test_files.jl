@@ -46,4 +46,43 @@ end
     @test h.kstnm == "B" && h.kcmpnm == "Vz" && h.kevnm == "test" && h.delta ≈ DT
     s = test_source()
     @test h.dist ≈ hypot(1.5 - s.x, -0.4 - s.y) && h.evdp ≈ -s.z
+    files = write_sac(r, dir; title="all", quantities=(:v, :u, :stress, :strain))
+    @test length(files) == 3 * (2 + 2 + 3 + 3)
+    _, u, hu = read_sac(joinpath(dir, "all.psv.C.Uz.sac"))
+    _, e, he = read_sac(joinpath(dir, "all.psv.C.Exz.sac"))
+    @test u ≈ Float32.(r.u[:, 2, 3] .* 1e9) && e ≈ Float32.(r.strain[:, 3, 3]) && hu.kcmpnm == "Uz" && he.kcmpnm == "Exz"
+    @test_throws ErrorException write_sac(r, dir; quantities=(:acceleration,))
+end
+
+@testset "layered models (OpenSWPC lhm, lgm, grd)" begin
+    dir = mktempdir()
+    file = joinpath(dir, "layers.dat")
+    write(file, "# depth rho vp vs qp qs\n 1.0  2.0 4.0 2.0 100 50\n\n 3.0  3.0 6.0 3.5 400 200\n")
+    x, z = range(-2, 2, length=5), range(-5, 1, length=13)            # z = -5, -4.5, …, 1 (up)
+    m = read_lhm(file, x, 0.0, z)
+    at(m, f, depth) = m.fields[f][1, 1, findfirst(≈(-depth), z)]
+    @test size(m) == (5, 1, 13)
+    @test at(m, :vp, -1.0) == 0 && at(m, :rho, -1.0) == 1.0           # air above sea level
+    @test at(m, :vp, 0.5) == 1.5 && at(m, :vs, 0.5) == 0 && at(m, :rho, 0.5) == 1000   # sea water above the first layer
+    @test at(m, :vp, 1.0) == 4.0 && at(m, :Qs, 2.5) == 50 && at(m, :vs, 3.0) == 3.5 && at(m, :rho, 5.0) == 3000
+    g = read_lgm(file, x, 0.0, z)
+    @test at(g, :vp, 2.0) ≈ 5.0 && at(g, :rho, 2.5) ≈ 2750 && at(g, :vp, 5.0) == 6.0   # linear between the layer tops
+    src = DoubleCoupleSource(0.0, 0, -4; Mw=1, strike=0, dip=45, rake=0)
+    @test simulate(m; dt=0.02, nt=10, sources=src, na=2, verbose=false) isa Seismograms
+    @test_throws ErrorException simulate(m; dt=0.02, nt=10, sources=src, verbose=false)     # smaller than the absorber
+
+    # grd: two boundaries on a longitude-latitude grid [m depth]: flat at 1 km, dipping from 2 to 4 km eastwards
+    proj = ProjectionPoint(Lon=140.0, Lat=36.0)
+    lon, lat = 139.9:0.01:140.1, 35.9:0.01:36.1
+    for (name, d) in (("b1.nc", [1000.0 for _ in lon, _ in lat]), ("b2.nc", [2000 + 2000 * (l - 139.9) / 0.2 for l in lon, _ in lat]))
+        NCDataset(joinpath(dir, name), "c") do ds
+            defVar(ds, "lon", collect(lon), ("lon",)); defVar(ds, "lat", collect(lat), ("lat",)); defVar(ds, "z", d, ("lon", "lat"))
+        end
+    end
+    write(joinpath(dir, "grd.lst"), "b1.nc 2.0 4.0 2.0 100 50 0\nb2.nc 3.0 6.0 3.5 400 200 1\n")
+    G = read_grd(joinpath(dir, "grd.lst"), range(-5, 5, length=11), range(-5, 5, length=11), z, proj)
+    col(f, i) = G.fields[f][i, 6, :]
+    @test col(:vp, 6)[findfirst(≈(-0.5), z)] == 1.5 && col(:vp, 6)[findfirst(≈(-1.5), z)] == 4.0   # water, layer 1
+    @test col(:vp, 6)[findfirst(≈(-3.5), z)] == 6.0 && col(:vp, 6)[findfirst(≈(-2.5), z)] == 4.0   # boundary at 3 km in the centre
+    @test count(==(6.0), col(:vp, 1)) > count(==(6.0), col(:vp, 11))                              # deeper towards the east
 end

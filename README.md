@@ -120,6 +120,7 @@ record weaker S waves and a longer coda.*
   - Both accept `(lon, lat, z, proj::ProjectionPoint)` instead of `x, y, z`.
   - Source time functions are set with `stf=:kupper | :boxcar | :triangle | :herrmann | :cosine | :texp`.
 - **Stations:** `Station(name, x, y, z)`, `Station(name, lon, lat, z, proj)`, with `surface=true` to place a station on the free surface.
+  Velocity, displacement, stress and strain are recorded (`result.v`, `result.u`, `result.stress`, `result.strain`).
 - **GPU:** `simulate(model; backend=CUDABackend(), ...)`, or `ROCBackend()`, `MetalBackend()`. Metal requires `T = Float32` (the default).
 - **MPI:** start with `mpiexecjl -n 4 julia script.jl`.
   - Pass `nproc=(2, 2)` in 3D (subdomains in x and y) or `nproc=4` in 2D.
@@ -134,26 +135,29 @@ Velocity models and seismograms in the file formats of OpenSWPC can still be use
 
 ```julia
 using SeismicWavePC, NCDatasets
-model  = read_netcdf("velocity_model.nc")     # netCDF model of OpenSWPC (vmodel_type = "velm", OpenSWPC.write_netcdf)
+model  = read_netcdf("velocity_model.nc")      # netCDF model of OpenSWPC (vmodel_type = "velm", OpenSWPC.write_netcdf)
+model  = read_lhm("layers.dat", x, y, z)       # or a layered model (lhm; read_lgm for lgm) on the grid x, y, z [km]
+model  = read_grd("grd.lst", x, y, z, proj)    # or layer boundaries from GMT grids (grd), placed with a GMG ProjectionPoint
 result = simulate(model; dt, nt, sources=source, stations)
-write_sac(result, "out/wav"; title="swpc", source)           # out/wav/swpc.psv.<station>.Vx.sac, ... in nm/s
-t, v, header = read_sac("old_run/wav/swpc.psv.ST01.Vz.sac")  # e.g. to compare with an earlier OpenSWPC run
+write_sac(result, "out/wav"; title="swpc", source, quantities=(:v, :u, :stress, :strain))   # swpc.psv.<station>.Vx.sac, …
+t, v, header = read_sac("old_run/wav/swpc.psv.ST01.Vz.sac")   # e.g. to compare with an earlier OpenSWPC run
 ```
 
 | OpenSWPC | SeismicWavePC.jl |
 |---|---|
 | input file (`dt`, `nt`, `na`, `fq_min`, `stftype`, …) | keyword arguments of `simulate` (`stf` for `stftype`) |
-| velocity model (`vmodel_type`) | any GMG `CartData`, or `read_netcdf` for a `velm` netCDF file (needs `using NCDatasets`) |
+| velocity model (`vmodel_type`) | any GMG `CartData`; `read_netcdf` (`velm`), `read_lhm` (`lhm`), `read_lgm` (`lgm`), `read_grd` (`grd`); `velm` and `grd` need `using NCDatasets` |
 | source and station files | `DoubleCoupleSource`, `MomentTensorSource`, `Station` (in x, y or longitude, latitude) |
-| SAC files in `odir/wav` | `write_sac(result, dir)`: same file names, nm/s, `Vz` positive up |
+| seismograms (`sw_wav_v`, `_u`, `_stress`, `_strain`) | always recorded: `result.v` [m/s], `result.u` [m], `result.stress` [Pa], `result.strain` |
+| SAC files in `odir/wav` | `write_sac(result, dir; quantities)`: same file names and units (nm/s, nm, Pa), z positive up |
 | snapshots (netCDF) | ParaView movie (`snapshot_every`) or your own plots (`callback`) |
 | x north, y east, z down | x east, y north, z up (as in GMG) |
 | density in g/cm³ | kg/m³ (`density_unit=:g_cm3` for g/cm³) |
 
+## Validation
 
-
-The test suite compares seismograms with the Fortran OpenSWPC code (`swpc_psv`, `swpc_sh`, `swpc_3d`; reference traces are in
-[`test/reference`](test/reference)):
+The test suite compares seismograms (velocity, displacement, stress and strain) with the Fortran OpenSWPC code (`swpc_psv`,
+`swpc_sh`, `swpc_3d`; reference traces are in [`test/reference`](test/reference)):
 
 | Solver | Model | Max. difference to OpenSWPC |
 |---|---|---|
@@ -201,8 +205,8 @@ The laptop was also busy with other work, so single runs varied a lot; take the 
 ## Not (yet) supported
 
 - PML absorbing boundaries: only the Cerjan sponge so far; PML is planned.
-- From OpenSWPC: checkpoint/restart, plane-wave and body-force sources, reciprocal Green's functions, Earth flattening and the Munk ocean profile;
-  the layered (`lhm`, `grd`) model files (build such models with GMG instead); displacement, stress and strain seismograms; netCDF snapshots.
+- From OpenSWPC: checkpoint/restart, plane-wave and body-force sources, reciprocal Green's functions, Earth flattening and the Munk
+  ocean profile, the minimum velocity cut-off (`vcut`), netCDF snapshots.
 - OpenSWPC's random-medium generator; perturb the GMG model yourself instead.
 - Near vertical topography steps, the 2D results differ by 7–28% from the `swpc_psv`/`swpc_sh` binaries. They agree to 10⁻⁶ for flat
   surfaces, and for the same step in 3D, so the difference appears to lie in the 2D Fortran codes.

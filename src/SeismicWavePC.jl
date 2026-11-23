@@ -8,7 +8,7 @@ Runs on CPUs and GPUs (KernelAbstractions) and on multiple MPI processes (Implic
 module SeismicWavePC
 
 using KernelAbstractions
-using GeophysicalModelGenerator: CartData, GeoData, ProjectionPoint, convert2CartData, write_paraview, movie_paraview
+using GeophysicalModelGenerator: CartData, GeoData, ProjectionPoint, convert2CartData, write_paraview, movie_paraview, xyz_grid
 import ImplicitGlobalGrid as IGG
 import MPI
 using Printf
@@ -19,8 +19,9 @@ include("medium.jl")
 include("kernels.jl")
 include("simulation.jl")
 include("files.jl")
+include("layered.jl")
 
 export MomentTensorSource, DoubleCoupleSource, Station, Seismograms, simulate, moment_rate, CPU
-export read_netcdf, write_sac, read_sac
+export read_netcdf, write_sac, read_sac, read_lhm, read_lgm, read_grd
 
 end
