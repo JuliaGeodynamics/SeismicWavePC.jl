@@ -28,6 +28,17 @@ gradients for full-waveform inversion. It started as a Julia port of [OpenSWPC](
   Julia packages.
 - **Live output:** plot or film the waves while the simulation runs; SAC and netCDF files for OpenSWPC users.
 
+## 2D: Unzen from MagmaThermoKinematics.jl
+
+![Waves through the magmatic system below Unzen](docs/src/assets/Unzen_2D_waves.gif)
+
+![Seismograms of the Unzen example](docs/src/assets/Unzen_2D_seismograms.png)
+
+*A Mw 4 earthquake below Unzen, through the temperature field of a
+[MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl) model with MAGEMin velocities (white lines:
+more than 10 % melt). Stations above the partially molten region (shaded) record weaker S waves and a longer coda
+([example](examples/MagmaThermoKinematics/Unzen_2D.jl)).*
+
 ## Installation
 
 ```julia
