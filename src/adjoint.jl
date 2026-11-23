@@ -257,10 +257,9 @@ function dhavg(m::NTuple{K}, a) where {K}
     return S == 0 ? 0.0 : K * p(a)^2 / S^2
 end
 
-"Gradients with respect to rho, lam, mu (internal arrays) from the accumulators `G` (host arrays)."
-function assemble_gradient(G, M, mode)
+"Gradients with respect to rho, lam, mu (internal arrays) from the accumulators `G` and the shear modulus `mu` (host arrays)."
+function assemble_gradient(G, mu, mode)
     shear, buoy = adjoint_setup(Val(mode))[7:8]
-    mu = Float64.(Array(M.mu))
     z = zero(mu)
     glam, gmu, grho = haskey(G, :lam) ? G.lam : copy(z), haskey(G, :mu) ? G.mu : copy(z), copy(z)
     R = CartesianIndices(mu)
@@ -299,9 +298,11 @@ function forward_step!(F, M, Src, FSrc, St, rec, acc, regions, it, p, record=tru
     p.pw_edges && extrapolate_sides!(velocities(F), p.edges)
     map(((lo, ndr, P),) -> foreach_cell!(backend, stress!, (F, M, c, vc, dtT, P), lo, ndr), regions)
     p.nosource || run_once!(backend, inject!, (F, Src, it))
+    p.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, p.nb, stresses(F)...))
     p.pw_edges && extrapolate_sides!(stresses(F), p.edges)
     map(((lo, ndr, P),) -> foreach_cell!(backend, vel!, (F, M, c, dtT, P), lo, ndr), regions)
     p.noforce || run_once!(backend, force!, (F, M, FSrc, it))
+    p.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, p.nb, velocities(F)...))
     return nothing
 end
 
@@ -322,6 +323,7 @@ function (d::AdjointDriver)(s)
     state = attenuation ? (values(F)..., pml_state(regions)...) : (V..., stresses(F)..., pml_state(regions)...)
     # checkpoints every K steps (host memory) and a buffer of the K + 1 velocity fields of a segment (device)
     K = something(d.checkpoint_steps, ceil(Int, sqrt(nt * sum(length, state) / sum(length, V))))
+    s.parallel && (K = MPI.Allreduce(K, max, IGG.comm()))      # the same segments (and halo exchanges) on all ranks
     step!(it, record) = forward_step!(F, M, s.Src, s.FSrc, St, rec, acc, regions, it, s, record)
 
     # forward pass: seismograms and checkpoints
@@ -332,7 +334,7 @@ function (d::AdjointDriver)(s)
     end
     KernelAbstractions.synchronize(backend)
     r = Array(rec)[:, 1:s.nc, 1:nown] .* s.scale .- o
-    J = sum(abs2, r) / 2
+    J = s.parallel ? MPI.Allreduce(sum(abs2, r) / 2, +, IGG.comm()) : sum(abs2, r) / 2
     res = KernelAbstractions.zeros(backend, s.T, size(rec, 1), s.nc, max(nown, 1))
     copyto!(res, s.T.(cat(r .* s.scale, zeros(size(res, 1), s.nc, size(res, 3) - nown); dims=3)))    # ∂J/∂rec
 
@@ -364,10 +366,29 @@ function (d::AdjointDriver)(s)
             map(((lo, ndr, P),) -> foreach_cell!(backend, vel!, (Q, Ma, c, dtT, P), lo, ndr), aregions)
             itw = n % record_every == 0 ? n ÷ record_every + 1 : 0
             itw > 0 && nown > 0 && run_once!(backend, residual!, (Q, Ma, St, res, itw, nown))
+            s.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, s.nb, velocities(Q)...))
             foreach_cell!(backend, grad!, (G, E, Rb, Q, buf[n-a+2], buf[n-a+1], Ma, c, vc, dtT), inner...)
             map(((lo, ndr, P),) -> foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, P), lo, ndr), aregions)
+            s.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, s.nb, stresses(Q)...))
         end
     end
     KernelAbstractions.synchronize(backend)
-    return J, model_gradient(s, assemble_gradient(map(A -> Float64.(Array(A)), G), M, s.mode))
+    # accumulators of all ranks on the global grid (rank 0), chain rule there, result to all ranks
+    Gg = map(A -> gather_interior(A, s), G)
+    g = s.me == 0 ? model_gradient(s, assemble_gradient(Gg, s.med.mu, s.mode)) : nothing
+    s.parallel && (g = MPI.bcast(g, 0, IGG.comm()))
+    return J, g
+end
+
+"The cells of `A` owned by this rank, gathered on rank 0 into an array of the global (padded) grid; `nothing` on other ranks."
+function gather_interior(A, s)
+    N = length(s.nl)
+    in_ = ntuple(a -> H+1:s.nl[a]-H, N)
+    B = Float64.(Array(A)[in_...])
+    G = s.me == 0 ? zeros(size(B) .* s.dims) : nothing
+    s.parallel ? IGG.gather!(B, G) : (G = B)
+    s.me == 0 || return nothing
+    P = zeros(size(G) .+ 2H)
+    P[ntuple(a -> H+1:H+size(G, a), N)...] = G
+    return P
 end

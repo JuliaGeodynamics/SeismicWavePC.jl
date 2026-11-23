@@ -31,9 +31,9 @@ end
 state(s) = (values(s.F)..., s.acc, S.pml_state(s.regions)...)
 
 function (d::GradientDriver)(s)
-    s.backend isa S.CPU || error("misfit_gradient runs on the CPU so far")
+    s.backend isa S.CPU && !s.parallel || error("misfit_gradient(...; method = :ad) runs on the CPU and one process (no MPI)")
     o = S.observed_velocities(d.observed, s)
-    p = (; s.c, s.vc, s.dtT, s.nosource, s.noforce, s.nown, s.record_every, s.pw_edges, s.edges, s.backend, s.scale, s.nc,
+    p = (; s.c, s.vc, s.dtT, s.nosource, s.noforce, s.nown, s.record_every, s.pw_edges, s.edges, s.backend, s.scale, s.nc, s.parallel, s.nb,
          kernels=s.kernels[1:5])
     K = something(d.checkpoint_steps, ceil(Int, sqrt(s.nt)))
     starts = collect(1:K:s.nt)

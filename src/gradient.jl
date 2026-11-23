@@ -19,15 +19,15 @@ simulation, so their sensitivity is added to the cells next to the layers.
   simulation (to rounding errors) as long as the waves do not interact with the PML, whose adjoint is approximated by the
   PML itself (as usual): the sensitivity next to the absorbing layers and of stations close to them is then approximate.
 - `:ad`: reverse-mode automatic differentiation of the whole simulation (needs `using Enzyme`): exact also with the PML, but
-  ~20-50 forward simulations, CPU only. Use `T = Float64` with it.
+  ~20-50 forward simulations, CPU and one process only. Use `T = Float64` with it.
 
 The wavefields are saved every `checkpoint_steps` steps (default: balances the memory of the checkpoints, kept in host
 memory, and of the velocity fields of the steps in between, kept on the device), and the steps in between are recomputed in
-the reverse pass. One process (no MPI). Plane waves enter as a fixed initial wavefield (their dependence on the medium is
-not differentiated).
+the reverse pass. With `nproc` (MPI, as in `simulate`) every process gets `J` and the whole `gradient`. Plane waves enter
+as a fixed initial wavefield (their dependence on the medium is not differentiated).
 """
 function misfit_gradient(model::CartData, observed::Seismograms; method=:adjoint, checkpoint_steps=nothing, kwargs...)
-    bad = intersect(keys(kwargs), (:stations, :snapshots, :callback, :checkpoint, :restart, :driver, :nproc))
+    bad = intersect(keys(kwargs), (:stations, :snapshots, :callback, :checkpoint, :restart, :driver))
     isempty(bad) || error("misfit_gradient does not take the keywords $(join(bad, ", "))")
     method in (:adjoint, :ad) || error("method must be :adjoint or :ad, got :$method")
     K = checkpoint_steps === nothing ? nothing : Int(checkpoint_steps)

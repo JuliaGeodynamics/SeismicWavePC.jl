@@ -228,13 +228,14 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     end
     # internal: another driver of the time loop (misfit_gradient) gets the whole setup
     if driver !== nothing
-        parallel && error("gradients are computed on one process (nproc = 1)")
         regions = absorber === :cerjan ? ((ntuple(_ -> H, N), nl .- 2H, nothing),) :
                   pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT)
-        return driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode), regions, nt, nosource=isempty(S),
-                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
-                         components, med, m, g, na, fq_ref, rho_unit=density_scale(density_unit, maximum(model_arrays(model).rho)),
-                         mode, model, tbeg, dt, T=FT))
+        res = driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode), regions, nt, nosource=isempty(S),
+                        noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
+                        components, med, m, g, na, fq_ref, rho_unit=density_scale(density_unit, maximum(model_arrays(model).rho)),
+                        mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl))
+        parallel && IGG.finalize_global_grid(finalize_MPI=false)
+        return res
     end
     planes = snapshots === nothing ? nothing : setup_planes(snapshots, Val(mode), g, med, off, nl, dev, backend, FT, snapshot_dir, me)
     movie = (snapshot_every > 0 && me == 0 && callback === nothing && snapshots === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing

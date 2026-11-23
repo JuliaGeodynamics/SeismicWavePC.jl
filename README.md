@@ -143,8 +143,8 @@ record weaker S waves and a longer coda.*
   - The exception is the part of the waves that interacts with the PML, whose adjoint is approximated by the PML itself, as is
     usual. Keep stations a few wavelengths away from the absorbing layers.
   - `method=:ad` (with `using Enzyme`) differentiates the whole simulation automatically. It is exact in the PML too, but costs
-    20–50 forward simulations and runs only on the CPU.
-  - One process only (no MPI).
+    20–50 forward simulations and runs only on the CPU, on one process.
+  - Works with MPI (`nproc`, CPUs or GPUs) like `simulate`; every process gets the misfit and the whole gradient.
 - **Random media:** `xi = random_medium(x, y, z; spectrum=:vonkarman, a=0.5, epsilon=0.05, kappa=0.3)` makes fluctuations with a
   Gaussian, exponential or von Kármán spectrum (anisotropic with `a=(ax, ay, az)`), and `perturb(model, xi)` applies them to any
   GMG model as OpenSWPC does (vp, vs × (1 + ξ), ρ × (1 + 0.8 ξ) in solid rock).
