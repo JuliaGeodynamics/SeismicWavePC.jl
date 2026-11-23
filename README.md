@@ -117,7 +117,8 @@ record weaker S waves and a longer coda.*
   - Water has `vs = 0`.
   - A `CartData` of size `(nx, 1, nz)` is a 2D model: P-SV by default, `wave=:sh` for SH.
 - **Sources:** `DoubleCoupleSource(x, y, z; Mw, strike, dip, rake)`, a general `MomentTensorSource`, or a point force
-  `ForceSource(x, y, z; fx, fy, fz)` [N] (OpenSWPC's body force); forces and moment tensors can be combined.
+  `ForceSource(x, y, z; fx, fy, fz)` [N] (OpenSWPC's body force), or an incoming plane wave
+  `PlaneWave(:p or :s; depth, length, strike, dip, rake)` (OpenSWPC's `pw_mode`); all of them can be combined.
   - All accept `(lon, lat, z, proj::ProjectionPoint)` instead of `x, y, z`.
   - Sources outside the model or in the air are ignored with a warning (as in OpenSWPC, e.g. parts of a finite fault).
   - Source time functions are set with `stf=:kupper | :boxcar | :triangle | :herrmann | :cosine | :texp`.
@@ -154,7 +155,7 @@ t, v, header = read_sac("old_run/wav/swpc.psv.ST01.Vz.sac")   # e.g. to compare 
 |---|---|
 | input file (`dt`, `nt`, `na`, `fq_min`, `stftype`, …) | keyword arguments of `simulate` (`stf` for `stftype`) |
 | velocity model (`vmodel_type`) | any GMG `CartData`; `read_netcdf` (`velm`), `read_lhm` (`lhm`), `read_lgm` (`lgm`), `read_grd` (`grd`); `velm` and `grd` need `using NCDatasets` |
-| source and station files | `DoubleCoupleSource`, `MomentTensorSource`, `ForceSource` (`bf_mode`), `Station` (in x, y or longitude, latitude) |
+| source and station files | `DoubleCoupleSource`, `MomentTensorSource`, `ForceSource` (`bf_mode`), `PlaneWave` (`pw_mode`), `Station` (in x, y or longitude, latitude) |
 | `vcut`, `munk_profile`, `earth_flattening` | keywords of `read_lhm`, `read_lgm`, `read_grd`; `flatten_earth(model)` for any model, `flatten_depth` for sources |
 | seismograms (`sw_wav_v`, `_u`, `_stress`, `_strain`) | always recorded: `result.v` [m/s], `result.u` [m], `result.stress` [Pa], `result.strain` |
 | SAC files in `odir/wav` | `write_sac(result, dir; quantities)`: same file names and units (nm/s, nm, Pa), z positive up |
@@ -212,7 +213,11 @@ The laptop was also busy with other work, so single runs varied a lot; take the 
 
 ## Not (yet) supported
 
-- From OpenSWPC: plane-wave sources, reciprocal Green's functions, netCDF snapshots.
+- From OpenSWPC: reciprocal Green's functions, netCDF snapshots.
+- Plane waves agree with `swpc_3d` to 10⁻⁵. `swpc_psv` and `swpc_sh` give 1–5% different plane waves (even at vertical incidence),
+  while the 2D initial wavefield here equals the analytic formula and uses the same code as 3D; the difference appears to lie in the
+  2D Fortran codes. OpenSWPC's 3D P-wave formula for `sxy` has `sd·cd·sf` where `sd²·sf·cf` is correct (only for inclined waves);
+  the correct form is used here.
 - OpenSWPC's random-medium generator; perturb the GMG model yourself instead.
 - Near vertical topography steps, the 2D results differ by 7–28% from the `swpc_psv`/`swpc_sh` binaries. They agree to 10⁻⁶ for flat
   surfaces, and for the same step in 3D, so the difference appears to lie in the 2D Fortran codes.

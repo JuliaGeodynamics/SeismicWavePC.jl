@@ -4,8 +4,9 @@ MPI.Init()
 include("setup.jl")
 
 rank = MPI.Comm_rank(MPI.COMM_WORLD)
-for (mode, nproc) in ((:p3d, (2, 2)), (:psv, 4), (:sh, 4))
-    kw = (; dt=DT, nt=200, sources=test_source(), stations=test_stations(mode), wave=mode === :p3d ? :psv : mode, verbose=false)
+for (mode, nproc, sources) in ((:p3d, (2, 2), test_source()), (:psv, 4, test_source()), (:sh, 4, test_source()),
+                               (:psv, 4, PlaneWave(:s; depth=2.5, length=1.0, dip=20.0)))
+    kw = (; dt=DT, nt=200, sources, stations=test_stations(mode), wave=mode === :p3d ? :psv : mode, verbose=false)
     model = test_model(mode)
     serial = simulate(model; kw...)                   # every rank runs the full serial model
     parallel = simulate(model; nproc, kw...)

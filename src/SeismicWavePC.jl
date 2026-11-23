@@ -19,11 +19,12 @@ include("sources.jl")
 include("medium.jl")
 include("kernels.jl")
 include("pml.jl")
+include("planewave.jl")
 include("simulation.jl")
 include("files.jl")
 include("layered.jl")
 
-export MomentTensorSource, DoubleCoupleSource, ForceSource, Station, Seismograms, simulate, moment_rate, CPU
+export MomentTensorSource, DoubleCoupleSource, ForceSource, PlaneWave, Station, Seismograms, simulate, moment_rate, CPU
 export read_netcdf, write_sac, read_sac, read_lhm, read_lgm, read_grd, flatten_earth, flatten_depth
 
 end

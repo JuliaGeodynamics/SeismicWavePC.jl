@@ -36,3 +36,20 @@ end
     v = reshape(r.v[1:4:end, :, :], size(ref, 1), :)
     @test maximum(abs, v .- ref) / maximum(abs, ref) < 1e-3
 end
+
+@testset "agrees with OpenSWPC: plane waves (3D)" begin
+    # the flat 3D test model with x (east) = OpenSWPC y and y (north) = OpenSWPC x
+    m = test_model(:p3d; step=false)
+    X, Y, Z = xyz_grid(m.y.val[1, :, 1], m.x.val[:, 1, 1], m.z.val[1, 1, :])
+    f = m.fields
+    swap(A) = permutedims(A, (2, 1, 3))
+    model = CartData(X, Y, Z, (; rho=swap(f.rho), vp=swap(f.vp), vs=swap(f.vs), Qp=swap(f.Qp), Qs=swap(f.Qs)))
+    stations = [Station(s.name, s.y, s.x, s.z) for s in test_stations(:p3d)]
+    ref = readdlm(joinpath(@__DIR__, "reference", "3d_planewave.txt"), comments=true)
+    for (n, pw) in enumerate((PlaneWave(:p; depth=1.0, length=0.5, strike=30.0, dip=0.0, rake=40.0),
+                              PlaneWave(:s; depth=1.0, length=0.5, strike=30.0, dip=20.0, rake=40.0)))
+        r = simulate(model; dt=DT, nt=NT, sources=pw, stations, verbose=false)
+        b = ref[:, 9(n-1)+1:9n]
+        @test maximum(abs, reshape(r.v[1:4:end, :, :], size(b, 1), :) .- b) / maximum(abs, b) < 1e-3
+    end
+end

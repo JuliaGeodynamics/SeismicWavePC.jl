@@ -106,3 +106,18 @@ end
     @test_throws ErrorException simulate(model; kw..., checkpoint=joinpath(dir, "none"), restart=true)
     @test_throws ErrorException simulate(model; kw..., nt=100, checkpoint=file, restart=true)   # another simulation
 end
+
+@testset "plane waves" begin
+    # initial field = OpenSWPC's formulas: Vz at the cell centre (average of two staggered points), z up
+    pw = PlaneWave(:p; depth=2.5, length=1.0, dip=20.0)
+    W = Ref{Any}(nothing)
+    simulate(test_model(:psv); dt=DT, nt=1, sources=pw, snapshot_every=1, callback=(w, t) -> (W[] = w), verbose=false)
+    m = test_model(:psv)
+    x, z = m.x.val[100, 1, 1], m.z.val[1, 1, 30]                     # in the lower layer (vp = 4 km/s, Q = 50)
+    vp = 4.0 / SeismicWavePC.visco_chi(SeismicWavePC.relaxation_times(0.05, 5.0), 3 * SeismicWavePC.constq_zeta(0.05, 5.0,
+         SeismicWavePC.relaxation_times(0.05, 5.0)) / 50, 1.0)        # unrelaxed P velocity
+    vz(dz) = -cosd(20) * moment_rate(:kupper, sind(20) * x + cosd(20) * (-z + dz - 2.5) + DT / 2 * vp, 0.0, 1.0)
+    @test -W[].fields.V[3][100, 1, 30] ≈ (vz(0.025) + vz(-0.025)) / 2 rtol = 1e-4
+    @test_throws ErrorException PlaneWave(:love; depth=1, length=1)
+    @test_throws ErrorException simulate(test_model(:sh); dt=DT, nt=1, sources=pw, wave=:sh, verbose=false)   # no P in SH
+end
