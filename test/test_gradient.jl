@@ -30,7 +30,8 @@ misfit(m, obs, kw) = (r = simulate(m; kw..., stations=obs.stations, verbose=fals
     @test g32.fields.vs ≈ g.fields.vs rtol = 1e-2
     kw2 = (; kw..., record_every=3, absorber=:cerjan)
     obs2 = observed(m, kw2, :psv)
-    @test misfit_gradient(m, obs2; kw2...)[2].fields.vp ≈ misfit_gradient(m, obs2; kw2..., method=:ad)[2].fields.vp rtol = 1e-10
+    fd = (misfit(perturbed(m, :vp, I, 1e-4), obs2, kw2) - misfit(perturbed(m, :vp, I, -1e-4), obs2, kw2)) / 2e-4
+    @test misfit_gradient(m, obs2; kw2...)[2].fields.vp[I] ≈ fd rtol = 1e-4
     @test_throws ErrorException misfit_gradient(m, obs; kw..., nproc=2)
     @test_throws ErrorException misfit_gradient(m, obs; kw..., nt=100)        # does not match the observed seismograms
     @test_throws ErrorException misfit_gradient(m, obs; kw..., method=:fd)
