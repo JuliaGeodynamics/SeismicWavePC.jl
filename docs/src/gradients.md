@@ -26,8 +26,9 @@ sgrad[1].M, sgrad[1].t0                                                 # ∂J/�
     times `t`. With a sampled source time function (`stf = SampledSTF(t, values)`), the gradient with respect to its samples
     follows from `stf` by the chain rule of the linear interpolation.
 
-  The location gradient comes from the spatial derivative of the adjoint field, because the source is injected at a single
-  cell; all other source gradients are exact.
+  With `interpolation = :sinc` (sources between grid points, see [Sources and stations](@ref)) all source gradients are exact,
+  including the location. With the default `interpolation = :cell` the source sits at a cell, and the location gradient
+  comes from the spatial derivative of the adjoint field (an approximation).
 - All keywords of `simulate` work: GPUs (`backend`), MPI (`nproc`; every process gets all results), `T`, `absorber`,
   `record_every`, `stf`, ….
 - **Method:** adjoint-state method with checkpointing. The forward wavefield is saved every few steps (balancing host and device

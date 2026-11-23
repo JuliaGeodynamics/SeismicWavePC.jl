@@ -5,8 +5,8 @@ using Test, JET
 @testset "type stability (JET)" begin
     model = test_model(:psv)
     kw = (; dt=DT, nt=10, sources=test_source(), stations=test_stations(:psv), verbose=false)
-    for mode in (:psv, :sh)
-        reports = JET.get_reports(@report_opt target_modules=(SeismicWavePC,) simulate(model, Val(mode); kw...))
+    for mode in (:psv, :sh), interp in (:cell, :sinc)
+        reports = JET.get_reports(@report_opt target_modules=(SeismicWavePC,) simulate(model, Val(mode), Val(interp); kw...))
         # allowed: reading the untyped CartData fields once (convert, axis), building the output CartData, @printf
         boundary = ("convert(::Array{Float64, 3}", "axis(", "CartData(", "format(")
         hot = filter(r -> !any(b -> occursin(b, sprint(show, r)), boundary), reports)

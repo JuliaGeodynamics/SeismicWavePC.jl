@@ -23,8 +23,9 @@ a source or a vector of sources) the misfits and model gradients of all shots ar
 - `source_gradients`: one entry per source (per shot: a vector of them), `nothing` for plane waves and ignored sources:
   - moment tensors: `M` (∂J/∂ of the six components `M0 .* M` [per N m]), `M0` (at fixed `M`);
   - forces: `F` (∂J/∂ of `fx, fy, fz` [per N]);
-  - both: `x, y, z` (location [per km]; from the spatial derivative of the adjoint field, as the source is injected at a
-    single cell), `t0`, `trise` [per s], and `stf`: ∂J/∂ of the moment rate (source time function) at the times `t`.
+  - both: `x, y, z` (location [per km]; exact with `interpolation = :sinc`, otherwise from the spatial derivative of the
+    adjoint field, as the source is injected at a single cell), `t0`, `trise` [per s], and `stf`: ∂J/∂ of the moment rate
+    (source time function) at the times `t`.
 
 `method`
 - `:adjoint` (default): adjoint-state method with adjoint kernels (transposed stencils, including the free-surface cells

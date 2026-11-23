@@ -87,6 +87,8 @@ Keyword arguments
 - `dt`, `nt`: time step [s] and number of steps; `tbeg = 0.0` is the start time.
 - `sources`: `MomentTensorSource`, `ForceSource`, `PlaneWave` or a vector of them (see `DoubleCoupleSource`); `stf = :kupper` source time function: a name or any function (see `moment_rate`, `SampledSTF`).
 - `stations = Station[]`; seismograms (velocity, displacement, stress, strain) are recorded every `record_every = 1` steps.
+- `interpolation = :cell`: sources and stations at the cell that contains them (as OpenSWPC), or `:sinc` at their exact
+  position, between grid points (Kaiser-windowed sinc interpolation, Hicks 2002; strain is then still taken at the cell).
 - `wave = :psv`: `:psv` or `:sh`, for 2D models.
 - `absorber = :pml`: absorbing boundary at the sides and the bottom, `:pml` (perfectly matched layer) or `:cerjan` (sponge);
   `na = 20` is its thickness in cells.
@@ -104,17 +106,18 @@ Keyword arguments
 - `nproc = 1`: MPI processes in x (2D), or `(npx, npy)` (3D); start julia with `mpiexec -n npx*npy`.
 - `verbose = true`: print a summary and the progress (on rank 0).
 """
-function simulate(model::CartData; wave=:psv, kwargs...)
+function simulate(model::CartData; wave=:psv, interpolation=:cell, kwargs...)
     mode = size(model)[2] == 1 ? wave : :p3d
     mode in (:psv, :sh, :p3d) || error("wave must be :psv or :sh, got :$wave")
-    return simulate(model, Val(mode); kwargs...)
+    interpolation in (:cell, :sinc) || error("interpolation must be :cell or :sinc, got :$interpolation")
+    return simulate(model, Val(mode), Val(interpolation); kwargs...)
 end
 
 # Function barrier on the solver type: from here on the dimension N is known to the compiler.
-function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
+function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
                   absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
-                  snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,FT}
+                  snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,interp,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave} ? [sources] : collect(sources)
     all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave}, sources) ||
@@ -173,25 +176,36 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
         @warn "$(length(sources) - nused) of $(length(sources)) sources are outside the model or in the air (vp = vs = 0) and are ignored"
     M0_ = sum((s.M0 for s in moments); init=0.0) + 1e3 * sum((sqrt(s.F[1]^2 + s.F[2]^2 + s.F[3]^2) for s in forces); init=0.0)
     M0 = M0_ > 0 ? M0_ : N == 3 ? 1e15 : 1e12     # plane waves only: output scale 1 (OpenSWPC)
-    here(s) = all(2 .<= position(s.x, s.y, s.z) .- off .<= nl)    # the stencil reaches i-1, k-1; ghost copies are overwritten by the halo update
-    S, FS = filter(here, moments), filter(here, forces)
-    Src = merge(source_cells(S, position, off, dev, Val(N)), (; M=dev(FT[s.M[m] * (m in (4, 5) ? -1 : 1) for s in S, m in 1:6]),     # z up -> z down
-                             s=dev(FT[s.M0 / M0 * moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt / prod(g.d) for s in S, it in 1:nt])))
-    FSrc = merge(source_cells(FS, position, off, dev, Val(N)), (; F=dev(FT[s.F[m] * (m == 3 ? -1 : 1) for s in FS, m in 1:3]),
-                               s=dev(FT[1e3 / M0 * moment_rate(stf, tbeg + it * dt, s.t0, s.trise) * dt / prod(g.d) for s in FS, it in 1:nt])))
+    sinc = interp === :sinc                       # compile-time constant
+    ipos(x, y, z) = N == 3 ? (Float64(x), Float64(y), -Float64(z)) : (Float64(x), -Float64(z))      # internal coordinates
+    spec_v = (cells=stagger(Val(mode)).velocity, shear=ntuple(_ -> false, length(stagger(Val(mode)).velocity)))
+    spec_s = (cells=stagger(Val(mode)).stress, shear=stagger(Val(mode)).shear)
+    here(s) = sinc ? sinc_on_rank(g, med, ipos(s.x, s.y, s.z), s isa ForceSource ? spec_v : spec_s, off, nl) :
+              all(2 .<= position(s.x, s.y, s.z) .- off .<= nl)    # the stencil reaches i-1, k-1; ghost copies are overwritten by the halo update
+    iS, iF = findall(here, moments), findall(here, forces)
+    S, FS = moments[iS], forces[iF]
+    Src0 = merge(source_cells(S, position, off, dev, Val(N)), (; M=dev(FT[s.M[m] * (m in (4, 5) ? -1 : 1) for s in S, m in 1:6]),     # z up -> z down
+                              s=dev(FT[s.M0 / M0 * moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt / prod(g.d) for s in S, it in 1:nt])))
+    FSrc0 = merge(source_cells(FS, position, off, dev, Val(N)), (; F=dev(FT[s.F[m] * (m == 3 ? -1 : 1) for s in FS, m in 1:3]),
+                                s=dev(FT[1e3 / M0 * moment_rate(stf, tbeg + it * dt, s.t0, s.trise) * dt / prod(g.d) for s in FS, it in 1:nt])))
+    # between grid points: the weights of the points around the sources (Kaiser-windowed sinc)
+    Src = sinc ? merge(Src0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in S], spec_s, off, nl, dev, FT; derivatives=true,
+                                                items=collect(eachindex(S))))) : Src0
+    FSrc = sinc ? merge(FSrc0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in FS], spec_v, off, nl, dev, FT; derivatives=true,
+                                                  items=collect(eachindex(FS))))) : FSrc0
     fcut = max(maximum((1 / s.trise for s in moments); init=0.0), maximum((1 / s.trise for s in forces); init=0.0),
                maximum((plane_wave_fcut(p, med, g) for p in planewaves); init=0.0))
 
     # stations owned by this rank
     function station_cell(st)
         I = position(st.x, st.y, st.z)
-        st.surface && (I = (Base.front(I)..., med.kfs[Base.front(I)...] + 1 + H))
+        st.surface && all(H + 1 .<= Base.front(I) .<= Base.front(g.n) .+ H) && (I = (Base.front(I)..., med.kfs[Base.front(I)...] + 1 + H))
         inside(I) || error("station $(st.name) is outside the model")
         return I
     end
     SI = map(station_cell, stations)
-    own = [n for n in eachindex(SI) if all(H + 1 .<= Base.front(SI[n]) .- Base.front(off) .<= Base.front(nl) .- H)]
-    St = NamedTuple{ijk}(ntuple(a -> dev(Int32[SI[n][a] - off[a] for n in own]), N))
+    own, St = sinc ? sinc_stations(stations, SI, g, med, ipos, spec_v, spec_s, off, nl, dev, FT, Val(ijk)) :
+                     cell_stations(SI, off, nl, dev, Val(ijk))
     components = mode === :psv ? (:x, :z) : mode === :sh ? (:y,) : (:x, :y, :z)
     tensor_components = mode === :psv ? (:xx, :zz, :xz) : mode === :sh ? (:yz, :xy) : (:xx, :yy, :zz, :yz, :xz, :xy)
     nc, ns = length(components), length(tensor_components)
@@ -230,11 +244,11 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     if driver !== nothing
         regions = absorber === :cerjan ? ((ntuple(_ -> H, N), nl .- 2H, nothing),) :
                   pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT)
-        res = driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode), regions, nt, nosource=isempty(S),
+        res = driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode, sinc), regions, nt, nosource=isempty(S),
                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
                         components, med, m, g, na, fq_ref, rho_unit=density_scale(density_unit, maximum(model_arrays(model).rho)),
                         mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl, sources, moments, forces, M0, stf,
-                        iS=findall(here, moments), iF=findall(here, forces)))
+                        iS, iF, sinc))
         parallel && IGG.finalize_global_grid(finalize_MPI=false)
         return res
     end
@@ -242,7 +256,7 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     movie = (snapshot_every > 0 && me == 0 && callback === nothing && snapshots === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     wall = time()
     # cell ranges (offset, size, zone): the whole model (Cerjan), or the interior and the PML zones
-    head = (F, M, Src, FSrc, St, rec, acc, c, vc, FT(dt), kernels(mode))
+    head = (F, M, Src, FSrc, St, rec, acc, c, vc, FT(dt), kernels(mode, sinc))
     ckp = checkpoint === nothing ? nothing : parallel ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")
     tail = (nt, isempty(S), isempty(FS), length(own), record_every, snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt,
@@ -260,6 +274,34 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     part(r, f) = traces[:, r, :] .* (scale * f)  # wavefield units -> m/s, m, Pa, strain (OpenSWPC)
     return Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), part(1:nc, 1), part(nc+1:2nc, 1),
                        part(2nc+1:2nc+ns, 1e6), part(2nc+ns+1:2nc+2ns, 1e-3), stations, components, tensor_components, wavefield)
+end
+
+"Stations at their cells: those owned by this rank and their local cell indices."
+function cell_stations(SI, off, nl, dev, ::Val{ijk}) where {ijk}
+    N = length(ijk)
+    own = [n for n in eachindex(SI) if all(H + 1 .<= Base.front(SI[n]) .- Base.front(off) .<= Base.front(nl) .- H)]
+    return own, NamedTuple{ijk}(ntuple(a -> dev(Int32[SI[n][a] - off[a] for n in own]), Val(N)))
+end
+
+"""
+Stations between grid points (Kaiser-windowed sinc): those with points on this rank, the interpolation tables of the
+velocity and stress components, and the cell of the strain (counted on the rank that owns it, `own`).
+"""
+function sinc_stations(stations, SI, g::Grid{N}, med, ipos, spec_v, spec_s, off, nl, dev, ::Type{FT}, ::Val{ijk}) where {N,FT,ijk}
+    owns(I) = all(H + 1 .<= Base.front(I) .- Base.front(off) .<= Base.front(nl) .- H)
+    spos = map(eachindex(stations)) do n
+        st = stations[n]
+        p = ipos(st.x, st.y, st.z)
+        st.surface ? ntuple(a -> a < N ? p[a] : g.beg[N] + (SI[n][N] - H - 0.5) * g.d[N], N) : p     # surface: centre of the top cell
+    end
+    own = [n for n in eachindex(stations) if owns(SI[n]) || sinc_on_rank(g, med, spos[n], spec_v, off, nl) ||
+                                               sinc_on_rank(g, med, spos[n], spec_s, off, nl)]
+    tv = first(sinc_tables(g, med, spos, spec_v, off, nl, dev, FT; items=own))
+    ts = first(sinc_tables(g, med, spos, spec_s, off, nl, dev, FT; items=own))
+    cell(n, a) = Int32(clamp(SI[n][a] - off[a], H + 1, nl[a] - H))
+    St = merge(NamedTuple{ijk}(ntuple(a -> dev(Int32[cell(n, a) for n in own]), Val(N))),
+               (; own=dev(FT[owns(SI[n]) for n in own]), vi=tv.ix, vw=tv.w, si=ts.ix, sw=ts.w))
+    return own, St
 end
 
 "Write the simulation state (all arrays in `state`) after step `it` to `file`."
@@ -293,9 +335,14 @@ function density_scale(unit, rho_max)
     return unit === :kg_m3 ? 1000.0 : 1.0
 end
 
-kernels(mode) = mode === :psv ? (vel_psv!, stress_psv!, inject_psv!, force_psv!, record_psv!, plane_psv!) :
-                mode === :sh ? (vel_sh!, stress_sh!, inject_sh!, force_sh!, record_sh!, plane_sh!) :
-                (vel_3d!, stress_3d!, inject_3d!, force_3d!, record_3d!, plane_3d!)
+function kernels(mode, sinc=false)
+    k = mode === :psv ? (vel_psv!, stress_psv!, inject_psv!, force_psv!, record_psv!, plane_psv!) :
+        mode === :sh ? (vel_sh!, stress_sh!, inject_sh!, force_sh!, record_sh!, plane_sh!) :
+        (vel_3d!, stress_3d!, inject_3d!, force_3d!, record_3d!, plane_3d!)
+    sinc || return k
+    inject!, force!, _ = sinc_kernels(mode)
+    return (k[1], k[2], inject!, force!, k[5], k[6])
+end
 
 velocities(F) = haskey(F, :Vx) ? (haskey(F, :Vy) ? (F.Vx, F.Vy, F.Vz) : (F.Vx, F.Vz)) : (F.Vy,)
 stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, F.Sxz, F.Sxy) : (F.Sxx, F.Szz, F.Sxz)) : (F.Syz, F.Sxy)

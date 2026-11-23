@@ -287,45 +287,61 @@ Base.@propagate_inbounds function store!(rec, itw, n, q)
     end
 end
 
+# Stations between grid points (`st.vw`: interpolation weights, see interpolation.jl): velocity and stress interpolated, the
+# strain at the nearest cell, counted on the rank that owns it (`st.own`); other stations: all at their cell.
+"Velocity or stress component `m` of station `n`: interpolated (`ix`, `w`) or `cell()`."
+@inline station_value(st, ::Val{:v}, F, m, n, cell) = haskey(st, :vw) ? @inbounds(sinc_sample(F, st.vi[m], st.vw[m], n)) : cell()
+@inline station_value(st, ::Val{:s}, F, m, n, cell) = haskey(st, :sw) ? @inbounds(sinc_sample(F, st.si[m], st.sw[m], n)) : cell()
+@inline owner(st, n) = haskey(st, :own) ? @inbounds(st.own[n]) : true
+
 Base.@propagate_inbounds function record_psv!(rec, acc, F, st, c, dt, itw, n)
     (; Vx, Vz, Sxx, Szz, Sxz) = F
     I, ex, ez = CartesianIndex(st.i[n], st.k[n]), CartesianIndex(1, 0), CartesianIndex(0, 1)
-    v = ((Vx[I] + Vx[I-ex]) / 2, -(Vz[I] + Vz[I-ez]) / 2)
-    e = (Dp(Vx, I - ex, ex, c[1]), Dp(Vz, I - ez, ez, c[2]), -(Dm(Vz, I, ez, ex, c[1]) + Dm(Vx, I, ex, ez, c[2])) / 2)
+    v = (station_value(st, Val(:v), Vx, 1, n, () -> @inbounds((Vx[I] + Vx[I-ex]) / 2)),
+         -station_value(st, Val(:v), Vz, 2, n, () -> @inbounds((Vz[I] + Vz[I-ez]) / 2)))
+    e = (Dp(Vx, I - ex, ex, c[1]), Dp(Vz, I - ez, ez, c[2]), -(Dm(Vz, I, ez, ex, c[1]) + Dm(Vx, I, ex, ez, c[2])) / 2) .* owner(st, n)
     a = ntuple(m -> acc[m, n] + (m <= 2 ? v[m] : e[m-2]) * dt, Val(5))
     for m in 1:5
         acc[m, n] = a[m]
     end
-    itw > 0 && store!(rec, itw, n, (v..., a[1], a[2], Sxx[I], Szz[I], -(Sxz[I] + Sxz[I-ex] + Sxz[I-ez] + Sxz[I-ex-ez]) / 4, a[3], a[4], a[5]))
+    σ = (station_value(st, Val(:s), Sxx, 1, n, () -> @inbounds(Sxx[I])), station_value(st, Val(:s), Szz, 2, n, () -> @inbounds(Szz[I])),
+         -station_value(st, Val(:s), Sxz, 3, n, () -> @inbounds((Sxz[I] + Sxz[I-ex] + Sxz[I-ez] + Sxz[I-ex-ez]) / 4)))
+    itw > 0 && store!(rec, itw, n, (v..., a[1], a[2], σ..., a[3], a[4], a[5]))
 end
 
 Base.@propagate_inbounds function record_sh!(rec, acc, F, st, c, dt, itw, n)
     (; Vy, Syz, Sxy) = F
     I, ex, ez = CartesianIndex(st.i[n], st.k[n]), CartesianIndex(1, 0), CartesianIndex(0, 1)
-    v = Vy[I]
-    eyz = -(Dp(Vy, I, ez, c[2]) + Dp(Vy, I - ez, ez, c[2])) / 4
-    exy = (Dp(Vy, I, ex, c[1]) + Dp(Vy, I - ex, ex, c[1])) / 4
+    v = station_value(st, Val(:v), Vy, 1, n, () -> @inbounds(Vy[I]))
+    eyz = -(Dp(Vy, I, ez, c[2]) + Dp(Vy, I - ez, ez, c[2])) / 4 * owner(st, n)
+    exy = (Dp(Vy, I, ex, c[1]) + Dp(Vy, I - ex, ex, c[1])) / 4 * owner(st, n)
     a = (acc[1, n] + v * dt, acc[2, n] + eyz * dt, acc[3, n] + exy * dt)
     acc[1, n], acc[2, n], acc[3, n] = a
-    itw > 0 && store!(rec, itw, n, (v, a[1], -(Syz[I] + Syz[I-ez]) / 2, (Sxy[I] + Sxy[I-ex]) / 2, a[2], a[3]))
+    σ = (-station_value(st, Val(:s), Syz, 1, n, () -> @inbounds((Syz[I] + Syz[I-ez]) / 2)),
+         station_value(st, Val(:s), Sxy, 2, n, () -> @inbounds((Sxy[I] + Sxy[I-ex]) / 2)))
+    itw > 0 && store!(rec, itw, n, (v, a[1], σ..., a[2], a[3]))
 end
 
 Base.@propagate_inbounds function record_3d!(rec, acc, F, st, c, dt, itw, n)
     (; Vx, Vy, Vz, Sxx, Syy, Szz, Syz, Sxz, Sxy) = F
     I = CartesianIndex(st.i[n], st.j[n], st.k[n])
     ex, ey, ez = CartesianIndex(1, 0, 0), CartesianIndex(0, 1, 0), CartesianIndex(0, 0, 1)
-    v = ((Vx[I] + Vx[I-ex]) / 2, (Vy[I] + Vy[I-ey]) / 2, -(Vz[I] + Vz[I-ez]) / 2)
+    v = (station_value(st, Val(:v), Vx, 1, n, () -> @inbounds((Vx[I] + Vx[I-ex]) / 2)),
+         station_value(st, Val(:v), Vy, 2, n, () -> @inbounds((Vy[I] + Vy[I-ey]) / 2)),
+         -station_value(st, Val(:v), Vz, 3, n, () -> @inbounds((Vz[I] + Vz[I-ez]) / 2)))
     e = (Dp(Vx, I - ex, ex, c[1]), Dp(Vy, I - ey, ey, c[2]), Dp(Vz, I - ez, ez, c[3]),
          -(Dm(Vz, I, ez, ey, c[2]) + Dm(Vy, I, ey, ez, c[3])) / 2,
          -(Dm(Vz, I, ez, ex, c[1]) + Dm(Vx, I, ex, ez, c[3])) / 2,
-         (Dm(Vy, I, ey, ex, c[1]) + Dm(Vx, I, ex, ey, c[2])) / 2)
+         (Dm(Vy, I, ey, ex, c[1]) + Dm(Vx, I, ex, ey, c[2])) / 2) .* owner(st, n)
     a = ntuple(m -> acc[m, n] + (m <= 3 ? v[m] : e[m-3]) * dt, Val(9))
     for m in 1:9
         acc[m, n] = a[m]
     end
-    avg(S, e1, e2) = (S[I] + S[I-e1] + S[I-e2] + S[I-e1-e2]) / 4
-    itw > 0 && store!(rec, itw, n, (v..., a[1], a[2], a[3], Sxx[I], Syy[I], Szz[I], -avg(Syz, ey, ez), -avg(Sxz, ex, ez), avg(Sxy, ex, ey),
-                                    a[4], a[5], a[6], a[7], a[8], a[9]))
+    avg(S, e1, e2) = @inbounds (S[I] + S[I-e1] + S[I-e2] + S[I-e1-e2]) / 4
+    σ = (station_value(st, Val(:s), Sxx, 1, n, () -> @inbounds(Sxx[I])), station_value(st, Val(:s), Syy, 2, n, () -> @inbounds(Syy[I])),
+         station_value(st, Val(:s), Szz, 3, n, () -> @inbounds(Szz[I])), -station_value(st, Val(:s), Syz, 4, n, () -> avg(Syz, ey, ez)),
+         -station_value(st, Val(:s), Sxz, 5, n, () -> avg(Sxz, ex, ez)), station_value(st, Val(:s), Sxy, 6, n, () -> avg(Sxy, ex, ey)))
+    itw > 0 && store!(rec, itw, n, (v..., a[1], a[2], a[3], σ..., a[4], a[5], a[6], a[7], a[8], a[9]))
 end
 
 # ------------------------------------------------------------------ snapshot planes (OpenSWPC m_snap)

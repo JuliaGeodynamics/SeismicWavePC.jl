@@ -417,6 +417,8 @@ function (d::AdjointDriver)(s)
     observed_velocities(d.observed, s)
     (; F, M, St, rec, acc, regions, backend, nt, nown, c, vc, dtT, record_every) = s
     mt_sample, f_sample, vel!, stress!, grad!, residual!, stretch_v!, stretch_s!, fmnames, names, nE = adjoint_setup(Val(s.mode))
+    s.sinc && (residual! = sinc_kernels(s.mode)[3])
+    sg = stagger(Val(s.mode))
     V = velocities(F)
     new(A) = fill!(similar(A), 0)
     attenuation = maximum(abs, M.taup) > 0 || maximum(abs, M.taus) > 0
@@ -501,8 +503,13 @@ function (d::AdjointDriver)(s)
             map((z, P, m) -> foreach_cell!(backend, grad!, (G, E, Rb, Qv, Δv, Vn, Vp, (; P, fm=m), Ma, c, vc, dtT), z[1], z[2]), zones, Zp, fm)
             foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, nothing), deep...)
             map(((lo, ndr),) -> foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, Δv), lo, ndr), rest)
-            s.nosource || run_once!(backend, source_sens!, (SW, SX, mt_sample, E, Qv, M, s.Src, n))
-            s.noforce || run_once!(backend, source_sens!, (FW, FX, f_sample, E, Qv, M, s.FSrc, n))
+            if s.sinc
+                s.nosource || run_once!(backend, source_sens_sinc!, (SW, SX, E, -one(s.T), s.Src, sg.mcols, n))
+                s.noforce || run_once!(backend, source_sens_sinc!, (FW, FX, velocities(Qv), -one(s.T), s.FSrc, sg.fcols, n))
+            else
+                s.nosource || run_once!(backend, source_sens!, (SW, SX, mt_sample, E, Qv, M, s.Src, n))
+                s.noforce || run_once!(backend, source_sens!, (FW, FX, f_sample, E, Qv, M, s.FSrc, n))
+            end
             sync_halo!(stresses(Q))
             map(((lo, ndr, P),) -> foreach_cell!(backend, stretch_s!, (Δs, Q, P, dtT), lo, ndr), azones)
             sync_halo!(halo_s)

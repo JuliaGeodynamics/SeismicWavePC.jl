@@ -50,3 +50,21 @@ for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
     (abs(J2 / J1 - 1) < 1e-12 && err < 1e-10) || error("MPI gradient differs for $mode on rank $rank")
 end
 MPI.Barrier(MPI.COMM_WORLD)
+
+# sources and stations between grid points (stencils across ranks)
+for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
+    m = test_model(mode)
+    srcs = [MomentTensorSource(mode === :p3d ? 0.02 : -2.53, 0.03, -1.03, 1e15, (0.3, -0.5, 0.2, 0.4, 0.7, -0.3); trise=0.3, t0=0.05),
+            ForceSource(mode === :p3d ? -0.04 : 0.03, -0.02, -1.21; fx=1e13, fy=5e12, fz=-2e13, t0=0.1, trise=0.3)]
+    sts = [Station("A", -0.06, 0.04, -0.33), Station("B", mode === :p3d ? 1.47 : 2.47, -0.03, 0.0; surface=true)]
+    kw = (; dt=DT, nt=100, T=Float64, interpolation=:sinc, sources=srcs)
+    s1, s2 = simulate(m; kw..., stations=sts, verbose=false), simulate(m; kw..., stations=sts, nproc, verbose=false)
+    obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kw..., stations=sts, verbose=false)
+    J1, g1, sg1 = misfit_gradient(m, obs; kw...)
+    J2, g2, sg2 = misfit_gradient(m, obs; kw..., nproc)
+    e = (maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v), maximum(abs, g1.fields.vs .- g2.fields.vs) / maximum(abs, g1.fields.vs),
+         abs(sg1[1].x / sg2[1].x - 1))
+    rank == 0 && println("MPI sinc $mode nproc=$nproc: seismograms, gradient, source location: $e")
+    all(<(1e-10), e) || error("MPI result with interpolation = :sinc differs for $mode on rank $rank")
+end
+MPI.Barrier(MPI.COMM_WORLD)

@@ -11,6 +11,19 @@
 All can be combined in a vector, and all accept `(lon, lat, z, proj::ProjectionPoint)` instead of `x, y, z`. Sources outside
 the model or in the air are ignored with a warning (as in OpenSWPC, e.g. parts of a finite fault).
 
+## Between grid points
+
+By default (`interpolation = :cell`), a source or station is placed at the cell that contains it, as in OpenSWPC: the
+position is rounded to the grid. With `simulate(...; interpolation=:sinc)` sources and stations sit at their exact
+position: every quantity is spread onto (sources) or interpolated from (stations) the points of its own staggered grid
+around it with a Kaiser-windowed sinc function (Hicks, 2002; 8 points per axis, as in SeismicWaves.jl).
+- Shifting sources and stations by a fraction of a cell then shifts the seismograms smoothly; the source-location gradient
+  of [`misfit_gradient`](@ref) is exact.
+- Points in the air (and, for shear stresses, in water) are left out and the other weights scaled up, so stations on
+  the free surface (`surface = true`) and sources in water work.
+- Velocity, displacement and stress are interpolated; the strain is still taken at the cell.
+- It works with MPI (the points may lie on several processes) and on GPUs.
+
 ## Source time functions
 
 The keyword `stf` of [`simulate`](@ref) sets the moment-rate function (or force history) of all sources, with their origin
