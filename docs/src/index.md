@@ -1,7 +1,7 @@
 # SeismicWavePC.jl
 
-**Seismic wave propagation and waveform-inversion gradients in 2D and 3D visco-elastic media, in pure Julia, on CPUs, GPUs
-and MPI clusters.**
+**Seismic wave propagation and full-waveform inversion (FWI) in 2D and 3D visco-elastic media, in pure Julia, on CPUs,
+GPUs and MPI clusters.**
 
 ![Waves below an Unzen-like volcano](assets/Unzen_3D.gif)
 
@@ -22,10 +22,10 @@ gradients for full-waveform inversion. It started as a Julia port of the finite-
 - **Models:** any GMG `CartData`: GMG's geology tools and geographic data, thermal models
   ([MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl)) and phase diagrams
   ([MAGEMin](https://github.com/ComputationalThermodynamics/MAGEMin_C.jl)), random media, OpenSWPC's model files.
-- **Waveform inversion:** exact gradients of least-squares, travel-time or custom misfits with respect to the model
+- **Full-waveform inversion (FWI):** exact adjoint-state gradients of least-squares, travel-time or custom misfits with respect to the model
   (`rho`, `vp`, `vs`, `Qp`, `Qs`) and the sources, for several shots, at the cost of about 5 simulations, on CPUs, GPUs and
   MPI ([Misfit gradients](@ref)).
-- **Inversion and sampling packages:** Optim.jl, Turing.jl (Hamiltonian Monte Carlo with any of its AD backends),
+- **Deterministic and Bayesian FWI:** Optim.jl, Turing.jl (Hamiltonian Monte Carlo with any of its AD backends),
   AdvancedHMC.jl, DynamicHMC.jl and other LogDensityProblems.jl samplers ([Inversion and sampling packages](@ref)).
 - **Output:** seismograms in memory, the wavefield as `CartData`, ParaView movies, or your own plots while the simulation
   runs; SAC and netCDF files as in OpenSWPC ([Coming from OpenSWPC](@ref)).

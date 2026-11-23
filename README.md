@@ -3,8 +3,8 @@
 
 # SeismicWavePC.jl
 
-**Seismic wave propagation and waveform-inversion gradients in 2D and 3D visco-elastic media, in pure Julia, on CPUs, GPUs
-and MPI clusters.**
+**Seismic wave propagation and full-waveform inversion (FWI) in 2D and 3D visco-elastic media, in pure Julia, on CPUs,
+GPUs and MPI clusters.**
 
 ![Waves below an Unzen-like volcano](docs/src/assets/Unzen_3D.gif)
 
@@ -22,10 +22,11 @@ gradients for full-waveform inversion. It started as a Julia port of [OpenSWPC](
 - **Any GMG model:** geology tools, geographic data, thermal models
   ([MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl)), phase diagrams
   ([MAGEMin](https://github.com/ComputationalThermodynamics/MAGEMin_C.jl)), random media.
-- **Exact gradients** of least-squares, travel-time or custom misfits with respect to the model and the sources, for several
-  shots, at the cost of about 5 simulations, on CPUs, GPUs and MPI.
-- **Bayesian and deterministic inversion** with Turing.jl (Hamiltonian Monte Carlo), AdvancedHMC.jl, Optim.jl and other
-  Julia packages.
+- **Full-waveform inversion (FWI):** exact adjoint-state gradients of least-squares, travel-time or custom misfits with
+  respect to the model (`rho`, `vp`, `vs`, `Qp`, `Qs`) and the sources, for several shots, at the cost of about 5
+  simulations, on CPUs, GPUs and MPI.
+- **Deterministic and Bayesian FWI** with Optim.jl (L-BFGS), Turing.jl and AdvancedHMC.jl (Hamiltonian Monte Carlo), and
+  other Julia packages.
 - **Live output:** plot or film the waves while the simulation runs; SAC and netCDF files for OpenSWPC users.
 
 ## 2D: Unzen from MagmaThermoKinematics.jl
