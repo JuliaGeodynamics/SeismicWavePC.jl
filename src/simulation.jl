@@ -171,7 +171,7 @@ function simulate(model::CartData, ::Val{mode}; dt, nt, sources, stations=Statio
     nused == 0 && error("all sources are outside the model or in the air (vp = vs = 0)")
     nused < length(sources) && me == 0 &&
         @warn "$(length(sources) - nused) of $(length(sources)) sources are outside the model or in the air (vp = vs = 0) and are ignored"
-    M0_ = sum((s.M0 for s in moments); init=0.0) + 1e3 * sum((sqrt(sum(abs2, s.F)) for s in forces); init=0.0)
+    M0_ = sum((s.M0 for s in moments); init=0.0) + 1e3 * sum((sqrt(s.F[1]^2 + s.F[2]^2 + s.F[3]^2) for s in forces); init=0.0)
     M0 = M0_ > 0 ? M0_ : N == 3 ? 1e15 : 1e12     # plane waves only: output scale 1 (OpenSWPC)
     here(s) = all(2 .<= position(s.x, s.y, s.z) .- off .<= nl)    # the stencil reaches i-1, k-1; ghost copies are overwritten by the halo update
     S, FS = filter(here, moments), filter(here, forces)
