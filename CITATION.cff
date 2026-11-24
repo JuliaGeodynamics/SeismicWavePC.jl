@@ -1,0 +1,17 @@
+cff-version: "1.2.0"
+message: "If you use this software, please cite it as below."
+title: "SeismicWavePC.jl: seismic wave propagation and full-waveform inversion on CPUs and GPUs in Julia"
+authors:
+- family-names: Kaus
+  given-names: Boris J. P.
+  orcid: "https://orcid.org/0000-0002-0247-8660"
+license: MIT
+repository-code: "https://github.com/JuliaGeodynamics/SeismicWavePC.jl"
+url: "https://juliageodynamics.github.io/SeismicWavePC.jl/dev/"
+keywords:
+- seismology
+- wave propagation
+- finite differences
+- full-waveform inversion
+- GPU
+- Julia
