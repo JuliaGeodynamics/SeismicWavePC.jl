@@ -436,7 +436,8 @@ end
 
 # Halo exchange between MPI ranks along the decomposed axes (x, and y in 3D): ImplicitGlobalGrid on GPUs. On CPUs it
 # costs ~0.4 ms per call (a task per field and neighbour), more than the time step of a small model: plain MPI there.
-exchange_halo!(backend, nb, A...) = IGG.update_halo!(A...)
+# (ImplicitGlobalGrid ≥ 0.18 does not wait for kernels still running on GPUs: synchronize first)
+exchange_halo!(backend, nb, A...) = (KernelAbstractions.synchronize(backend); IGG.update_halo!(A...))
 function exchange_halo!(::CPU, nb, A::Vararg{Array{T,N}}) where {T,N}
     comm = IGG.comm()
     for a in 1:N-1
