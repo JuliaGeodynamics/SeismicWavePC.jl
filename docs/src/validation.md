@@ -69,6 +69,17 @@ SeismicWavePC.jl (dotted) follows SPECFEM2D (black) in the direct P and S waves 
 surface. The other codes smooth the force with a Gaussian (σ = 500 m), SeismicWavePC.jl uses a point force; its traces
 are aligned in time by cross-correlation (the delay of its Ricker wavelet differs).
 
+The same benchmark in its exact conventions
+([`examples/point_force_benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/point_force_benchmark.jl)):
+the force of 1e10 N/m with the Gaussian smoothing over the nodes of the 500 m grid, the same Ricker wavelet and the free
+surface at z = 0. The displacement in metres, without rescaling or time shifts, against OPT3 and OPT5 of flexOPT.jl
+(`application/forBoris/run.jl`, 500 m grid):
+
+![Point force under a free surface: SeismicWavePC.jl and flexOPT.jl in absolute amplitude](assets/point_force_flexopt.png)
+
+Relative L2 differences to SeismicWavePC.jl on a 125 m grid (converged): SeismicWavePC.jl on the 500 m grid 0.8–2.4 %, OPT5
+1.1–4.3 %, OPT3 3–30 % (largest at the receivers far from the source).
+
 ## Teleseismic plane waves
 
 `TeleseismicWave` (a plane wave from below, injected along a box) against the analytical solution of a homogeneous
