@@ -18,9 +18,17 @@ end
 
 "PML profiles at the cell centres and edges along an axis of `n` cells (padded by `H`), and the 2nd-order edge cells."
 function pml_axis(n, d, na, dt, fcut, ::Type{T}) where {T}
-    p(x) = T.(damping_profile(x, na * d, n * d, na, dt, fcut))
     i = 1-H:n+H
-    return [p((i - 0.5) * d) for i in i], [p(i * d) for i in i], [i in (1, 2, n - 1, n) for i in i]
+    return pml_axis((i .- 0.5) .* d, i .* d, na * d, n * d, n, na, dt, fcut, T)
+end
+"""
+The same from the positions (distance from the first edge) of the padded centres `xc` and edges `xe`, the PML thickness `h`
+and the length `L` of the axis (a stretched axis).
+"""
+function pml_axis(xc, xe, h, L, n, na, dt, fcut, ::Type{T}) where {T}
+    p(x) = T.(damping_profile(x, h, L, na, dt, fcut))
+    i = 1-H:n+H
+    return p.(xc), p.(xe), [i in (1, 2, n - 1, n) for i in i]
 end
 
 """
@@ -57,7 +65,9 @@ Cell ranges `(offset, size, zone)` of this rank for the PML: the interior (zone 
 memory variables and damping profiles.
 """
 function pml_regions(::Val{mode}, g::Grid{N}, na, dt, fcut, off, nl, R, dev, backend, ::Type{T}) where {mode,N,T}
-    prof = ntuple(a -> pml_axis(g.n[a], g.d[a], na, dt, fcut, T), Val(N))
+    top = g.zf[H] # edge above the first cell
+    prof = ntuple(a -> a < N || g.uniform ? pml_axis(g.n[a], g.d[a], na, dt, fcut, T) :
+                                 pml_axis(g.zc .- top, g.zf .- top, g.zf[end-H] - g.zf[end-H-na], g.zf[end-H] - top, g.n[a], na, dt, fcut, T), Val(N))
     loc(v, a) = dev(v[R[a]])
     profiles = N == 3 ? (; gxc=loc(prof[1][1], 1), gxe=loc(prof[1][2], 1), gyc=loc(prof[2][1], 2), gye=loc(prof[2][2], 2),
                            gzc=loc(prof[3][1], 3), gze=loc(prof[3][2], 3), ox=loc(prof[1][3], 1), oy=loc(prof[2][3], 2)) :

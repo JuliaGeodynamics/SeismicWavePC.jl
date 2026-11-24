@@ -136,3 +136,38 @@ end
     far = near(src.x + 2.5, src.z - 1.5)
     @test g2.fields.vs[far] == g1.fields.vs[far]
 end
+
+@testset "stretched grid in depth" begin
+    # spacing in depth from 0.6 dx (top) to 1.4 dx (bottom): forward, adjoint and source gradients stay exact
+    for mode in (:psv, :sh)
+        m = test_model(mode; stretched=true)
+        kw = (; dt=DT, nt=150, sources=test_source(), T=Float64, wave=mode)
+        obs = observed(m, kw, mode)
+        J, g = misfit_gradient(m, obs; kw...)
+        Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=20)
+        @test J ≈ misfit(m, obs, kw) ≈ Jad
+        for f in (:rho, :vs, :Qs)
+            @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+        end
+    end
+    m = test_model(:psv; stretched=true)
+    kw = (; dt=DT, nt=500, sources=test_source(), T=Float64)            # in the PML (whose profile follows the depths)
+    obs = observed(m, kw, :psv)
+    I = CartesianIndex(94, 1, 21)
+    fd = (misfit(perturbed(m, :vp, I, 1e-4), obs, kw) - misfit(perturbed(m, :vp, I, -1e-4), obs, kw)) / 2e-4
+    @test misfit_gradient(m, obs; kw...)[2].fields.vp[I] ≈ fd rtol = 1e-5
+    # source location between grid points
+    src = MomentTensorSource(-0.37, 0.0, -1.03, 1e15, (0.3, -0.5, 0.2, 0.4, 0.7, -0.3); trise=0.3, t0=0.05)
+    kws = (; dt=DT, nt=200, T=Float64, interpolation=:sinc)
+    obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kws..., sources=src,
+                   stations=test_stations(:psv), verbose=false)
+    sg = misfit_gradient(m, obs; kws..., sources=src)[3][1]
+    mf(dz) = misfit(m, obs, (; kws..., sources=MomentTensorSource(src.x, src.y, src.z + dz, src.M0, src.M; t0=src.t0, trise=src.trise)))
+    @test sg.z ≈ (mf(1e-4) - mf(-1e-4)) / 2e-4 rtol = 1e-5
+    # spacing that changes too fast; plane waves need a uniform grid
+    z = m.z.val[1, 1, :]
+    zj = [z[1:50]; z[50] .+ cumsum(fill(3 * (z[51] - z[50]), 50))]
+    Xj, Yj, Zj = xyz_grid(m.x.val[:, 1, 1], 0, zj)
+    @test_throws ErrorException simulate(CartData(Xj, Yj, Zj, map(A -> A[:, :, [1:50; 50:99]], m.fields)); dt=DT, nt=2, sources=test_source(), verbose=false)
+    @test_throws ErrorException simulate(m; dt=DT, nt=2, sources=PlaneWave(:p; depth=1.0, length=2.0), verbose=false)
+end

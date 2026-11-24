@@ -21,7 +21,8 @@ gradients for full-waveform inversion. It started as a Julia port of [OpenSWPC](
 2017), whose seismograms it reproduces to round-off, and has grown well beyond it.
 
 - **Visco-elastic waves** in 2D (P-SV, SH) and 3D, with topography, oceans, constant Q, and PML absorbing boundaries;
-  sources and receivers at the grid cells (as OpenSWPC) or anywhere in between (sinc interpolation).
+  sources and receivers at the grid cells (as OpenSWPC) or anywhere in between (sinc interpolation), and grids that are
+  finer near the surface (stretched in depth).
 - **Fast everywhere:** Julia threads (faster than OpenSWPC), GPUs from NVIDIA, AMD and Apple, and MPI for several GPUs or nodes.
 - **Any GMG model:** geology tools, geographic data, thermal models
   ([MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl)), phase diagrams

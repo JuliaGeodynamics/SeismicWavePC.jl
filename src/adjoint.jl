@@ -21,9 +21,10 @@ struct AdjD{MM,C}
     c::C
 end
 Base.@propagate_inbounds function (d::AdjD)(A, I, e, a)
-    c, two = d.c[a], d.M.two            # no closures here: they would not inherit @inbounds
-    return (A[I+e] * ifelse(two[I+e], c[3], c[1]) - A[I] * ifelse(two[I], c[3], c[1])) -
-           (A[I+2e] * ifelse(two[I+2e], zero(c[2]), c[2]) - A[I-e] * ifelse(two[I-e], zero(c[2]), c[2]))
+    ca, two = d.c[a], d.M.two           # no closures here: they would not inherit @inbounds
+    c1, c0, c2, cm = coefat(ca, I + e), coefat(ca, I), coefat(ca, I + 2e), coefat(ca, I - e)   # per layer in depth
+    return (A[I+e] * ifelse(two[I+e], c1[3], c1[1]) - A[I] * ifelse(two[I], c0[3], c0[1])) -
+           (A[I+2e] * ifelse(two[I+2e], zero(c2[2]), c2[2]) - A[I-e] * ifelse(two[I-e], zero(cm[2]), cm[2]))
 end
 
 # ------------------------------------------------------------------ PML
@@ -92,16 +93,16 @@ end
 Base.@propagate_inbounds function adjoint_strain_psv(d, Q, Δ, I)
     ex, ez = CartesianIndex(1, 0), CartesianIndex(0, 1)
     return (dt_(d, Q.Vx, δof(Δ, Val(:axSxx)), I - ex, ex, 1), dt_(d, Q.Vz, δof(Δ, Val(:azSzz)), I - ez, ez, 2),
-            dt_(d, Q.Vz, δof(Δ, Val(:axSxz)), I, ex, 1) + dt_(d, Q.Vx, δof(Δ, Val(:azSxz)), I, ez, 2))
+            dt_(d, Q.Vz, δof(Δ, Val(:axSxz)), I, ex, 1) + dt_(d, Q.Vx, δof(Δ, Val(:azSxz)), I, ez, 3))
 end
 Base.@propagate_inbounds adjoint_strain_sh(d, Q, Δ, I) =
-    (dt_(d, Q.Vy, δof(Δ, Val(:azSyz)), I, CartesianIndex(0, 1), 2), dt_(d, Q.Vy, δof(Δ, Val(:axSxy)), I, CartesianIndex(1, 0), 1))
+    (dt_(d, Q.Vy, δof(Δ, Val(:azSyz)), I, CartesianIndex(0, 1), 3), dt_(d, Q.Vy, δof(Δ, Val(:axSxy)), I, CartesianIndex(1, 0), 1))
 Base.@propagate_inbounds function adjoint_strain_3d(d, Q, Δ, I)
     ex, ey, ez = CartesianIndex(1, 0, 0), CartesianIndex(0, 1, 0), CartesianIndex(0, 0, 1)
     return (dt_(d, Q.Vx, δof(Δ, Val(:axSxx)), I - ex, ex, 1), dt_(d, Q.Vy, δof(Δ, Val(:aySyy)), I - ey, ey, 2),
             dt_(d, Q.Vz, δof(Δ, Val(:azSzz)), I - ez, ez, 3),
-            dt_(d, Q.Vz, δof(Δ, Val(:aySyz)), I, ey, 2) + dt_(d, Q.Vy, δof(Δ, Val(:azSyz)), I, ez, 3),
-            dt_(d, Q.Vz, δof(Δ, Val(:axSxz)), I, ex, 1) + dt_(d, Q.Vx, δof(Δ, Val(:azSxz)), I, ez, 3),
+            dt_(d, Q.Vz, δof(Δ, Val(:aySyz)), I, ey, 2) + dt_(d, Q.Vy, δof(Δ, Val(:azSyz)), I, ez, 4),
+            dt_(d, Q.Vz, δof(Δ, Val(:axSxz)), I, ex, 1) + dt_(d, Q.Vx, δof(Δ, Val(:azSxz)), I, ez, 4),
             dt_(d, Q.Vy, δof(Δ, Val(:axSxy)), I, ex, 1) + dt_(d, Q.Vx, δof(Δ, Val(:aySxy)), I, ey, 2))
 end
 
@@ -111,7 +112,7 @@ Base.@propagate_inbounds function vel_psv_adj!(F, M, c, dt, Δ, i, k)
     d, I = AdjD(M, c), CartesianIndex(i, k)
     ex, ez = CartesianIndex(1, 0), CartesianIndex(0, 1)
     vel_update_psv!(F, M, dt, i, k, dt_(d, F.Sxx, δof(Δ, Val(:axVx)), I, ex, 1) + dt_(d, F.Sxz, δof(Δ, Val(:azVx)), I - ez, ez, 2),
-                    dt_(d, F.Sxz, δof(Δ, Val(:axVz)), I - ex, ex, 1) + dt_(d, F.Szz, δof(Δ, Val(:azVz)), I, ez, 2))
+                    dt_(d, F.Sxz, δof(Δ, Val(:axVz)), I - ex, ex, 1) + dt_(d, F.Szz, δof(Δ, Val(:azVz)), I, ez, 3))
 end
 Base.@propagate_inbounds stress_psv_adj!(F, M, c, vc, dt, Δ, i, k) =
     stress_update_psv!(F, M, vc, dt, i, k, adjoint_strain_psv(AdjD(M, c), F, Δ, CartesianIndex(i, k))...)
@@ -130,7 +131,7 @@ Base.@propagate_inbounds function vel_3d_adj!(F, M, c, dt, Δ, i, j, k)
     (; Sxx, Syy, Szz, Syz, Sxz, Sxy) = F
     dSx = dt_(d, Sxx, δof(Δ, Val(:axVx)), I, ex, 1) + dt_(d, Sxy, δof(Δ, Val(:ayVx)), I - ey, ey, 2) + dt_(d, Sxz, δof(Δ, Val(:azVx)), I - ez, ez, 3)
     dSy = dt_(d, Sxy, δof(Δ, Val(:axVy)), I - ex, ex, 1) + dt_(d, Syy, δof(Δ, Val(:ayVy)), I, ey, 2) + dt_(d, Syz, δof(Δ, Val(:azVy)), I - ez, ez, 3)
-    dSz = dt_(d, Sxz, δof(Δ, Val(:axVz)), I - ex, ex, 1) + dt_(d, Syz, δof(Δ, Val(:ayVz)), I - ey, ey, 2) + dt_(d, Szz, δof(Δ, Val(:azVz)), I, ez, 3)
+    dSz = dt_(d, Sxz, δof(Δ, Val(:axVz)), I - ex, ex, 1) + dt_(d, Syz, δof(Δ, Val(:ayVz)), I - ey, ey, 2) + dt_(d, Szz, δof(Δ, Val(:azVz)), I, ez, 4)
     vel_update_3d!(F, M, dt, i, j, k, dSx, dSy, dSz)
 end
 Base.@propagate_inbounds stress_3d_adj!(F, M, c, vc, dt, Δ, i, j, k) =
@@ -178,9 +179,9 @@ Base.@propagate_inbounds function grad_psv!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc
     two = M.two[I]
     η = adjoint_strain!(E, I, adjoint_strain_psv(AdjD(M, c), Q, Δ, I), dt)
     aU, aR = η .* dt, adjoint_memory!(Rb, I, η, vc, dt)
-    f, Vx, Vz = FwdD((fd(c[1], two), fd(c[2], two))), Vp[1], Vp[2]
+    f, Vx, Vz = FwdD((fd(c[1], two), fd(coefat(c[2], I), two), fd(coefat(c[3], I), two))), Vp[1], Vp[2]
     dxVx = fst(Z, Val(:axVx), Val(:gxc), I, i, f(Vx, I - ex, ex, 1))
-    dzVz = fst(Z, Val(:azVz), Val(:gzc), I, k, f(Vz, I - ez, ez, 2))
+    dzVz = fst(Z, Val(:azVz), Val(:gzc), I, k, f(Vz, I - ez, ez, 3))
     vxz = fst(Z, Val(:axVz), Val(:gxe), I, i, f(Vz, I, ex, 1)) + fst(Z, Val(:azVx), Val(:gze), I, k, f(Vx, I, ez, 2))
     tp, ts = M.taup[I], M.taus[I]
     tp1, ts1 = unrelaxed(tp, vc), unrelaxed(ts, vc)
@@ -206,7 +207,7 @@ Base.@propagate_inbounds function grad_sh!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc,
     two = M.two[I]
     η = adjoint_strain!(E, I, adjoint_strain_sh(AdjD(M, c), Q, Δ, I), dt)
     aU, aR = η .* dt, adjoint_memory!(Rb, I, η, vc, dt)
-    f = FwdD((fd(c[1], two), fd(c[2], two)))
+    f = FwdD((fd(c[1], two), fd(coefat(c[2], I), two)))
     vyz = fst(Z, Val(:azVy), Val(:gze), I, k, f(Vp[1], I, CartesianIndex(0, 1), 2))
     vxy = fst(Z, Val(:axVy), Val(:gxe), I, i, f(Vp[1], I, CartesianIndex(1, 0), 1))
     ts = M.taus[I]
@@ -225,10 +226,10 @@ Base.@propagate_inbounds function grad_3d!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc,
     two = M.two[I]
     η = adjoint_strain!(E, I, adjoint_strain_3d(AdjD(M, c), Q, Δ, I), dt)
     aU, aR = η .* dt, adjoint_memory!(Rb, I, η, vc, dt)
-    f, (Vx, Vy, Vz) = FwdD((fd(c[1], two), fd(c[2], two), fd(c[3], two))), Vp
+    f, (Vx, Vy, Vz) = FwdD((fd(c[1], two), fd(c[2], two), fd(coefat(c[3], I), two), fd(coefat(c[4], I), two))), Vp
     dxVx = fst(Z, Val(:axVx), Val(:gxc), I, i, f(Vx, I - ex, ex, 1))
     dyVy = fst(Z, Val(:ayVy), Val(:gyc), I, j, f(Vy, I - ey, ey, 2))
-    dzVz = fst(Z, Val(:azVz), Val(:gzc), I, k, f(Vz, I - ez, ez, 3))
+    dzVz = fst(Z, Val(:azVz), Val(:gzc), I, k, f(Vz, I - ez, ez, 4))
     vyz = fst(Z, Val(:ayVz), Val(:gye), I, j, f(Vz, I, ey, 2)) + fst(Z, Val(:azVy), Val(:gze), I, k, f(Vy, I, ez, 3))
     vxz = fst(Z, Val(:axVz), Val(:gxe), I, i, f(Vz, I, ex, 1)) + fst(Z, Val(:azVx), Val(:gze), I, k, f(Vx, I, ez, 3))
     vxy = fst(Z, Val(:axVy), Val(:gxe), I, i, f(Vy, I, ex, 1)) + fst(Z, Val(:ayVx), Val(:gye), I, j, f(Vx, I, ey, 2))
@@ -539,10 +540,11 @@ function source_gradients(s, SW, SX, FW, FX)
     g, N, nt, dt = s.g, length(s.g.n), s.nt, s.dt
     W, X = global_sources(SW, s.iS, length(s.moments), s), global_sources(SX, s.iS, length(s.moments), s)
     FWg, FXg = global_sources(FW, s.iF, length(s.forces), s), global_sources(FX, s.iF, length(s.forces), s)
-    vol = prod(g.d)
-    # ∂J/∂(position) from the sensitivities at the neighbour cells; internal axes (x, [y,] depth) -> (x, y, z up)
-    function position(A, amp, l)
-        d = ntuple(a -> sum(amp[j] * (A[l, j, 2a-1] - A[l, j, 2a]) for j in eachindex(amp)) / (2g.d[a]), N)
+    # ∂J/∂(position) from the sensitivities at the neighbour cells (or of the interpolation weights, per nominal spacing);
+    # internal axes (x, [y,] depth) -> (x, y, z up)
+    function position(A, amp, l, src)
+        span(a) = a < N || g.uniform || s.sinc ? 2g.d[a] : (k = cell_index(g, N, -src.z); g.zc[k+1] - g.zc[k-1])
+        d = ntuple(a -> sum(amp[j] * (A[l, j, 2a-1] - A[l, j, 2a]) for j in eachindex(amp)) / span(a), N)
         return N == 3 ? (d[1], d[2], -d[3]) : (d[1], 0.0, -d[2])
     end
     # ∂J/∂t0, ∂J/∂trise from the gradient with respect to the moment rate (central differences of the source time function)
@@ -558,20 +560,22 @@ function source_gradients(s, SW, SX, FW, FX)
     tf = [s.tbeg + n * dt for n in 1:nt]                         # and of the forces
     mts = map(enumerate(s.moments)) do (l, src)
         Mi = ntuple(j -> src.M[j] * flip(j), 6)                    # internal moment tensor
+        vol = s.volume[l]                                          # as injected (`simulate`)
         sl = [src.M0 / s.M0 * moment_rate(s.stf, tm[n], src.t0, src.trise) * dt / vol for n in 1:nt]
         dMi = ntuple(j -> sum(sl[n] * W[l, j, n] for n in 1:nt), 6)  # ∂J/∂Mi
         dP = ntuple(j -> flip(j) * dMi[j] / src.M0, 6)             # ∂J/∂(M0 M)
         gm = [sum(Mi[j] * W[l, j, n] for j in 1:6) * src.M0 / s.M0 * dt / vol for n in 1:nt]    # ∂J/∂(moment rate)
-        x, y, z = position(X, Mi, l)
+        x, y, z = position(X, Mi, l, src)
         t0, trise = timing(gm, tm, src)
         (; M=dP, M0=sum(src.M[j] * dP[j] for j in 1:6), x, y, z, t0, trise, stf=gm, t=tm)
     end
     fs = map(enumerate(s.forces)) do (l, src)
         Fi = ntuple(m -> src.F[m] * (m == 3 ? -1.0 : 1.0), 3)
+        vol = s.fvolume[l]
         sl = [1e3 / s.M0 * moment_rate(s.stf, tf[n], src.t0, src.trise) * dt / vol for n in 1:nt]
         dF = ntuple(m -> (m == 3 ? -1.0 : 1.0) * sum(sl[n] * FWg[l, m, n] for n in 1:nt), 3)
         gm = [sum(Fi[m] * FWg[l, m, n] for m in 1:3) * 1e3 / s.M0 * dt / vol for n in 1:nt]
-        x, y, z = position(FXg, Fi, l)
+        x, y, z = position(FXg, Fi, l, src)
         t0, trise = timing(gm, tf, src)
         (; F=dF, x, y, z, t0, trise, stf=gm, t=tf)
     end

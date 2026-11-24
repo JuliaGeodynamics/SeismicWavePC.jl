@@ -36,6 +36,7 @@ Fields of the plane wave `p` on the local arrays (host): `fields[name][i, (j,) k
 formulas in its frame (x north, y east, z down; in 3D our x is its y). Values are divided by the output `scale`.
 """
 function plane_wave_fields(p::PlaneWave, ::Val{mode}, med, g::Grid{N}, off, nl, stf, dt, scale) where {mode,N}
+    g.uniform || error("plane waves need a uniform grid in depth")
     strike = mode === :p3d ? p.strike : 90.0
     rake = mode === :p3d ? p.rake : mode === :psv ? 90.0 : 0.0
     mode === :sh && p.wave === :p && error("SH simulations have no plane P waves")

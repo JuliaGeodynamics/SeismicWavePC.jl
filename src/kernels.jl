@@ -57,12 +57,13 @@ Base.@propagate_inbounds function vel_psv!(F, M, c, dt, P, i, k)
     (; Vx, Vz, Sxx, Szz, Sxz) = F
     two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i]) | edge(P, i)
     ax, bx = fd(c[1], two)
-    az, bz = fd(c[2], two)
+    azc, bzc = fd(coefat(c[2], CartesianIndex(i, k)), two)    # depth derivatives of fields at cell centres (at faces)
+    azf, bzf = fd(coefat(c[3], CartesianIndex(i, k)), two)    # and of fields at faces (at cell centres)
     J = zone_index(P, CartesianIndex(i, k))
     dxSxx = ade(P, :axSxx, :gxe, J, i, (Sxx[i+1, k] - Sxx[i, k]) * ax - (Sxx[i+2, k] - Sxx[i-1, k]) * bx, dt)
-    dzSzz = ade(P, :azSzz, :gze, J, k, (Szz[i, k+1] - Szz[i, k]) * az - (Szz[i, k+2] - Szz[i, k-1]) * bz, dt)
+    dzSzz = ade(P, :azSzz, :gze, J, k, (Szz[i, k+1] - Szz[i, k]) * azc - (Szz[i, k+2] - Szz[i, k-1]) * bzc, dt)
     dxSxz = ade(P, :axSxz, :gxc, J, i, (Sxz[i, k] - Sxz[i-1, k]) * ax - (Sxz[i+1, k] - Sxz[i-2, k]) * bx, dt)
-    dzSxz = ade(P, :azSxz, :gzc, J, k, (Sxz[i, k] - Sxz[i, k-1]) * az - (Sxz[i, k+1] - Sxz[i, k-2]) * bz, dt)
+    dzSxz = ade(P, :azSxz, :gzc, J, k, (Sxz[i, k] - Sxz[i, k-1]) * azf - (Sxz[i, k+1] - Sxz[i, k-2]) * bzf, dt)
     vel_update_psv!(F, M, dt, i, k, dxSxx + dzSxz, dxSxz + dzSzz)
 end
 
@@ -76,12 +77,13 @@ Base.@propagate_inbounds function stress_psv!(F, M, c, vc, dt, P, i, k)
     (; Vx, Vz, Sxx, Szz, Sxz) = F
     two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i]) | edge(P, i)
     ax, bx = fd(c[1], two)
-    az, bz = fd(c[2], two)
+    azc, bzc = fd(coefat(c[2], CartesianIndex(i, k)), two)    # depth derivatives of fields at cell centres (at faces)
+    azf, bzf = fd(coefat(c[3], CartesianIndex(i, k)), two)    # and of fields at faces (at cell centres)
     J = zone_index(P, CartesianIndex(i, k))
     dxVx = ade(P, :axVx, :gxc, J, i, (Vx[i, k] - Vx[i-1, k]) * ax - (Vx[i+1, k] - Vx[i-2, k]) * bx, dt)
-    dzVz = ade(P, :azVz, :gzc, J, k, (Vz[i, k] - Vz[i, k-1]) * az - (Vz[i, k+1] - Vz[i, k-2]) * bz, dt)
+    dzVz = ade(P, :azVz, :gzc, J, k, (Vz[i, k] - Vz[i, k-1]) * azf - (Vz[i, k+1] - Vz[i, k-2]) * bzf, dt)
     dxVz = ade(P, :axVz, :gxe, J, i, (Vz[i+1, k] - Vz[i, k]) * ax - (Vz[i+2, k] - Vz[i-1, k]) * bx, dt)
-    dzVx = ade(P, :azVx, :gze, J, k, (Vx[i, k+1] - Vx[i, k]) * az - (Vx[i, k+2] - Vx[i, k-1]) * bz, dt)
+    dzVx = ade(P, :azVx, :gze, J, k, (Vx[i, k+1] - Vx[i, k]) * azc - (Vx[i, k+2] - Vx[i, k-1]) * bzc, dt)
     stress_update_psv!(F, M, vc, dt, i, k, dxVx, dzVz, dxVz + dzVx)
 end
 
@@ -131,9 +133,10 @@ Base.@propagate_inbounds function vel_sh!(F, M, c, dt, P, i, k)
     (; Vy, Syz, Sxy) = F
     two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i]) | edge(P, i)
     ax, bx = fd(c[1], two)
-    az, bz = fd(c[2], two)
+    azc, bzc = fd(coefat(c[2], CartesianIndex(i, k)), two)    # depth derivatives of fields at cell centres (at faces)
+    azf, bzf = fd(coefat(c[3], CartesianIndex(i, k)), two)    # and of fields at faces (at cell centres)
     J = zone_index(P, CartesianIndex(i, k))
-    dzSyz = ade(P, :azSyz, :gzc, J, k, (Syz[i, k] - Syz[i, k-1]) * az - (Syz[i, k+1] - Syz[i, k-2]) * bz, dt)
+    dzSyz = ade(P, :azSyz, :gzc, J, k, (Syz[i, k] - Syz[i, k-1]) * azf - (Syz[i, k+1] - Syz[i, k-2]) * bzf, dt)
     dxSxy = ade(P, :axSxy, :gxc, J, i, (Sxy[i, k] - Sxy[i-1, k]) * ax - (Sxy[i+1, k] - Sxy[i-2, k]) * bx, dt)
     vel_update_sh!(F, M, dt, i, k, dxSxy + dzSyz)
 end
@@ -144,10 +147,11 @@ Base.@propagate_inbounds function stress_sh!(F, M, c, vc, dt, P, i, k)
     (; Vy, Syz, Sxy) = F
     two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i]) | edge(P, i)
     ax, bx = fd(c[1], two)
-    az, bz = fd(c[2], two)
+    azc, bzc = fd(coefat(c[2], CartesianIndex(i, k)), two)    # depth derivatives of fields at cell centres (at faces)
+    azf, bzf = fd(coefat(c[3], CartesianIndex(i, k)), two)    # and of fields at faces (at cell centres)
     J = zone_index(P, CartesianIndex(i, k))
     dxVy = ade(P, :axVy, :gxe, J, i, (Vy[i+1, k] - Vy[i, k]) * ax - (Vy[i+2, k] - Vy[i-1, k]) * bx, dt)
-    dzVy = ade(P, :azVy, :gze, J, k, (Vy[i, k+1] - Vy[i, k]) * az - (Vy[i, k+2] - Vy[i, k-1]) * bz, dt)
+    dzVy = ade(P, :azVy, :gze, J, k, (Vy[i, k+1] - Vy[i, k]) * azc - (Vy[i, k+2] - Vy[i, k-1]) * bzc, dt)
     stress_update_sh!(F, M, vc, dt, i, k, dzVy, dxVy)
 end
 
@@ -187,17 +191,18 @@ Base.@propagate_inbounds function vel_3d!(F, M, c, dt, P, i, j, k)
     two = second_order(k, M.fs_top[i, j], M.fs_bot[i, j], M.ob_top[i, j], M.ob_bot[i, j]) | edge(P, i, j)
     ax, bx = fd(c[1], two)
     ay, by = fd(c[2], two)
-    az, bz = fd(c[3], two)
+    azc, bzc = fd(coefat(c[3], CartesianIndex(i, j, k)), two)
+    azf, bzf = fd(coefat(c[4], CartesianIndex(i, j, k)), two)
     J = zone_index(P, CartesianIndex(i, j, k))
     dSx = ade(P, :axSxx, :gxe, J, i, (Sxx[i+1, j, k] - Sxx[i, j, k]) * ax - (Sxx[i+2, j, k] - Sxx[i-1, j, k]) * bx, dt) +
           ade(P, :aySxy, :gyc, J, j, (Sxy[i, j, k] - Sxy[i, j-1, k]) * ay - (Sxy[i, j+1, k] - Sxy[i, j-2, k]) * by, dt) +
-          ade(P, :azSxz, :gzc, J, k, (Sxz[i, j, k] - Sxz[i, j, k-1]) * az - (Sxz[i, j, k+1] - Sxz[i, j, k-2]) * bz, dt)
+          ade(P, :azSxz, :gzc, J, k, (Sxz[i, j, k] - Sxz[i, j, k-1]) * azf - (Sxz[i, j, k+1] - Sxz[i, j, k-2]) * bzf, dt)
     dSy = ade(P, :axSxy, :gxc, J, i, (Sxy[i, j, k] - Sxy[i-1, j, k]) * ax - (Sxy[i+1, j, k] - Sxy[i-2, j, k]) * bx, dt) +
           ade(P, :aySyy, :gye, J, j, (Syy[i, j+1, k] - Syy[i, j, k]) * ay - (Syy[i, j+2, k] - Syy[i, j-1, k]) * by, dt) +
-          ade(P, :azSyz, :gzc, J, k, (Syz[i, j, k] - Syz[i, j, k-1]) * az - (Syz[i, j, k+1] - Syz[i, j, k-2]) * bz, dt)
+          ade(P, :azSyz, :gzc, J, k, (Syz[i, j, k] - Syz[i, j, k-1]) * azf - (Syz[i, j, k+1] - Syz[i, j, k-2]) * bzf, dt)
     dSz = ade(P, :axSxz, :gxc, J, i, (Sxz[i, j, k] - Sxz[i-1, j, k]) * ax - (Sxz[i+1, j, k] - Sxz[i-2, j, k]) * bx, dt) +
           ade(P, :aySyz, :gyc, J, j, (Syz[i, j, k] - Syz[i, j-1, k]) * ay - (Syz[i, j+1, k] - Syz[i, j-2, k]) * by, dt) +
-          ade(P, :azSzz, :gze, J, k, (Szz[i, j, k+1] - Szz[i, j, k]) * az - (Szz[i, j, k+2] - Szz[i, j, k-1]) * bz, dt)
+          ade(P, :azSzz, :gze, J, k, (Szz[i, j, k+1] - Szz[i, j, k]) * azc - (Szz[i, j, k+2] - Szz[i, j, k-1]) * bzc, dt)
     vel_update_3d!(F, M, dt, i, j, k, dSx, dSy, dSz)
 end
 
@@ -214,17 +219,18 @@ Base.@propagate_inbounds function stress_3d!(F, M, c, vc, dt, P, i, j, k)
     two = second_order(k, M.fs_top[i, j], M.fs_bot[i, j], M.ob_top[i, j], M.ob_bot[i, j]) | edge(P, i, j)
     ax, bx = fd(c[1], two)
     ay, by = fd(c[2], two)
-    az, bz = fd(c[3], two)
+    azc, bzc = fd(coefat(c[3], CartesianIndex(i, j, k)), two)
+    azf, bzf = fd(coefat(c[4], CartesianIndex(i, j, k)), two)
     J = zone_index(P, CartesianIndex(i, j, k))
     dxVx = ade(P, :axVx, :gxc, J, i, (Vx[i, j, k] - Vx[i-1, j, k]) * ax - (Vx[i+1, j, k] - Vx[i-2, j, k]) * bx, dt)
     dyVy = ade(P, :ayVy, :gyc, J, j, (Vy[i, j, k] - Vy[i, j-1, k]) * ay - (Vy[i, j+1, k] - Vy[i, j-2, k]) * by, dt)
-    dzVz = ade(P, :azVz, :gzc, J, k, (Vz[i, j, k] - Vz[i, j, k-1]) * az - (Vz[i, j, k+1] - Vz[i, j, k-2]) * bz, dt)
+    dzVz = ade(P, :azVz, :gzc, J, k, (Vz[i, j, k] - Vz[i, j, k-1]) * azf - (Vz[i, j, k+1] - Vz[i, j, k-2]) * bzf, dt)
     exy = ade(P, :axVy, :gxe, J, i, (Vy[i+1, j, k] - Vy[i, j, k]) * ax - (Vy[i+2, j, k] - Vy[i-1, j, k]) * bx, dt) +
           ade(P, :ayVx, :gye, J, j, (Vx[i, j+1, k] - Vx[i, j, k]) * ay - (Vx[i, j+2, k] - Vx[i, j-1, k]) * by, dt)
     exz = ade(P, :axVz, :gxe, J, i, (Vz[i+1, j, k] - Vz[i, j, k]) * ax - (Vz[i+2, j, k] - Vz[i-1, j, k]) * bx, dt) +
-          ade(P, :azVx, :gze, J, k, (Vx[i, j, k+1] - Vx[i, j, k]) * az - (Vx[i, j, k+2] - Vx[i, j, k-1]) * bz, dt)
+          ade(P, :azVx, :gze, J, k, (Vx[i, j, k+1] - Vx[i, j, k]) * azc - (Vx[i, j, k+2] - Vx[i, j, k-1]) * bzc, dt)
     eyz = ade(P, :ayVz, :gye, J, j, (Vz[i, j+1, k] - Vz[i, j, k]) * ay - (Vz[i, j+2, k] - Vz[i, j-1, k]) * by, dt) +
-          ade(P, :azVy, :gze, J, k, (Vy[i, j, k+1] - Vy[i, j, k]) * az - (Vy[i, j, k+2] - Vy[i, j, k-1]) * bz, dt)
+          ade(P, :azVy, :gze, J, k, (Vy[i, j, k+1] - Vy[i, j, k]) * azc - (Vy[i, j, k+2] - Vy[i, j, k-1]) * bzc, dt)
     stress_update_3d!(F, M, vc, dt, i, j, k, dxVx, dyVy, dzVz, eyz, exz, exy)
 end
 
@@ -289,7 +295,8 @@ end
 "4th-order difference of `A` along `e` (unit `CartesianIndex`) at `I + e/2`; `ca` are the coefficients of that axis."
 Base.@propagate_inbounds Dp(A, I, e, ca) = (A[I+e] - A[I]) * ca[1] - (A[I+2e] - A[I-e]) * ca[2]
 "Derivative along `eb` at the cell centre `I` of a component staggered along `ea`."
-Base.@propagate_inbounds Dm(A, I, ea, eb, cb) = (Dp(A, I, eb, cb) + Dp(A, I - ea, eb, cb) + Dp(A, I - eb, eb, cb) + Dp(A, I - ea - eb, eb, cb)) / 4
+Base.@propagate_inbounds Dm(A, I, ea, eb, cb) = (Dp(A, I, eb, coefat(cb, I)) + Dp(A, I - ea, eb, coefat(cb, I - ea)) +
+                                                  Dp(A, I - eb, eb, coefat(cb, I - eb)) + Dp(A, I - ea - eb, eb, coefat(cb, I - ea - eb))) / 4
 Base.@propagate_inbounds function store!(rec, itw, n, q)
     for m in eachindex(q)
         rec[itw, m, n] = q[m]
@@ -308,7 +315,7 @@ Base.@propagate_inbounds function record_psv!(rec, acc, F, st, c, dt, itw, n)
     I, ex, ez = CartesianIndex(st.i[n], st.k[n]), CartesianIndex(1, 0), CartesianIndex(0, 1)
     v = (station_value(st, Val(:v), Vx, 1, n, () -> @inbounds((Vx[I] + Vx[I-ex]) / 2)),
          -station_value(st, Val(:v), Vz, 2, n, () -> @inbounds((Vz[I] + Vz[I-ez]) / 2)))
-    e = (Dp(Vx, I - ex, ex, c[1]), Dp(Vz, I - ez, ez, c[2]), -(Dm(Vz, I, ez, ex, c[1]) + Dm(Vx, I, ex, ez, c[2])) / 2) .* owner(st, n)
+    e = (Dp(Vx, I - ex, ex, c[1]), Dp(Vz, I - ez, ez, coefat(c[3], I)), -(Dm(Vz, I, ez, ex, c[1]) + Dm(Vx, I, ex, ez, c[2])) / 2) .* owner(st, n)
     a = ntuple(m -> acc[m, n] + (m <= 2 ? v[m] : e[m-2]) * dt, Val(5))
     for m in 1:5
         acc[m, n] = a[m]
@@ -322,7 +329,7 @@ Base.@propagate_inbounds function record_sh!(rec, acc, F, st, c, dt, itw, n)
     (; Vy, Syz, Sxy) = F
     I, ex, ez = CartesianIndex(st.i[n], st.k[n]), CartesianIndex(1, 0), CartesianIndex(0, 1)
     v = station_value(st, Val(:v), Vy, 1, n, () -> @inbounds(Vy[I]))
-    eyz = -(Dp(Vy, I, ez, c[2]) + Dp(Vy, I - ez, ez, c[2])) / 4 * owner(st, n)
+    eyz = -(Dp(Vy, I, ez, coefat(c[2], I)) + Dp(Vy, I - ez, ez, coefat(c[2], I - ez))) / 4 * owner(st, n)
     exy = (Dp(Vy, I, ex, c[1]) + Dp(Vy, I - ex, ex, c[1])) / 4 * owner(st, n)
     a = (acc[1, n] + v * dt, acc[2, n] + eyz * dt, acc[3, n] + exy * dt)
     acc[1, n], acc[2, n], acc[3, n] = a
@@ -338,7 +345,7 @@ Base.@propagate_inbounds function record_3d!(rec, acc, F, st, c, dt, itw, n)
     v = (station_value(st, Val(:v), Vx, 1, n, () -> @inbounds((Vx[I] + Vx[I-ex]) / 2)),
          station_value(st, Val(:v), Vy, 2, n, () -> @inbounds((Vy[I] + Vy[I-ey]) / 2)),
          -station_value(st, Val(:v), Vz, 3, n, () -> @inbounds((Vz[I] + Vz[I-ez]) / 2)))
-    e = (Dp(Vx, I - ex, ex, c[1]), Dp(Vy, I - ey, ey, c[2]), Dp(Vz, I - ez, ez, c[3]),
+    e = (Dp(Vx, I - ex, ex, c[1]), Dp(Vy, I - ey, ey, c[2]), Dp(Vz, I - ez, ez, coefat(c[4], I)),
          -(Dm(Vz, I, ez, ey, c[2]) + Dm(Vy, I, ey, ez, c[3])) / 2,
          -(Dm(Vz, I, ez, ex, c[1]) + Dm(Vx, I, ex, ez, c[3])) / 2,
          (Dm(Vy, I, ey, ex, c[1]) + Dm(Vx, I, ex, ey, c[2])) / 2) .* owner(st, n)
@@ -374,9 +381,9 @@ Base.@propagate_inbounds function plane_psv!(B, U, PK, F, M, c, pts, dt, store, 
     U[n, 1] += vx * dt; U[n, 2] += vz * dt
     peaks!(PK, n, vz, abs(vx), hypot(vx, vz))
     if store
-        cx, cz = c[1][3], c[2][3]
-        div = ((Vx[I] - Vx[I-ex]) * cx + (Vz[I] - Vz[I-ez]) * cz) * (M.lam[I] + 2M.mu[I] > 0)
-        rot = -((Vx[I+ez] - Vx[I]) * cz - (Vz[I+ex] - Vz[I]) * cx) * (M.mu[I] > 0)
+        cx, czf, czc = c[1][3], coefat(c[3], I)[3], coefat(c[2], I)[3]
+        div = ((Vx[I] - Vx[I-ex]) * cx + (Vz[I] - Vz[I-ez]) * czf) * (M.lam[I] + 2M.mu[I] > 0)
+        rot = -((Vx[I+ez] - Vx[I]) * czc - (Vz[I+ex] - Vz[I]) * cx) * (M.mu[I] > 0)
         store_row!(B, n, (vx, vz, U[n, 1], U[n, 2], div, rot))
     end
 end
@@ -396,11 +403,11 @@ Base.@propagate_inbounds function plane_3d!(B, U, PK, F, M, c, pts, dt, store, n
     U[n, 1] += vx * dt; U[n, 2] += vy * dt; U[n, 3] += vz * dt
     peaks!(PK, n, vz, hypot(vx, vy), hypot(hypot(vx, vy), vz))   # hypot: no underflow of tiny values
     if store
-        cx, cy, cz = c[1][3], c[2][3], c[3][3]
+        cx, cy, czf, czc = c[1][3], c[2][3], coefat(c[4], I)[3], coefat(c[3], I)[3]
         solid = M.mu[I] > 0
-        div = ((Vx[I] - Vx[I-ex]) * cx + (Vy[I] - Vy[I-ey]) * cy + (Vz[I] - Vz[I-ez]) * cz) * (M.lam[I] + 2M.mu[I] > 0)
-        rx = -((Vz[I+ey] - Vz[I]) * cy - (Vy[I+ez] - Vy[I]) * cz) * solid
-        ry = -((Vx[I+ez] - Vx[I]) * cz - (Vz[I+ex] - Vz[I]) * cx) * solid
+        div = ((Vx[I] - Vx[I-ex]) * cx + (Vy[I] - Vy[I-ey]) * cy + (Vz[I] - Vz[I-ez]) * czf) * (M.lam[I] + 2M.mu[I] > 0)
+        rx = -((Vz[I+ey] - Vz[I]) * cy - (Vy[I+ez] - Vy[I]) * czc) * solid
+        ry = -((Vx[I+ez] - Vx[I]) * czc - (Vz[I+ex] - Vz[I]) * cx) * solid
         rz = ((Vy[I+ex] - Vy[I]) * cx - (Vx[I+ey] - Vx[I]) * cy) * solid
         store_row!(B, n, (vx, vy, vz, U[n, 1], U[n, 2], U[n, 3], div, rx, ry, rz))
     end

@@ -39,14 +39,14 @@ end
 MPI.Barrier(MPI.COMM_WORLD)
 
 # misfit gradients: every rank gets the gradient of the serial run
-for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
-    m = test_model(mode)
+for (mode, nproc, stretched) in ((:psv, 4, false), (:p3d, (2, 2), false), (:psv, 4, true))
+    m = test_model(mode; stretched)
     kw = (; dt=DT, nt=100, sources=test_source(), T=Float64)
     obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kw..., stations=test_stations(mode), verbose=false)
     J1, g1 = misfit_gradient(m, obs; kw...)
     J2, g2 = misfit_gradient(m, obs; kw..., nproc)
     err = maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs, :Qp, :Qs))
-    rank == 0 && println("MPI gradient $mode nproc=$nproc: misfit $(J2 / J1 - 1), gradient difference $err")
+    rank == 0 && println("MPI gradient $mode nproc=$nproc$(stretched ? " stretched" : ""): misfit $(J2 / J1 - 1), gradient difference $err")
     (abs(J2 / J1 - 1) < 1e-12 && err < 1e-10) || error("MPI gradient differs for $mode on rank $rank")
 end
 MPI.Barrier(MPI.COMM_WORLD)

@@ -79,9 +79,10 @@ end
 Run a visco-elastic wave propagation simulation (OpenSWPC algorithm) on the velocity model `model` and return
 [`Seismograms`](@ref).
 
-`model` is a regular `CartData` (coordinates in km, z up) with fields `rho` [kg/m³], `vp`, `vs` [km/s] and optionally
-`Qp`, `Qs` (default: no attenuation). Cells with `vp = vs = 0` are air: the free surface and topography follow from that.
-Cells with `vs = 0` and `vp > 0` are water. A `CartData` of size `(nx, 1, nz)` gives a 2D simulation in the x-z plane.
+`model` is a `CartData` (coordinates in km, z up; constant spacing in x and y, constant or smoothly varying in z) with
+fields `rho` [kg/m³], `vp`, `vs` [km/s] and optionally `Qp`, `Qs` (default: no attenuation). Cells with `vp = vs = 0` are
+air: the free surface and topography follow from that. Cells with `vs = 0` and `vp > 0` are water. A `CartData` of size
+`(nx, 1, nz)` gives a 2D simulation in the x-z plane.
 
 Keyword arguments
 - `dt`, `nt`: time step [s] and number of steps; `tbeg = 0.0` is the start time.
@@ -132,7 +133,7 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
     g = Grid(m, Val(N))
     all(ntuple(a -> g.n[a] > (a < N ? 2na : na), N)) || error("the model ($(join(g.n, "×")) cells) must be larger than the absorbing layers (na = $na cells)")
     med = setup_medium(m, g, na, fq_min, fq_max, fq_ref)
-    courant = med.vmax * dt * sqrt(sum(1 ./ g.d .^ 2))
+    courant = courant_number(med, g, dt)
     courant < 6 / 7 || error("unstable time step: Courant number $courant ≥ 6/7, use dt < $(dt * 6 / 7 / courant)")
 
     # domain decomposition in x (and y); every rank owns n/dims cells plus H ghost cells on each side
@@ -161,14 +162,15 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
     G = N == 3 ? (; gx_c, gx_b, gy_c=sponge(2)[1], gy_b=sponge(2)[2], gz_c, gz_b) : (; gx_c, gx_b, gz_c, gz_b)
     M = merge((; rho=loc(med.rho), lam=loc(med.lam), mu=loc(med.mu), taup=loc(med.taup), taus=loc(med.taus),
                  fs_top=col(med.fs_top), fs_bot=col(med.fs_bot), ob_top=col(med.ob_top), ob_bot=col(med.ob_bot)), G)
-    c = ntuple(a -> (FT(9 / 8 / g.d[a]), FT(1 / 24 / g.d[a]), FT(1 / g.d[a])), N)
+    # coefficients of the differences: constant along x (and y); per layer in depth, for fields at cell centres and at faces
+    c = (ntuple(a -> (FT(9 / 8 / g.d[a]), FT(1 / 24 / g.d[a]), FT(1 / g.d[a])), N - 1)..., map(t -> map(dev, t), depth_coefficients(g, FT))...)
     attenuation || !(any(!iszero, med.taup) || any(!iszero, med.taus)) || error("the model has attenuation (finite Qp or Qs): use Val(true)")
     vc = attenuation ? memory_coefficients(med.ts, dt, FT) : nothing         # nothing: elastic, no memory variables
     ijk = N == 3 ? (:i, :j, :k) : (:i, :k)
 
     # sources: moment tensors as stress glut at the cell of the source, forces on the velocities around it, normalized by
     # the total moment and force (forces carry a factor 10³ for the units, as in OpenSWPC)
-    position(x, y, z) = N == 3 ? (cell_index(g, 1, x), cell_index(g, 2, y), cell_index(g, 3, -z)) : (cell_index(g, 1, x), cell_index(g, 2, -z))
+    position(x, y, z) = cell_position(g, x, y, z)
     inside(I) = all(H + 1 .<= I .<= g.n .+ H)
     active(s) = (I = position(s.x, s.y, s.z); inside(I) && !(med.mu[I...] == 0 && med.lam[I...] == 0))
     moments = filter(active, MomentTensorSource[s for s in sources if s isa MomentTensorSource])   # as OpenSWPC, ignore sources
@@ -181,21 +183,23 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
     M0_ = sum((s.M0 for s in moments); init=0.0) + 1e3 * sum((sqrt(s.F[1]^2 + s.F[2]^2 + s.F[3]^2) for s in forces); init=0.0)
     M0 = M0_ > 0 ? M0_ : N == 3 ? 1e15 : 1e12     # plane waves only: output scale 1 (OpenSWPC)
     sinc = interp === :sinc                       # compile-time constant
-    ipos(x, y, z) = N == 3 ? (Float64(x), Float64(y), -Float64(z)) : (Float64(x), -Float64(z))      # internal coordinates
+    ipos(x, y, z) = internal_position(g, x, y, z)
     spec_v = (cells=stagger(Val(mode)).velocity, shear=ntuple(_ -> false, length(stagger(Val(mode)).velocity)))
     spec_s = (cells=stagger(Val(mode)).stress, shear=stagger(Val(mode)).shear)
     here(s) = sinc ? sinc_on_rank(g, med, ipos(s.x, s.y, s.z), s isa ForceSource ? spec_v : spec_s, off, nl) :
               all(2 .<= position(s.x, s.y, s.z) .- off .<= nl)    # the stencil reaches i-1, k-1; ghost copies are overwritten by the halo update
     iS, iF = findall(here, moments), findall(here, forces)
+    # volume of the source: of its cell, or nominal between grid points (the weights carry the local spacing in depth)
+    volume(s) = sinc ? prod(g.d) : prod(Base.front(g.d)) * thickness(g, position(s.x, s.y, s.z)[N])
     S, FS = moments[iS], forces[iF]
     Src0 = merge(source_cells(S, position, off, dev, Val(N)), (; M=dev(FT[s.M[m] * (m in (4, 5) ? -1 : 1) for s in S, m in 1:6]),     # z up -> z down
-                              s=dev(FT[s.M0 / M0 * moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt / prod(g.d) for s in S, it in 1:nt])))
+                              s=dev(FT[s.M0 / M0 * moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt / volume(s) for s in S, it in 1:nt])))
     FSrc0 = merge(source_cells(FS, position, off, dev, Val(N)), (; F=dev(FT[s.F[m] * (m == 3 ? -1 : 1) for s in FS, m in 1:3]),
-                                s=dev(FT[1e3 / M0 * moment_rate(stf, tbeg + it * dt, s.t0, s.trise) * dt / prod(g.d) for s in FS, it in 1:nt])))
+                                s=dev(FT[1e3 / M0 * moment_rate(stf, tbeg + it * dt, s.t0, s.trise) * dt / volume(s) for s in FS, it in 1:nt])))
     # between grid points: the weights of the points around the sources (Kaiser-windowed sinc)
-    Src = sinc ? merge(Src0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in S], spec_s, off, nl, dev, FT; derivatives=true,
+    Src = sinc ? merge(Src0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in S], spec_s, off, nl, dev, FT; derivatives=Val(true),
                                                 items=collect(eachindex(S))))) : Src0
-    FSrc = sinc ? merge(FSrc0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in FS], spec_v, off, nl, dev, FT; derivatives=true,
+    FSrc = sinc ? merge(FSrc0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in FS], spec_v, off, nl, dev, FT; derivatives=Val(true),
                                                   items=collect(eachindex(FS))))) : FSrc0
     fcut = max(maximum((1 / s.trise for s in moments); init=0.0), maximum((1 / s.trise for s in forces); init=0.0),
                maximum((plane_wave_fcut(p, med, g) for p in planewaves); init=0.0))
@@ -253,7 +257,7 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
                         components, med, m, g, na, fq_ref, rho_unit=density_scale(density_unit, maximum(model_arrays(model).rho)),
                         mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl, sources, moments, forces, M0, stf,
-                        iS, iF, sinc))
+                        iS, iF, sinc, volume=map(volume, moments), fvolume=map(volume, forces)))
         parallel && IGG.finalize_global_grid(finalize_MPI=false)
         return res
     end
@@ -281,6 +285,14 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
                        part(2nc+1:2nc+ns, 1e6), part(2nc+ns+1:2nc+2ns, 1e-3), stations, components, tensor_components, wavefield)
 end
 
+"Padded array indices of the cell that contains the point (x, y, z) [km], z up."
+cell_position(g::Grid{3}, x, y, z) = (cell_index(g, 1, x), cell_index(g, 2, y), cell_index(g, 3, -z))
+cell_position(g::Grid{2}, x, y, z) = (cell_index(g, 1, x), cell_index(g, 2, -z))
+
+"Internal coordinates (x, [y,] depth) of a point (x, y, z) [km], z up."
+internal_position(::Grid{3}, x, y, z) = (Float64(x), Float64(y), -Float64(z))
+internal_position(::Grid{2}, x, y, z) = (Float64(x), -Float64(z))
+
 "Stations at their cells: those owned by this rank and their local cell indices."
 function cell_stations(SI, off, nl, dev, ::Val{ijk}) where {ijk}
     N = length(ijk)
@@ -297,7 +309,7 @@ function sinc_stations(stations, SI, g::Grid{N}, med, ipos, spec_v, spec_s, off,
     spos = map(eachindex(stations)) do n
         st = stations[n]
         p = ipos(st.x, st.y, st.z)
-        st.surface ? ntuple(a -> a < N ? p[a] : g.beg[N] + (SI[n][N] - H - 0.5) * g.d[N], N) : p     # surface: centre of the top cell
+        st.surface ? ntuple(a -> a < N ? p[a] : g.zc[SI[n][N]], N) : p     # surface: centre of the top cell
     end
     own = [n for n in eachindex(stations) if owns(SI[n]) || sinc_on_rank(g, med, spos[n], spec_v, off, nl) ||
                                                sinc_on_rank(g, med, spos[n], spec_s, off, nl)]

@@ -2,7 +2,7 @@
 
 ## The model
 
-A model is a regular GMG `CartData` (coordinates in km, z up) with the fields
+A model is a GMG `CartData` (coordinates in km, z up; constant spacing in x and y, see below for z) with the fields
 - `rho` [kg/m³] (or g/cm³ with `density_unit = :g_cm3`, as in OpenSWPC),
 - `vp`, `vs` [km/s],
 - optionally `Qp`, `Qs` (without them the model is elastic). Q is constant between `fq_min` and `fq_max`, and the velocities
@@ -11,6 +11,40 @@ A model is a regular GMG `CartData` (coordinates in km, z up) with the fields
 Cells with `vp = vs = 0` are air: the free surface and topography follow from them. Cells with `vs = 0` and `vp > 0` are
 water (oceans, lakes). A `CartData` of size `(nx, 1, nz)` is a 2D model (P-SV by default, `wave = :sh` for SH waves).
 Any GMG tool can be used to build the model: layers, volcanoes, spheres, slabs, geographic data and projections.
+
+## Finer cells near the surface
+
+The spacing in z may vary: give the `CartData` the depths you want, for example fine cells in slow near-surface layers
+(sediments, volcanic deposits) and coarser ones at depth. The solver then works on a grid stretched in depth (the depth
+derivatives are taken along the cell index and divided by the local spacing, with 4th-order consistent factors), so that
+the waves see the same physics with far fewer cells. The spacing must change smoothly, by at most 25 % from cell to cell (a
+few percent is best). The spacing in x and y stays constant.
+
+```julia
+depths, h = [0.0025], 0.005                         # cell centres [km]: 5 m cells down to 250 m,
+while depths[end] < 3.0                              # then 3 % larger per cell up to 40 m
+    hn = depths[end] < 0.25 ? 0.005 : min(1.03h, 0.04)
+    push!(depths, depths[end] + (h + hn) / 2)
+    h = hn
+end
+z = [reverse(-depths); 0.0025; 0.0075]              # z up, with 2 cells of air on top
+X, Y, Z = xyz_grid(range(0, 4, step=0.005), 0, z)
+```
+
+Everything else works as on a uniform grid: sources and stations (also between grid points), the PML (its profile follows
+the actual depths), MPI, GPUs, and the exact adjoint gradients. The time step is limited by the smallest cells, as before:
+dt < 6/7 / (vp √(1/dx² + 1/dz²)) layer by layer, so fine cells in slow rock cost little extra. Plane waves need a uniform
+grid.
+
+Example: a 250 m thick layer with vs = 0.4 km/s over faster rock (4 Hz Ricker, P-SV, stations 10 m deep), compared with a
+uniform 5 m grid:
+
+| Grid in depth | Cells in depth | Time | Difference (vx, vz) |
+|---|---:|---:|---:|
+| uniform 5 m (reference) | 602 | 12.0 s | — |
+| stretched, 5 m to 250 m, then +3 % per cell to 40 m | 163 | 1.7 s | 1.2 %, 1.8 % |
+| uniform 10 m | 302 | 1.7 s | 10 %, 5.3 % |
+| uniform 20 m | 152 | 1.1 s | 67 %, 29 % |
 
 ## Geographic coordinates
 

@@ -5,12 +5,13 @@ using SeismicWavePC, GeophysicalModelGenerator
 2D (`mode = :psv` or `:sh`) or 3D (`:p3d`) model: two layers, air above z = -0.2 km, and (if `step`) a 0.15 km high
 plateau for x > 1 km. Q = 50.
 """
-function test_model(mode; step=mode === :p3d)
+function test_model(mode; step=mode === :p3d, stretched=false)
     dx = 0.05
     nx, ny, nz = mode === :p3d ? (80, 60, 60) : (200, 1, 100)
     x = range(-(nx - 1) / 2 * dx, (nx - 1) / 2 * dx, length=nx)
     y = mode === :p3d ? range(-(ny - 1) / 2 * dx, (ny - 1) / 2 * dx, length=ny) : 0.0
-    z = range(-(nz - 1) * dx + 0.5, 0.5, length=nz)
+    # stretched: the spacing in depth grows smoothly from 0.6 dx at the top to 1.4 dx at the bottom
+    z = stretched ? 0.5 .- reverse(cumsum(dx .* range(1.4, 0.6, length=nz))) .+ 0.6dx : range(-(nz - 1) * dx + 0.5, 0.5, length=nz)
     X, Y, Z = xyz_grid(x, y, z)
     air = Z .> -0.01 .- 0.2 .* (X .<= (step ? 1.0 : 100.0))
     layer = Z .< -1.5

@@ -60,7 +60,7 @@ function setup_planes(s::Snapshots, ::Val{mode}, g::Grid{N}, med, off, nl, dev, 
     nq = 2nc + (mode === :psv ? 2 : mode === :sh ? 0 : 4)
     # decimated physical indices and cell-centre coordinates (z: depth) along each axis
     idx(a) = (d = s.decimate[a == N ? 3 : a]; [ii * d - d ÷ 2 for ii in 1:(g.n[a] + d ÷ 2) ÷ d])
-    coord(a, i) = g.beg[a] + (i - 0.5) * g.d[a]
+    coord(a, i) = a == length(g.n) ? g.zc[i+H] : g.beg[a] + (i - 0.5) * g.d[a]
     planes = Tuple{Symbol,Vector{NTuple{N,Int}},NTuple{2,Pair{String,Vector{Float64}}}}[]
     if N == 3
         xi, yi, zi = idx(1), idx(2), idx(3)

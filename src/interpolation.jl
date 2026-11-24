@@ -41,27 +41,59 @@ stagger(::Val{:p3d}) = (velocity=((C3(0, 0, 0), C3(1, 0, 0)), (C3(0, 0, 0), C3(0
 Points (global array indices), weights and their derivatives with respect to the position (per km, internal axes x, [y,]
 depth) of the interpolation at `pos` (internal coordinates [km]) on the grid of points defined by the cells `cells`.
 """
-function sinc_points(g::Grid{N}, med, pos::NTuple{N,Float64}, cells, shear::Bool) where {N}
-    o = ntuple(a -> sum(c[a] for c in cells) / length(cells), N)
+function sinc_points(g::Grid{N}, med, pos::NTuple{N,Float64}, cells, shear::Bool; source=false) where {N}
+    o = ntuple(a -> sum(c[a] for c in cells) / length(cells), Val(N))     # position of the points relative to their cell
+    c0 = point_index(g, pos, o)
+    R = CartesianIndices(ntuple(a -> floor(Int, c0[a])-SINC_R+1:floor(Int, c0[a])+SINC_R, Val(N)))
+    pts = [J for J in R if valid_point(med, J, cells, shear)]
+    return pts, sinc_weights(g, pos, o, R, pts, shear, source), weight_derivatives(g, pos, o, R, pts, shear, source)
+end
+# (top-level functions, no nested closures: inferable on all Julia versions)
+
+"Is the point `J` (cells `J + cells`) defined: no air cell, or for shear stresses μ > 0 in all of them?"
+function valid_point(med, J, cells, shear)
     sz = size(med.mu)
-    air(J) = med.lam[J] == 0 && med.mu[J] == 0
-    inside(J) = all(c -> all(1 .<= Tuple(J + c) .<= sz), cells)
-    valid(J) = inside(J) && (shear ? all(c -> med.mu[J+c] > 0, cells) : !any(c -> air(J + c), cells))
-    cidx(p) = ntuple(a -> (p[a] - g.beg[a]) / g.d[a] + H + 0.5 - o[a], N)            # continuous index of the point grid
-    c0 = cidx(pos)
-    R = CartesianIndices(ntuple(a -> floor(Int, c0[a])-SINC_R+1:floor(Int, c0[a])+SINC_R, N))
-    pts = [J for J in R if valid(J)]
-    function weights(p)
-        c = cidx(p)
-        w(J) = prod(a -> kaiser_sinc(J[a] - c[a]), 1:N)
-        S0, S = sum(w, R), sum(w, pts; init=0.0)
-        S == 0 && shear && return Float64[]          # shear stress in water: zero (not recorded, nothing injected)
-        S == 0 && error("a source or station at $pos (internal coordinates) lies in the air")
-        return [w(J) * S0 / S for J in pts]
-    end
-    h = 1e-6 .* g.d
-    dw = ntuple(a -> (weights(pos .+ h[a] .* ntuple(==(a), N)) .- weights(pos .- h[a] .* ntuple(==(a), N))) ./ 2h[a], N)
-    return pts, weights(pos), dw
+    all(c -> all(1 .<= Tuple(J + c) .<= sz), cells) || return false
+    return shear ? all(c -> med.mu[J+c] > 0, cells) : !any(c -> med.lam[J+c] == 0 && med.mu[J+c] == 0, cells)
+end
+
+"Continuous index of the position `p` on the grid of points offset by `o` (in depth on a stretched grid: linear between the cell centres)."
+point_index(g::Grid{N}, p, o) where {N} =
+    ntuple(a -> a == N && !g.uniform ? depth_index(g, p[a]) - o[a] : (p[a] - g.beg[a]) / g.d[a] + H + 0.5 - o[a], Val(N))
+
+"Derivatives of the weights with respect to the position, per axis (central differences), unrolled over the axes."
+@generated weight_derivatives(g::Grid{N}, pos, o, R, pts, shear, source) where {N} =
+    Expr(:tuple, (:(weight_derivative(g, pos, o, R, pts, shear, source, $a)) for a in 1:N)...)
+function weight_derivative(g::Grid{N}, pos, o, R, pts, shear, source, a) where {N}
+    h = 1e-6 * g.d[a]
+    e = ntuple(==(a), Val(N))
+    return (sinc_weights(g, pos .+ h .* e, o, R, pts, shear, source) .- sinc_weights(g, pos .- h .* e, o, R, pts, shear, source)) ./ 2h
+end
+
+"Kaiser-windowed sinc weight of the point `J` for the continuous index `c`."
+kaiser_weight(J, c) = prod(a -> kaiser_sinc(J[a] - c[a]), 1:length(c))
+
+"Weights of the points `pts` (of the stencil `R`) at the position `p`, scaled to the sum of the full stencil."
+function sinc_weights(g::Grid{N}, p, o, R, pts, shear, source) where {N}
+    c = point_index(g, p, o)
+    S0, S = sum(J -> kaiser_weight(J, c), R), sum(J -> kaiser_weight(J, c), pts; init=0.0)
+    S == 0 && shear && return Float64[]          # shear stress in water: zero (not recorded, nothing injected)
+    S == 0 && error("a source or station at $p (internal coordinates) lies in the air")
+    # a point source in depth on a stretched grid: δ(z - zₛ) = δ(ζ - ζₛ) / z'(ζₛ), relative to the nominal spacing
+    f = source && !g.uniform ? g.d[N] / depth_spacing(g, p[N]) : 1.0
+    return [kaiser_weight(J, c) * S0 / S * f for J in pts]
+end
+
+"Continuous (padded) index of the depth `z` on a stretched grid: `k` at the centre of cell `k`, linear in between."
+function depth_index(g::Grid, z)
+    k = clamp(searchsortedlast(g.zc, z), 1, length(g.zc) - 1)
+    return k + (z - g.zc[k]) / (g.zc[k+1] - g.zc[k])
+end
+"Spacing dz/dζ at the depth `z` (the cell thickness, linear between the cell centres)."
+function depth_spacing(g::Grid, z)
+    ζ = depth_index(g, z)
+    k = clamp(floor(Int, ζ), 2, length(g.zc) - 1)
+    return thickness(g, k) + (ζ - k) * (thickness(g, k + 1) - thickness(g, k))
 end
 
 """
@@ -70,12 +102,12 @@ the interpolation of `items` (internal positions) for every component: `ix` (lin
 component, matrices `item × point`, and the derivatives `dw` (per component a tuple over axes, times the grid spacing).
 Returns the tables and the items with points on this rank.
 """
-function sinc_tables(g::Grid{N}, med, positions, spec, off, nl, dev, ::Type{T}; derivatives=false, items=nothing) where {N,T}
+function sinc_tables(g::Grid{N}, med, positions, spec, off, nl, dev, ::Type{T}; derivatives::Val{D}=Val(false), items=nothing) where {N,T,D}
     comps = spec.cells
-    raw = [[sinc_points(g, med, p, cells, sh) for (cells, sh) in zip(comps, spec.shear)] for p in positions]
+    raw = [component_points(g, med, p, comps, spec.shear, D) for p in positions]    # per item, a tuple over components
     local_(J) = J - CartesianIndex(off)
     owned(J) = all(a -> H < local_(J)[a] <= nl[a] - H, 1:N)
-    keep = [[findall(owned, r[1]) for r in rp] for rp in raw]
+    keep = [map(r -> findall(owned, r[1]), rp) for rp in raw]
     items = something(items, [n for n in eachindex(positions) if any(!isempty, keep[n])])
     Q = max(1, maximum((length(k) for n in items for k in keep[n]); init=1))
     L = LinearIndices(nl)
@@ -91,7 +123,7 @@ function sinc_tables(g::Grid{N}, med, positions, spec, off, nl, dev, ::Type{T}; 
                           A[r, q] = L[local_(raw[n][c][1][m])]
                       end; dev(A)), length(comps))
     w = ntuple(c -> table(c, (rc, m) -> rc[2][m]), length(comps))
-    dw = derivatives ? ntuple(c -> ntuple(a -> table(c, (rc, m) -> rc[3][a][m] * g.d[a]), N), length(comps)) : nothing
+    dw = D ? ntuple(c -> ntuple(a -> table(c, (rc, m) -> rc[3][a][m] * g.d[a]), N), length(comps)) : nothing
     return (; ix, w, dw), items
 end
 
@@ -162,12 +194,23 @@ Base.@propagate_inbounds function source_sens_sinc!(W, X, fields, sgn, S, cols, 
     end
 end
 
+# Over the components (tuples of different types), unrolled: inferable on all Julia versions.
+"""
+The cells of a point as 4 cells (1 or 2 cells repeated: the same mean and validity), so that `sinc_points` has a single type
+for all components (Julia 1.10 does not infer it for cell tuples of different lengths in one call tree).
+"""
+four(c::Tuple) = ntuple(i -> c[mod1(i, length(c))], Val(4))
+"`sinc_points` of every component."
+@generated component_points(g, med, p, cells::Tuple, shear::Tuple, source) =
+    Expr(:tuple, (:(sinc_points(g, med, p, four(cells[$c]), shear[$c]; source)) for c in 1:length(cells.parameters))...)
+
 "Does the interpolation of `pos` have points on this rank (any component of `spec`)?"
-function sinc_on_rank(g::Grid{N}, med, pos, spec, off, nl) where {N}
-    any(zip(spec.cells, spec.shear)) do (cells, sh)
-        any(J -> all(a -> H < J[a] - off[a] <= nl[a] - H, 1:N), sinc_points(g, med, pos, cells, sh)[1])
-    end
-end
+sinc_on_rank(g::Grid, med, pos, spec, off, nl) = any_on_rank(g, med, pos, spec.cells, spec.shear, off, nl)
+@generated any_on_rank(g, med, pos, cells::Tuple, shear::Tuple, off, nl) =
+    foldr((c, rest) -> :(on_rank(g, med, pos, cells[$c], shear[$c], off, nl) || $rest), 1:length(cells.parameters); init=false)
+"Has the interpolation of `pos` on the grid of `cells` points on this rank?"
+on_rank(g::Grid{N}, med, pos, cells, shear, off, nl) where {N} =
+    any(J -> all(a -> H < J[a] - off[a] <= nl[a] - H, 1:N), sinc_points(g, med, pos, four(cells), shear)[1])
 
 # kernels of the modes (the stress and velocity components in the order of `stagger`)
 inject_sinc_psv!(F, S, it) = inject_sinc!((F.Sxx, F.Szz, F.Sxz), S, (1, 3, 5), it)
