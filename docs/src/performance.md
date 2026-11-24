@@ -6,7 +6,7 @@ The elastic Marmousi2 model (Martin et al., 2006) is the classic benchmark of se
 figures: [Examples](examples.md)).
 
 Benchmark ([`examples/benchmark_marmousi2.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl)): 2D P-SV on a 5 m grid (3401 × 703 cells),
-2 s (5317 steps), PML, an explosion 10 m below the sea surface and 641 receivers; time loop only, the better of two runs, on the
+2 s (5317 steps), PML, an explosion 10 m below the sea surface and 641 receivers; time loop only, the best of two or three runs, on the
 Apple M4 Max laptop. The other codes ran the same grid, time step and receivers:
 [SeismicWaves.jl](https://github.com/GinvLab/SeismicWaves.jl) (v0.9.1, elastic, threaded CPU backend) and
 [JUDI.jl](https://github.com/slimgroup/JUDI.jl) (v4.1.7 with Devito 4.8.23, elastic, OpenMP, see below).
@@ -16,17 +16,17 @@ Apple M4 Max laptop. The other codes ran the same grid, time step and receivers:
 | OpenSWPC, 1 core | 152 s | 84 |
 | OpenSWPC, 12 MPI ranks | 16.5 s | 770 |
 | SeismicWaves.jl, 12 threads | 170 s (29 s with 1 receiver) | 75 (439) |
-| JUDI.jl (Devito), 1 thread | 33.6 s | 377 |
-| JUDI.jl (Devito), 12 threads | 5.1 s (8th order: 7.4 s) | 2474 (1715) |
-| SeismicWavePC.jl, 1 thread | 60.7 s | 209 |
-| SeismicWavePC.jl, 12 threads | 9.8 s | 1297 |
-| SeismicWavePC.jl, Apple M4 Max GPU (Metal) | 2.6 s | 4826 |
+| JUDI.jl (Devito), 1 thread | 31.9 s | 398 |
+| JUDI.jl (Devito), 12 threads | 5.2 s (8th order: 8.8 s) | 2428 (1439) |
+| SeismicWavePC.jl, 1 thread | 38.7 s | 329 |
+| SeismicWavePC.jl, 12 threads | 5.3 s | 2406 |
+| SeismicWavePC.jl, Apple M4 Max GPU (Metal) | 2.7 s | 4763 |
 
 Marmousi2 has no attenuation: SeismicWavePC.jl then leaves out the memory variables of the attenuation, OpenSWPC updates
 them. In SeismicWaves.jl most of the time goes to recording the 641 receivers; with a single receiver it reaches 439 million
 updates per second.
 
-JUDI.jl generates its kernels with Devito: optimized C with OpenMP, which computes the material factors (the harmonic mean of μ
+With 12 threads SeismicWavePC.jl and JUDI.jl are equally fast here; on a single thread JUDI.jl is 20% faster. JUDI.jl generates its kernels with Devito: optimized C with OpenMP, which computes the material factors (the harmonic mean of μ
 for the shear stresses, the damping) once before the time loop, uses the 4th-order stencil everywhere and a simple sponge
 (SeismicWavePC.jl: the PML, 2nd-order differences next to free surfaces as OpenSWPC, and the harmonic means in every step). On
 macOS its Julia interface crashed with OpenMP threads, so JUDI's propagators (its Python package `pysource`) ran directly from
@@ -41,9 +41,9 @@ Misfit gradient (adjoint-state method, L2 misfit of all receivers) on the same p
 |---|---:|---:|---:|
 | SeismicWaves.jl, 12 threads, 641 receivers | 169 s | 403 s | 2.4 |
 | SeismicWaves.jl, 12 threads, 1 receiver | 30 s | 121 s | 4.0 |
-| JUDI.jl, acoustic, 12 threads, optimal checkpointing | 2.6 s | 36 s | 14 |
-| SeismicWavePC.jl, 12 threads, 641 receivers | 10.2 s | 59 s | 5.8 |
-| SeismicWavePC.jl, Apple M4 Max GPU (Metal), 641 receivers | 3.0 s | 21 s | 7.2 |
+| JUDI.jl, acoustic, 12 threads, optimal checkpointing | 2.6 s | 37 s | 14 |
+| SeismicWavePC.jl, 12 threads, 641 receivers | 5.6 s | 46 s | 8.2 |
+| SeismicWavePC.jl, Apple M4 Max GPU (Metal), 641 receivers | 3.2 s | 22 s | 6.8 |
 
 SeismicWavePC.jl and SeismicWaves.jl save the wavefield every √nt steps or so and recompute the steps in between; JUDI.jl
 uses optimal checkpointing (Revolve) and has no elastic gradients (its row is the acoustic gradient, a much cheaper

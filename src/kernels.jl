@@ -51,11 +51,23 @@ end
 Base.@propagate_inbounds edge(P, i) = P.ox[i]
 Base.@propagate_inbounds edge(P, i, j) = P.ox[i] | P.oy[j]
 
+"""
+Rows of the interior without 2nd-order differences (no free surface or ocean bottom near, no PML): the kernels use the
+4th-order coefficients there without deciding it per cell (a third faster). Otherwise as the interior (`nothing`).
+"""
+struct Plain end
+@inline zone_index(::Plain, I) = I
+@inline ade(::Plain, ::Symbol, ::Symbol, J, i, d, dt) = d
+"2nd-order differences at the cell (next to free surfaces and ocean bottoms, at the outer cells of the PML)?"
+Base.@propagate_inbounds twoflag(P, M, k, i) = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i]) | edge(P, i)
+Base.@propagate_inbounds twoflag(P, M, k, i, j) = second_order(k, M.fs_top[i, j], M.fs_bot[i, j], M.ob_top[i, j], M.ob_bot[i, j]) | edge(P, i, j)
+@inline twoflag(::Plain, M, k, i...) = false
+
 # ------------------------------------------------------------------ P-SV (x, z)
 
 Base.@propagate_inbounds function vel_psv!(F, M, c, dt, P, i, k)
     (; Vx, Vz, Sxx, Szz, Sxz) = F
-    two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i]) | edge(P, i)
+    two = twoflag(P, M, k, i)
     ax, bx = fd(c[1], two)
     azc, bzc = fd(coefat(c[2], CartesianIndex(i, k)), two)    # depth derivatives of fields at cell centres (at faces)
     azf, bzf = fd(coefat(c[3], CartesianIndex(i, k)), two)    # and of fields at faces (at cell centres)
@@ -75,7 +87,7 @@ end
 
 Base.@propagate_inbounds function stress_psv!(F, M, c, vc, dt, P, i, k)
     (; Vx, Vz, Sxx, Szz, Sxz) = F
-    two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i]) | edge(P, i)
+    two = twoflag(P, M, k, i)
     ax, bx = fd(c[1], two)
     azc, bzc = fd(coefat(c[2], CartesianIndex(i, k)), two)    # depth derivatives of fields at cell centres (at faces)
     azf, bzf = fd(coefat(c[3], CartesianIndex(i, k)), two)    # and of fields at faces (at cell centres)
@@ -131,7 +143,7 @@ end
 
 Base.@propagate_inbounds function vel_sh!(F, M, c, dt, P, i, k)
     (; Vy, Syz, Sxy) = F
-    two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i]) | edge(P, i)
+    two = twoflag(P, M, k, i)
     ax, bx = fd(c[1], two)
     azc, bzc = fd(coefat(c[2], CartesianIndex(i, k)), two)    # depth derivatives of fields at cell centres (at faces)
     azf, bzf = fd(coefat(c[3], CartesianIndex(i, k)), two)    # and of fields at faces (at cell centres)
@@ -145,7 +157,7 @@ Base.@propagate_inbounds vel_update_sh!(F, M, dt, i, k, s) = F.Vy[i, k] = (F.Vy[
 
 Base.@propagate_inbounds function stress_sh!(F, M, c, vc, dt, P, i, k)
     (; Vy, Syz, Sxy) = F
-    two = second_order(k, M.fs_top[i], M.fs_bot[i], M.ob_top[i], M.ob_bot[i]) | edge(P, i)
+    two = twoflag(P, M, k, i)
     ax, bx = fd(c[1], two)
     azc, bzc = fd(coefat(c[2], CartesianIndex(i, k)), two)    # depth derivatives of fields at cell centres (at faces)
     azf, bzf = fd(coefat(c[3], CartesianIndex(i, k)), two)    # and of fields at faces (at cell centres)
@@ -188,7 +200,7 @@ end
 
 Base.@propagate_inbounds function vel_3d!(F, M, c, dt, P, i, j, k)
     (; Vx, Vy, Vz, Sxx, Syy, Szz, Syz, Sxz, Sxy) = F
-    two = second_order(k, M.fs_top[i, j], M.fs_bot[i, j], M.ob_top[i, j], M.ob_bot[i, j]) | edge(P, i, j)
+    two = twoflag(P, M, k, i, j)
     ax, bx = fd(c[1], two)
     ay, by = fd(c[2], two)
     azc, bzc = fd(coefat(c[3], CartesianIndex(i, j, k)), two)
@@ -216,7 +228,7 @@ end
 
 Base.@propagate_inbounds function stress_3d!(F, M, c, vc, dt, P, i, j, k)
     (; Vx, Vy, Vz, Sxx, Syy, Szz, Syz, Sxz, Sxy) = F
-    two = second_order(k, M.fs_top[i, j], M.fs_bot[i, j], M.ob_top[i, j], M.ob_bot[i, j]) | edge(P, i, j)
+    two = twoflag(P, M, k, i, j)
     ax, bx = fd(c[1], two)
     ay, by = fd(c[2], two)
     azc, bzc = fd(coefat(c[3], CartesianIndex(i, j, k)), two)
@@ -442,46 +454,65 @@ workgroup(::NTuple{3}) = (32, 8, 1)
 
 # Every task gets at least `MINWORK` cells: small loops (small models, thin PML zones) use few tasks, as waking many threads
 # (and waiting for the slowest, e.g. on a busy machine or on efficiency cores) costs more than their work.
-const MINWORK = (1 << 14, 1 << 11)                 # 2D, 3D (more work per cell)
+const MINWORK = (1 << 11, 1 << 11)                 # 2D, 3D (more work per cell)
 ntasks(ndr, maxtasks) = clamp(prod(ndr) ÷ MINWORK[length(ndr)-1], 1, min(Threads.nthreads(), maxtasks))
 
-function foreach_cell!(::CPU, f::F, args, lo, ndr::NTuple{2}) where {F}
-    nt = ntasks(ndr, ndr[2])
-    rows(t) = (t - 1) * ndr[2] ÷ nt + 1:t * ndr[2] ÷ nt
-    run(t) = for k in rows(t)
-        @inbounds @simd ivdep for i in 1:ndr[1]
-            f(args..., i + lo[1], k + lo[2])
+# The part `t` of `nt` of the cells `lo .+ (1:ndr[1], …)`. 2D: jobs of rows; with fewer rows than tasks (thin zones: the PML,
+# rows next to the surface) the rows are cut along x.
+function part!(f::F, args, lo, ndr::NTuple{2}, t, nt) where {F}
+    any(==(0), ndr) && return nothing
+    nc = clamp(cld(nt, ndr[2]), 1, max(ndr[1] ÷ 64, 1))       # pieces per row
+    nj = ndr[2] * nc
+    for j in (t - 1) * nj ÷ nt + 1:t * nj ÷ nt
+        k, q = divrem(j - 1, nc)
+        kk = k + 1 + lo[2]
+        rargs = @inbounds atrow(args, kk)                     # depth coefficients of the row, loaded once
+        @inbounds @simd ivdep for i in q * ndr[1] ÷ nc + 1:(q + 1) * ndr[1] ÷ nc
+            f(rargs..., i + lo[1], kk)
         end
-    end
-    nt == 1 ? run(1) : Threads.@threads :static for t in 1:nt
-        run(t)
     end
     return nothing
 end
 
-# Threads work on blocks of `JB` rows in y and `KB` in z, so the stencil neighbours in y and z stay in cache, and thin zones
-# (the PML) still give every thread work.
+# 3D: blocks of `JB` rows in y and `KB` in z, so the stencil neighbours in y and z stay in cache, and thin zones (the PML)
+# still give every task work.
 const JB, KB = 8, 16
-function foreach_cell!(::CPU, f::F, args, lo, ndr::NTuple{3}) where {F}
+function part!(f::F, args, lo, ndr::NTuple{3}, t, nt) where {F}
+    any(==(0), ndr) && return nothing
     nbj = cld(ndr[2], JB)
     nb = nbj * cld(ndr[3], KB)
-    block(b) = (jb = b % nbj; kb = b ÷ nbj;
-        for k in kb*KB+1:min((kb + 1) * KB, ndr[3]), j in jb*JB+1:min((jb + 1) * JB, ndr[2])
-            @inbounds @simd ivdep for i in 1:ndr[1]
-                f(args..., i + lo[1], j + lo[2], k + lo[3])
+    for b in (t - 1) * nb ÷ nt:t * nb ÷ nt - 1
+        jb, kb = b % nbj, b ÷ nbj
+        for k in kb*KB+1:min((kb + 1) * KB, ndr[3])
+            rargs = @inbounds atrow(args, k + lo[3])             # depth coefficients of the row, loaded once
+            for j in jb*JB+1:min((jb + 1) * JB, ndr[2])
+                @inbounds @simd ivdep for i in 1:ndr[1]
+                    f(rargs..., i + lo[1], j + lo[2], k + lo[3])
+                end
             end
-        end)
-    nt = ntasks(ndr, nb)
-    if nt == 1
-        foreach(block, 0:nb-1)
-    elseif nt == Threads.nthreads()
-        Threads.@threads :dynamic for b in 0:nb-1
-            block(b)
         end
-    else                                        # fewer tasks than threads: every task takes every nt-th block
-        @sync for t in 1:nt
-            Threads.@spawn foreach(block, t-1:nt:nb-1)
-        end
+    end
+    return nothing
+end
+
+function foreach_cell!(::CPU, f::F, args, lo, ndr) where {F}
+    nt = ntasks(ndr, typemax(Int))
+    nt == 1 ? part!(f, args, lo, ndr, 1, 1) : Threads.@threads :static for t in 1:nt
+        part!(f, args, lo, ndr, t, nt)
+    end
+    return nothing
+end
+
+"""
+Apply `f(front..., P, i, [j,] k)` to the cells of all `regions = ((lo, ndr, P), …)`: on the CPU in one parallel loop (every
+thread takes its part of every region; one launch per kernel instead of one per region), on GPUs one kernel per region.
+"""
+foreach_region!(backend, f, front, regions) = (map(((lo, ndr, P),) -> foreach_cell!(backend, f, (front..., P), lo, ndr), regions); nothing)
+function foreach_region!(::CPU, f::F, front, regions) where {F}
+    N = length(regions[1][2])
+    nt = clamp(sum(r -> prod(r[2]), regions) ÷ MINWORK[N-1], 1, Threads.nthreads())
+    nt == 1 ? map(((lo, ndr, P),) -> part!(f, (front..., P), lo, ndr, 1, 1), regions) : Threads.@threads :static for t in 1:nt
+        map(((lo, ndr, P),) -> part!(f, (front..., P), lo, ndr, t, nt), regions)
     end
     return nothing
 end

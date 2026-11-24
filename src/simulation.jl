@@ -255,28 +255,37 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
                 length(stations), backend isa CPU ? "CPU ($(Threads.nthreads()) threads)" : string(nameof(typeof(backend))), T, prod(dims))
     end
     # internal: another driver of the time loop (misfit_gradient) gets the whole setup
+    # cell ranges (offset, size, zone): the whole model (Cerjan), or the interior and the PML zones; the interior split by
+    # rows into blocks with and without 2nd-order differences
+    split = backend isa CPU
     if driver !== nothing
         regions = absorber === :cerjan ? ((ntuple(_ -> H, N), nl .- 2H, nothing),) :
                   pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT)
+        rows = plain_blocks(regions[1], med, off; split)
         res = driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode, sinc), regions, nt, nosource=isempty(S),
                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
                         components, med, m, g, na, fq_ref, rho_unit=density_scale(density_unit, maximum(model_arrays(model).rho)),
                         mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl, sources, moments, forces, M0, stf,
-                        iS, iF, sinc, volume=map(volume, moments), fvolume=map(volume, forces), tw))
+                        iS, iF, sinc, volume=map(volume, moments), fvolume=map(volume, forces), tw, rows))
         parallel && IGG.finalize_global_grid(finalize_MPI=false)
         return res
     end
     planes = snapshots === nothing ? nothing : setup_planes(snapshots, Val(mode), g, med, off, nl, dev, backend, FT, snapshot_dir, me)
     movie = (snapshot_every > 0 && me == 0 && callback === nothing && snapshots === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     wall = time()
-    # cell ranges (offset, size, zone): the whole model (Cerjan), or the interior and the PML zones
     head = (F, M, Src, FSrc, St, rec, acc, c, vc, FT(dt), kernels(mode, sinc))
     ckp = checkpoint === nothing ? nothing : parallel ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")
     tail = (nt, isempty(S), isempty(FS), length(own), record_every, snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt,
             verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, pw_edges, edges, planes, backend, tw)
-    movie_out = absorber === :cerjan ? timeloop!(head..., ((ntuple(_ -> H, N), nl .- 2H, nothing),), tail...) :
-                timeloop!(head..., pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT), tail...)
+    # (separate variables per branch: each call sees concrete regions)
+    movie_out = if absorber === :cerjan
+        whole = ((ntuple(_ -> H, N), nl .- 2H, nothing),)
+        timeloop!(head..., (whole, plain_blocks(whole[1], med, off; split)), tail...)
+    else
+        pml = pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT)
+        timeloop!(head..., (pml, plain_blocks(pml[1], med, off; split)), tail...)
+    end
     movie_out === nothing || movie_paraview(pvd=movie_out, Finalize=true)
     planes === nothing || write_peaks(planes, snapshots.quantities, mode, scale, parallel, me)
     verbose && me == 0 && @printf("  finished in %.2f s\n", time() - wall)
@@ -370,10 +379,11 @@ velocities(F) = haskey(F, :Vx) ? (haskey(F, :Vy) ? (F.Vx, F.Vy, F.Vz) : (F.Vx, F
 stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, F.Sxz, F.Sxy) : (F.Sxx, F.Szz, F.Sxz)) : (F.Syz, F.Sxy)
 
 # Function barrier: everything below is concretely typed.
-function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, force!, record!, plane!), regions, nt, nosource, noforce, nown, record_every,
+function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, force!, record!, plane!), (regions, rows), nt, nosource, noforce, nown, record_every,
                    snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, ckp, checkpoint_every, restart,
                    pw_edges, edges, planes, backend, tw)
     V, Σ = velocities(F), stresses(F)
+    cells = (rows..., Base.tail(regions)...)                   # the interior by rows, and the PML zones
     report = max(nt ÷ 10, 1)
     state = (values(F)..., pml_state(regions)..., acc, rec)
     it0 = restart ? load_state!(state, ckp, nt) + 1 : 1
@@ -401,12 +411,12 @@ function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, in
             end
         end
         pw_edges && extrapolate_sides!(V, edges)
-        map(((lo, ndr, P),) -> foreach_cell!(backend, stress!, (F, M, c, vc, dtT, P), lo, ndr), regions)
+        foreach_region!(backend, stress!, (F, M, c, vc, dtT), cells)
         nosource || run_once!(backend, inject!, (F, Src, it))
         inject_wave!(tw, Val(:stress), F, M, c, vc, dtT, eltype(dtT)(tbeg + (it - 0.5) * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, Σ...))
         pw_edges && extrapolate_sides!(Σ, edges)
-        map(((lo, ndr, P),) -> foreach_cell!(backend, vel!, (F, M, c, dtT, P), lo, ndr), regions)
+        foreach_region!(backend, vel!, (F, M, c, dtT), cells)
         noforce || run_once!(backend, force!, (F, M, FSrc, it))
         inject_wave!(tw, Val(:velocity), F, M, c, vc, dtT, eltype(dtT)(tbeg + it * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, V...))

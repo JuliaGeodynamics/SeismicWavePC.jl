@@ -106,6 +106,26 @@ end
 @inline coefat(c::NTuple{3,Number}, I) = c
 Base.@propagate_inbounds coefat(c::NamedTuple, I) = (k = last(Tuple(I)); (c.a[k], c.b[k], c.c[k]))
 
+"""
+The depth coefficients of the rows `k-2:k+2` (CPU loops over a row: loaded once per row instead of per cell; the compiler
+cannot hoist them out of the loop, as they might alias the fields).
+"""
+struct RowCoef{T}
+    a::NTuple{5,T}
+    b::NTuple{5,T}
+    c::NTuple{5,T}
+    k::Int
+end
+Base.@propagate_inbounds coefat(r::RowCoef, I) = (d = last(Tuple(I)) - r.k + 3; (r.a[d], r.b[d], r.c[d]))
+"""
+The arguments of a kernel for the row `k`: depth coefficient arrays (NamedTuples `(a, b, c)`, also inside the coefficient
+tuple `c`) as `RowCoef`. Two explicit levels, not recursion (Julia 1.10 gives up inferring recursion over nested tuples).
+"""
+Base.@propagate_inbounds atrow(args::Tuple, k) = map(x -> x isa Tuple ? map(y -> rowcoef(y, k), x) : rowcoef(x, k), args)
+Base.@propagate_inbounds rowcoef(x::NamedTuple{(:a, :b, :c)}, k) =
+    RowCoef(ntuple(d -> x.a[k-3+d], Val(5)), ntuple(d -> x.b[k-3+d], Val(5)), ntuple(d -> x.c[k-3+d], Val(5)), k)
+@inline rowcoef(x, k) = x
+
 "Field `A` as an internal array: z flipped so that k = 1 is the top, squeezed to (x, z) in 2D."
 function internal(A::Array{Float64,3}, ::Val{N}) where {N}
     f = reverse(A, dims=3)

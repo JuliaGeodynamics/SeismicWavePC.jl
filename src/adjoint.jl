@@ -406,12 +406,13 @@ function forward_step!(F, M, Src, FSrc, St, rec, acc, regions, it, p, record=tru
         foreach_item!(backend, record!, (rec, acc, F, St, c, dtT, itw), p.nown)
     end
     p.pw_edges && extrapolate_sides!(velocities(F), p.edges)
-    map(((lo, ndr, P),) -> foreach_cell!(backend, stress!, (F, M, c, vc, dtT, P), lo, ndr), regions)
+    cells = (p.rows..., Base.tail(regions)...)                 # the interior by rows (as `timeloop!`), the PML zones
+    foreach_region!(backend, stress!, (F, M, c, vc, dtT), cells)
     p.nosource || run_once!(backend, inject!, (F, Src, it))
     inject_wave!(p.tw, Val(:stress), F, M, c, vc, dtT, eltype(dtT)(p.tbeg + (it - 0.5) * p.dt), backend)
     p.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, p.nb, stresses(F)...))
     p.pw_edges && extrapolate_sides!(stresses(F), p.edges)
-    map(((lo, ndr, P),) -> foreach_cell!(backend, vel!, (F, M, c, dtT, P), lo, ndr), regions)
+    foreach_region!(backend, vel!, (F, M, c, dtT), cells)
     p.noforce || run_once!(backend, force!, (F, M, FSrc, it))
     inject_wave!(p.tw, Val(:velocity), F, M, c, vc, dtT, eltype(dtT)(p.tbeg + it * p.dt), backend)
     p.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, p.nb, velocities(F)...))

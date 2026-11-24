@@ -84,3 +84,32 @@ end
 "All PML memory variables of the `regions`, as a tuple of arrays (for checkpoints)."
 pml_state(regions) = flatten_tuple(map(r -> r[3] === nothing ? () : values(r[3].mem), regions))
 flatten_tuple(t::Tuple) = isempty(t) ? () : (first(t)..., flatten_tuple(Base.tail(t))...)
+
+"""
+The interior region `(lo, ndr, nothing)` split into 5 blocks of rows: rows without 2nd-order differences (`Plain`) and the rows
+of the zones next to free surfaces and ocean bottoms of any column (`nothing`); empty blocks have size 0. Without `split`
+(GPUs: every block is a kernel launch, and deciding per cell costs little there) all rows are in one block.
+"""
+function plain_blocks((lo, ndr, _)::Tuple{NTuple{N,Int},NTuple{N,Int},Any}, med, off; split=true) where {N}
+    cols = CartesianIndices(ntuple(a -> lo[a]+1+off[a]:lo[a]+ndr[a]+off[a], Val(N - 1)))   # global padded columns
+    function zone(top, bot)                                       # the rows of a zone over all columns
+        t, b = typemax(Int), typemin(Int)
+        for C in cols
+            top[C] <= bot[C] && (t = min(t, top[C]); b = max(b, bot[C]))
+        end
+        return t, b
+    end
+    A, B = split ? (zone(med.fs_top, med.fs_bot), zone(med.ob_top, med.ob_bot)) : ((lo[N] + 1, lo[N] + ndr[N]), (typemax(Int), typemin(Int)))
+    A[1] > A[2] && ((A, B) = (B, A))                              # (an empty zone last)
+    B[1] <= B[2] && A[1] <= A[2] && B[1] < A[1] && ((A, B) = (B, A))
+    if A[1] <= A[2] && B[1] <= B[2] && B[1] <= A[2] + 1           # overlapping: merged
+        A, B = (A[1], max(A[2], B[2])), (typemax(Int), typemin(Int))
+    end
+    k1, k2 = lo[N] + 1, lo[N] + ndr[N]
+    block(a, b, P) = (a = max(a, k1); b = min(b, k2); (ntuple(d -> d < N ? lo[d] : a - 1, Val(N)), ntuple(d -> d < N ? ndr[d] : max(b - a + 1, 0), Val(N)), P))
+    ea, eb = A[1] <= A[2], B[1] <= B[2]
+    a1, a2 = ea ? A : (k2 + 1, k2)
+    b1, b2 = eb ? B : (k2 + 1, k2)
+    return (block(k1, a1 - 1, Plain()), block(a1, a2, nothing), block(a2 + 1, b1 - 1, Plain()), block(b1, b2, nothing),
+            block(max(a2, b2) + 1, k2, Plain()))
+end
