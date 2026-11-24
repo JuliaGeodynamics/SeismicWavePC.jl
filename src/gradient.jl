@@ -15,6 +15,10 @@ a source or a vector of sources) the misfits and model gradients of all shots ar
   synthetic and observed velocities `[it, component, station]` [m/s] and the sample times `t` [s].
 - `mute = (sources=r, stations=r)`: taper the model gradient to 0 at the sources and stations within the distance `r` [km]
   (the gradient is large and of little use next to them).
+- `illumination = true`: also return the illumination of the model by the sources, Σₜ |v|² of the forward wavefield
+  [(m/s)²] per cell, as the field `illumination` of `gradient` (summed over shots). Dividing the gradient by it is a simple
+  preconditioner (diagonal pseudo-Hessian) for inversions, and gives illumination-compensated images in reverse-time
+  migration (see the Marmousi2 RTM example).
 - `kwargs` are those of [`simulate`](@ref) (`dt`, `nt`, `stf`, `record_every`, `absorber`, `T`, `backend`, `nproc`, …) and
   must describe the simulation that `observed` is compared with.
 - `gradient`: a `CartData` on the grid of `model` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`: ∂J/∂ of the model field in
@@ -42,12 +46,13 @@ the reverse pass. With `nproc` (MPI, as in `simulate`) every process gets all re
 wavefield (their dependence on the medium is not differentiated).
 """
 function misfit_gradient(model::CartData, observed::Seismograms; method=:adjoint, checkpoint_steps=nothing, misfit=L2Misfit(),
-                         mute=nothing, kwargs...)
+                         mute=nothing, illumination=false, kwargs...)
     bad = intersect(keys(kwargs), (:stations, :snapshots, :callback, :checkpoint, :restart, :driver))
     isempty(bad) || error("misfit_gradient does not take the keywords $(join(bad, ", "))")
     method in (:adjoint, :ad) || error("method must be :adjoint or :ad, got :$method")
     K = checkpoint_steps === nothing ? nothing : Int(checkpoint_steps)
-    driver = method === :adjoint ? AdjointDriver(observed, K, misfit) : ad_driver(observed, K, misfit)
+    illumination && method === :ad && error("illumination = true needs method = :adjoint")
+    driver = method === :adjoint ? AdjointDriver(observed, K, misfit, illumination) : ad_driver(observed, K, misfit)
     res = simulate(model; kwargs..., stations=observed.stations, verbose=false, driver)
     mute === nothing || mute_gradient!(res[2], mute, kwargs[:sources], observed.stations)
     return res
@@ -69,7 +74,7 @@ function mute_gradient!(g::CartData, mute, sources, stations)
         d = sqrt((X[I] - px)^2 + (is3d ? (Y[I] - py)^2 : 0.0) + (Z[I] - pz)^2)
         d < r && (taper[I] *= (1 - cos(π * d / r)) / 2)
     end
-    foreach(f -> f .*= taper, g.fields)
+    foreach(f -> g.fields[f] .*= taper, filter(!=(:illumination), keys(g.fields)))
     return g
 end
 

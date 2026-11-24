@@ -53,6 +53,25 @@ waves over the P-wave velocity while the simulation runs (10 m grid, 5 s, 12 s o
 model is the benchmark in [Performance](@ref), and the comparison with OpenSWPC and SeismicWaves.jl is in
 [Validation](@ref).
 
+## Reverse-time migration of Marmousi2
+
+[`Marmousi2_RTM.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/Marmousi2_RTM.jl) images Marmousi2
+by reverse-time migration (RTM): 40 marine shots (explosions 10 m below the sea surface, 5 Hz Ricker wavelet), each recorded by
+the receivers within 3 km, are migrated in a smooth background model (the rock smoothed over 150 m; the water layer and the
+sea floor stay sharp). The image is the gradient of the least-squares misfit with respect to vp in the background model,
+`misfit_gradient`, which correlates the source wavefield with the back-propagated reflections:
+- only the part of each trace after the direct wave through the water enters the misfit (`L2Misfit(; window)` per receiver;
+  earlier arrivals are waves refracted in the rock, whose travel times the smooth model does not reproduce);
+- `illumination = true` also returns the energy of the source wavefield, Σₜ |v|², per cell; dividing by it compensates the
+  weaker illumination of the deep parts;
+- a Laplacian filter removes the low-wavenumber artefacts of RTM.
+
+![RTM image of Marmousi2](assets/Marmousi2_RTM.png)
+
+*The flat layers on the left, the dipping, faulted layers in the centre and the anticline on the right are imaged; with the
+illumination compensation down to about 3 km.* 8 minutes on the laptop GPU (Metal; 10 m grid, 3.5 s): 3 minutes to model the
+40 shots in the true model, 5 minutes for the migration (`julia --project=examples examples/Marmousi2_RTM.jl metal`).
+
 ## Waveform inversion and Hamiltonian Monte Carlo
 
 In [`examples/Inversion`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/tree/main/examples/Inversion) (own environment),

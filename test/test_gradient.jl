@@ -135,6 +135,15 @@ end
     @test abs(g2.fields.vs[near(st.x, st.z)]) < 0.05 * abs(g1.fields.vs[near(st.x, st.z)]) + 1e-30
     far = near(src.x + 2.5, src.z - 1.5)
     @test g2.fields.vs[far] == g1.fields.vs[far]
+    # illumination Σₜ|v|² of the source wavefield: largest at the source, not muted, the gradient unchanged; summed over shots
+    kwi = (; dt=DT, nt=150, T=Float64, sources=src, stf=SampledSTF(tq, vals .* 1.1), mute=(sources=1.0, stations=0.5))
+    _, g3 = misfit_gradient(m, obs; kwi..., illumination=true)
+    L = g3.fields.illumination
+    @test keys(g3.fields) == (:rho, :vp, :vs, :Qp, :Qs, :illumination) && g3.fields.vs == g2.fields.vs
+    @test all(>=(0), L) && Tuple(argmax(L)) == Tuple(near(src.x, src.z)) && L[far] < 1e-3 * maximum(L)
+    _, g4 = misfit_gradient(m, [obs, obs]; kwi..., sources=[src, src], illumination=true)
+    @test g4.fields.illumination ≈ 2L
+    @test_throws ErrorException misfit_gradient(m, obs; kwi..., illumination=true, method=:ad)
 end
 
 @testset "stretched grid in depth" begin

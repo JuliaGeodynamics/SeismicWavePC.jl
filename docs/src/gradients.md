@@ -19,6 +19,10 @@ sgrad[1].M, sgrad[1].t0                                                 # ∂J/�
 - **Model gradient:** `grad` is a `CartData` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`. With
   `mute=(sources=r, stations=r)` it is tapered to zero within the distance `r` [km] of the sources and stations, where it is
   large and of little use.
+- **Illumination:** with `illumination=true`, `grad` also has the field `illumination`: Σₜ |v|² of the source wavefield
+  [(m/s)²] per cell (summed over the shots, not muted). Dividing the gradient by it (clipped near the sources, plus a small
+  constant) is a simple preconditioner (the diagonal of a pseudo-Hessian) for inversions and compensates the illumination in
+  reverse-time migration ([Examples](examples.md)).
 - **Source gradients:** `sgrad` has one entry per source (per shot: a vector):
   - moment tensors: `M` (∂J/∂ of the six components `M0 .* M`) and `M0`;
   - forces: `F` (∂J/∂ of `fx, fy, fz`);

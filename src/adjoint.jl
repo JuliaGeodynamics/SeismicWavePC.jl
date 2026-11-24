@@ -386,7 +386,16 @@ struct AdjointDriver{F}
     observed::Seismograms
     checkpoint_steps::Union{Nothing,Int}
     misfit::F
+    illumination::Bool                  # also Σₙ |vⁿ|² of the forward wavefield (preconditioning, imaging)
 end
+AdjointDriver(observed, K, misfit) = AdjointDriver(observed, K, misfit, false)
+
+"Illumination: add |v|² (the velocity components at the cell) to `L`."
+Base.@propagate_inbounds illuminate!(L, V, i, k) = (I = CartesianIndex(i, k); L[I] += energy(V, I))
+Base.@propagate_inbounds illuminate!(L, V, i, j, k) = (I = CartesianIndex(i, j, k); L[I] += energy(V, I))
+Base.@propagate_inbounds energy(V::NTuple{1,Any}, I) = V[1][I]^2
+Base.@propagate_inbounds energy(V::NTuple{2,Any}, I) = V[1][I]^2 + V[2][I]^2
+Base.@propagate_inbounds energy(V::NTuple{3,Any}, I) = V[1][I]^2 + V[2][I]^2 + V[3][I]^2
 
 "Forward step `it` (as `timeloop!`, without output); `record`: also record the stations."
 function forward_step!(F, M, Src, FSrc, St, rec, acc, regions, it, p, record=true)
@@ -474,6 +483,7 @@ function (d::AdjointDriver)(s)
     E = ntuple(_ -> new(M.lam), nE)
     Rb = attenuation ? map(new, values(F)[end-nE+1:end]) : nothing
     G = NamedTuple{names}(map(_ -> new(M.lam), names))
+    L = d.illumination ? new(M.lam) : nothing
     buf = [(map(new, V), fmem()) for _ in 0:K]
     N = ndims(M.lam)
     SW, SX = KernelAbstractions.zeros(backend, s.T, length(s.Src.i), 6, nt), KernelAbstractions.zeros(backend, s.T, length(s.Src.i), 6, 2N)
@@ -500,6 +510,7 @@ function (d::AdjointDriver)(s)
             map(((lo, ndr, P),) -> foreach_cell!(backend, stretch_v!, (Δv, Qv, P, dtT), lo, ndr), azones)
             sync_halo!(halo_v)
             foreach_cell!(backend, grad!, (G, E, Rb, Qv, nothing, Vn, Vp, nothing, Ma, c, vc, dtT), deep...)
+            L === nothing || foreach_cell!(backend, illuminate!, (L, Vn), inner...)
             map(((lo, ndr),) -> foreach_cell!(backend, grad!, (G, E, Rb, Qv, Δv, Vn, Vp, nothing, Ma, c, vc, dtT), lo, ndr), band)
             map((z, P, m) -> foreach_cell!(backend, grad!, (G, E, Rb, Qv, Δv, Vn, Vp, (; P, fm=m), Ma, c, vc, dtT), z[1], z[2]), zones, Zp, fm)
             foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, nothing), deep...)
@@ -520,6 +531,13 @@ function (d::AdjointDriver)(s)
     # accumulators of all ranks on the global grid (rank 0), chain rule there, result to all ranks
     Gg = map(A -> gather_interior(A, s), G)
     g = s.me == 0 ? model_gradient(s, assemble_gradient(Gg, s.med.mu, s.mode)) : nothing
+    if L !== nothing
+        Lg = gather_interior(L, s)
+        if s.me == 0                    # the cells of the model (z up), in the wavefield units squared -> (m/s)²
+            Lm = reverse(reshape(Lg[ntuple(a -> H+1:H+s.g.n[a], length(s.g.n))...], size(s.m.rho)), dims=3) .* s.scale^2
+            g = CartData(g.x.val, g.y.val, g.z.val, merge(g.fields, (; illumination=Lm)))
+        end
+    end
     s.parallel && (g = MPI.bcast(g, 0, IGG.comm()))
     return J, g, source_gradients(s, SW, SX, FW, FX)
 end
