@@ -2,14 +2,13 @@ using Test
 
 include("setup.jl")
 
+# Pkg.test("SeismicWavePC"; test_args=["types", "gradient"]) runs only those files
+const TESTS = ["basics", "openswpc", "files", "types", "gradient", "inversion", "interpolation", "mpi"]
+
 @testset "SeismicWavePC" begin
-    include("test_basics.jl")
-    include("test_openswpc.jl")
-    include("test_files.jl")
-    include("test_types.jl")
-    include("test_gradient.jl")
-    include("test_inversion.jl")
-    include("test_interpolation.jl")
-    # MPI tests need a working mpiexec; MicrosoftMPI on Windows CI runners is not set up for that
-    Sys.iswindows() || include("test_mpi.jl")
+    for t in (isempty(ARGS) ? TESTS : ARGS)
+        # MPI tests need a working mpiexec; MicrosoftMPI on Windows CI runners is not set up for that
+        t == "mpi" && Sys.iswindows() && continue
+        include("test_$t.jl")
+    end
 end

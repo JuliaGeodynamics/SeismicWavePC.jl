@@ -23,6 +23,15 @@ Base.@propagate_inbounds function memvar!(R, I, f, vc, dt)
     end
     return s
 end
+# Without attenuation (Q = ∞ everywhere) `vc` is `nothing` and the memory variables are not allocated: no work, no memory.
+@inline memvar!(::Nothing, I, f, ::Nothing, dt) = zero(f)
+"Memory variables `F.s`, `nothing` if not allocated (resolved at compile time)."
+@inline memory(F::NamedTuple{K}, ::Val{s}) where {K,s} = s in K ? getfield(F, s) : nothing
+"Unrelaxed factor 1 + τ (1 + d₂) of the moduli, and d₂."
+@inline unrelaxed(t, vc) = 1 + t * (1 + vc[4])
+@inline unrelaxed(t, ::Nothing) = one(t)
+@inline d2(vc) = vc[4]
+@inline d2(::Nothing) = false
 
 # ------------------------------------------------------------------ PML (OpenSWPC m_absorb_p: ADE CFS-PML, Zhang & Shen, 2010)
 # The kernels take a zone `P`: `nothing` in the interior (no PML terms), or a PML zone with the first cell `lo`, memory
@@ -83,15 +92,15 @@ Base.@propagate_inbounds function stress_update_psv!(F, M, vc, dt, i, k, dxVx, d
     mu2 = 2M.mu[I]
     l2m = M.lam[I] + mu2
     tp, ts = M.taup[I], M.taus[I]
-    tp1, ts1 = 1 + tp * (1 + vc[4]), 1 + ts * (1 + vc[4])
+    tp1, ts1 = unrelaxed(tp, vc), unrelaxed(ts, vc)
     div = dxVx + dzVz
-    Rx = memvar!(F.Rxx, I, l2m * tp * div - mu2 * ts * dzVz, vc, dt)
-    Rz = memvar!(F.Rzz, I, l2m * tp * div - mu2 * ts * dxVx, vc, dt)
+    Rx = memvar!(memory(F, Val(:Rxx)), I, l2m * tp * div - mu2 * ts * dzVz, vc, dt)
+    Rz = memvar!(memory(F, Val(:Rzz)), I, l2m * tp * div - mu2 * ts * dxVx, vc, dt)
     gc = M.gx_c[i] * M.gz_c[k]
     Sxx[I] = (Sxx[I] + (l2m * tp1 * div - mu2 * ts1 * dzVz + Rx) * dt) * gc
     Szz[I] = (Szz[I] + (l2m * tp1 * div - mu2 * ts1 * dxVx + Rz) * dt) * gc
     muxz = havg4(M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])
-    Rxz = memvar!(F.Rxz, I, muxz * ts * e, vc, dt)
+    Rxz = memvar!(memory(F, Val(:Rxz)), I, muxz * ts * e, vc, dt)
     Sxz[I] = (Sxz[I] + (muxz * ts1 * e + Rxz) * dt) * M.gx_b[i] * M.gz_b[k]
 end
 
@@ -146,11 +155,11 @@ Base.@propagate_inbounds function stress_update_sh!(F, M, vc, dt, i, k, dzVy, dx
     (; Syz, Sxy) = F
     I = CartesianIndex(i, k)
     ts = M.taus[I]
-    ts1 = 1 + ts * (1 + vc[4])
+    ts1 = unrelaxed(ts, vc)
     muxy = havg2(M.mu[i, k], M.mu[i+1, k])
     muyz = havg2(M.mu[i, k], M.mu[i, k+1])
-    Ryz = memvar!(F.Ryz, I, muyz * ts * dzVy, vc, dt)
-    Rxy = memvar!(F.Rxy, I, muxy * ts * dxVy, vc, dt)
+    Ryz = memvar!(memory(F, Val(:Ryz)), I, muyz * ts * dzVy, vc, dt)
+    Rxy = memvar!(memory(F, Val(:Rxy)), I, muxy * ts * dxVy, vc, dt)
     Syz[I] = (Syz[I] + (muyz * ts1 * dzVy + Ryz) * dt) * M.gx_c[i] * M.gz_b[k]
     Sxy[I] = (Sxy[I] + (muxy * ts1 * dxVy + Rxy) * dt) * M.gx_b[i] * M.gz_c[k]
 end
@@ -226,11 +235,11 @@ Base.@propagate_inbounds function stress_update_3d!(F, M, vc, dt, i, j, k, dxVx,
     mu2 = 2mu[I]
     l2m = M.lam[I] + mu2
     tp, ts = M.taup[I], M.taus[I]
-    tp1, ts1 = 1 + tp * (1 + vc[4]), 1 + ts * (1 + vc[4])
+    tp1, ts1 = unrelaxed(tp, vc), unrelaxed(ts, vc)
     div = dxVx + dyVy + dzVz
-    Rx = memvar!(F.Rxx, I, l2m * tp * div - mu2 * ts * (dyVy + dzVz), vc, dt)
-    Ry = memvar!(F.Ryy, I, l2m * tp * div - mu2 * ts * (dxVx + dzVz), vc, dt)
-    Rz = memvar!(F.Rzz, I, l2m * tp * div - mu2 * ts * (dxVx + dyVy), vc, dt)
+    Rx = memvar!(memory(F, Val(:Rxx)), I, l2m * tp * div - mu2 * ts * (dyVy + dzVz), vc, dt)
+    Ry = memvar!(memory(F, Val(:Ryy)), I, l2m * tp * div - mu2 * ts * (dxVx + dzVz), vc, dt)
+    Rz = memvar!(memory(F, Val(:Rzz)), I, l2m * tp * div - mu2 * ts * (dxVx + dyVy), vc, dt)
     gc = M.gx_c[i] * M.gy_c[j] * M.gz_c[k]
     Sxx[I] = (Sxx[I] + (l2m * tp1 * div - mu2 * ts1 * (dyVy + dzVz) + Rx) * dt) * gc
     Syy[I] = (Syy[I] + (l2m * tp1 * div - mu2 * ts1 * (dxVx + dzVz) + Ry) * dt) * gc
@@ -238,9 +247,9 @@ Base.@propagate_inbounds function stress_update_3d!(F, M, vc, dt, i, j, k, dxVx,
     muxz = havg4(mu[i, j, k], mu[i, j, k+1], mu[i+1, j, k], mu[i+1, j, k+1])
     muxy = havg4(mu[i, j, k], mu[i+1, j, k], mu[i, j+1, k], mu[i+1, j+1, k])
     muyz = havg4(mu[i, j, k], mu[i, j, k+1], mu[i, j+1, k], mu[i, j+1, k+1])
-    Ryz = memvar!(F.Ryz, I, muyz * ts * eyz, vc, dt)
-    Rxz = memvar!(F.Rxz, I, muxz * ts * exz, vc, dt)
-    Rxy = memvar!(F.Rxy, I, muxy * ts * exy, vc, dt)
+    Ryz = memvar!(memory(F, Val(:Ryz)), I, muyz * ts * eyz, vc, dt)
+    Rxz = memvar!(memory(F, Val(:Rxz)), I, muxz * ts * exz, vc, dt)
+    Rxy = memvar!(memory(F, Val(:Rxy)), I, muxy * ts * exy, vc, dt)
     Syz[I] = (Syz[I] + (muyz * ts1 * eyz + Ryz) * dt) * M.gx_c[i] * M.gy_b[j] * M.gz_b[k]
     Sxz[I] = (Sxz[I] + (muxz * ts1 * exz + Rxz) * dt) * M.gx_b[i] * M.gy_c[j] * M.gz_b[k]
     Sxy[I] = (Sxy[I] + (muxy * ts1 * exy + Rxy) * dt) * M.gx_b[i] * M.gy_b[j] * M.gz_c[k]

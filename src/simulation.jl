@@ -110,14 +110,17 @@ function simulate(model::CartData; wave=:psv, interpolation=:cell, kwargs...)
     mode = size(model)[2] == 1 ? wave : :p3d
     mode in (:psv, :sh, :p3d) || error("wave must be :psv or :sh, got :$wave")
     interpolation in (:cell, :sinc) || error("interpolation must be :cell or :sinc, got :$interpolation")
-    return simulate(model, Val(mode), Val(interpolation); kwargs...)
+    return simulate(model, Val(mode), Val(interpolation), Val(has_attenuation(model)); kwargs...)
 end
 
+"Does the model have attenuation (finite `Qp` or `Qs` anywhere)? Without, the memory variables are left out."
+has_attenuation(model) = any(f -> haskey(model.fields, f) && any(isfinite, model.fields[f]), (:Qp, :Qs))
+
 # Function barrier on the solver type: from here on the dimension N is known to the compiler.
-function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
+function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{attenuation}=Val(true); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
                   absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
-                  snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,interp,FT}
+                  snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,interp,attenuation,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave} ? [sources] : collect(sources)
     all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave}, sources) ||
@@ -159,7 +162,8 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell); dt, nt
     M = merge((; rho=loc(med.rho), lam=loc(med.lam), mu=loc(med.mu), taup=loc(med.taup), taus=loc(med.taus),
                  fs_top=col(med.fs_top), fs_bot=col(med.fs_bot), ob_top=col(med.ob_top), ob_bot=col(med.ob_bot)), G)
     c = ntuple(a -> (FT(9 / 8 / g.d[a]), FT(1 / 24 / g.d[a]), FT(1 / g.d[a])), N)
-    vc = memory_coefficients(med.ts, dt, FT)
+    attenuation || !(any(!iszero, med.taup) || any(!iszero, med.taus)) || error("the model has attenuation (finite Qp or Qs): use Val(true)")
+    vc = attenuation ? memory_coefficients(med.ts, dt, FT) : nothing         # nothing: elastic, no memory variables
     ijk = N == 3 ? (:i, :j, :k) : (:i, :k)
 
     # sources: moment tensors as stress glut at the cell of the source, forces on the velocities around it, normalized by
@@ -216,10 +220,11 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell); dt, nt
     # wavefields
     z() = KernelAbstractions.zeros(backend, FT, nl...)
     zr() = KernelAbstractions.zeros(backend, FT, NM, nl...)
-    F = mode === :psv ? (; Vx=z(), Vz=z(), Sxx=z(), Szz=z(), Sxz=z(), Rxx=zr(), Rzz=zr(), Rxz=zr()) :
-        mode === :sh ? (; Vy=z(), Syz=z(), Sxy=z(), Ryz=zr(), Rxy=zr()) :
-        (; Vx=z(), Vy=z(), Vz=z(), Sxx=z(), Syy=z(), Szz=z(), Syz=z(), Sxz=z(), Sxy=z(),
-           Rxx=zr(), Ryy=zr(), Rzz=zr(), Ryz=zr(), Rxz=zr(), Rxy=zr())
+    F0 = mode === :psv ? (; Vx=z(), Vz=z(), Sxx=z(), Szz=z(), Sxz=z()) : mode === :sh ? (; Vy=z(), Syz=z(), Sxy=z()) :
+         (; Vx=z(), Vy=z(), Vz=z(), Sxx=z(), Syy=z(), Szz=z(), Syz=z(), Sxz=z(), Sxy=z())
+    memvars() = mode === :psv ? (; Rxx=zr(), Rzz=zr(), Rxz=zr()) : mode === :sh ? (; Ryz=zr(), Rxy=zr()) :
+                (; Rxx=zr(), Ryy=zr(), Rzz=zr(), Ryz=zr(), Rxz=zr(), Rxy=zr())     # one per stress component
+    F = attenuation ? merge(F0, memvars()) : F0
     scale = M0 * (N == 3 ? 1e-15 : 1e-12)     # wavefield units -> m/s (OpenSWPC convention)
     out = Output{N,mode}(model, size(m.rho), nl, dims, parallel, me, scale)
 

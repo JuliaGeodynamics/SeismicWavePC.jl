@@ -183,10 +183,10 @@ Base.@propagate_inbounds function grad_psv!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc
     dzVz = fst(Z, Val(:azVz), Val(:gzc), I, k, f(Vz, I - ez, ez, 2))
     vxz = fst(Z, Val(:axVz), Val(:gxe), I, i, f(Vz, I, ex, 1)) + fst(Z, Val(:azVx), Val(:gze), I, k, f(Vx, I, ez, 2))
     tp, ts = M.taup[I], M.taus[I]
-    tp1, ts1 = 1 + tp * (1 + vc[4]), 1 + ts * (1 + vc[4])
+    tp1, ts1 = unrelaxed(tp, vc), unrelaxed(ts, vc)
     P = aU .* tp1 .+ aR .* tp                    # weights of λ + 2μ
     S = aU .* ts1 .+ aR .* ts                    # of 2μ (normal) and μ (shear)
-    T = aU .* (1 + vc[4]) .+ aR                  # of τ
+    T = aU .* (1 + d2(vc)) .+ aR                  # of τ
     mu2 = 2M.mu[I]
     div = dxVx + dzVz
     G.lam[I] += (P[1] + P[2]) * div
@@ -210,9 +210,9 @@ Base.@propagate_inbounds function grad_sh!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc,
     vyz = fst(Z, Val(:azVy), Val(:gze), I, k, f(Vp[1], I, CartesianIndex(0, 1), 2))
     vxy = fst(Z, Val(:axVy), Val(:gxe), I, i, f(Vp[1], I, CartesianIndex(1, 0), 1))
     ts = M.taus[I]
-    ts1 = 1 + ts * (1 + vc[4])
+    ts1 = unrelaxed(ts, vc)
     S = aU .* ts1 .+ aR .* ts
-    T = aU .* (1 + vc[4]) .+ aR
+    T = aU .* (1 + d2(vc)) .+ aR
     G.yz[I] += S[1] * vyz
     G.xy[I] += S[2] * vxy
     Rb === nothing || (G.ts[I] += T[1] * havg2(M.mu[i, k], M.mu[i, k+1]) * vyz + T[2] * havg2(M.mu[i, k], M.mu[i+1, k]) * vxy)
@@ -233,10 +233,10 @@ Base.@propagate_inbounds function grad_3d!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc,
     vxz = fst(Z, Val(:axVz), Val(:gxe), I, i, f(Vz, I, ex, 1)) + fst(Z, Val(:azVx), Val(:gze), I, k, f(Vx, I, ez, 3))
     vxy = fst(Z, Val(:axVy), Val(:gxe), I, i, f(Vy, I, ex, 1)) + fst(Z, Val(:ayVx), Val(:gye), I, j, f(Vx, I, ey, 2))
     tp, ts = M.taup[I], M.taus[I]
-    tp1, ts1 = 1 + tp * (1 + vc[4]), 1 + ts * (1 + vc[4])
+    tp1, ts1 = unrelaxed(tp, vc), unrelaxed(ts, vc)
     P = aU .* tp1 .+ aR .* tp
     S = aU .* ts1 .+ aR .* ts
-    T = aU .* (1 + vc[4]) .+ aR
+    T = aU .* (1 + d2(vc)) .+ aR
     mu = M.mu
     mu2 = 2mu[I]
     div = dxVx + dyVy + dzVz
