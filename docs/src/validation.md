@@ -56,7 +56,8 @@ is defined at the grid nodes (the sea floor lies between two nodes) rather than 
 
 ## Point force under a free surface: comparison with SPECFEM2D
 
-An independent benchmark from [flexOPT.jl](https://github.com/seismobassoon/flexOPT.jl/tree/main/application/forBoris): a
+An independent benchmark by Nobuaki Fuji, who set it up and ran the codes below (thanks for sharing it), from
+[flexOPT.jl](https://github.com/seismobassoon/flexOPT.jl/tree/main/application/forBoris): a
 vertical point force (Ricker wavelet, 0.65 Hz) 20 km deep in a homogeneous half-space (vp = 6 km/s, vs = 3.46 km/s,
 ρ = 2700 kg/m³) with a flat free surface, receivers 10 km deep at 0–20 km horizontal distance from the source, 500 m grid.
 Vertical displacement, each trace normalized to its peak, against SPECFEM2D (spectral elements), the optimal operators OPT3
