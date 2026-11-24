@@ -123,9 +123,9 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
                   snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,interp,attenuation,FT}
     N = mode === :p3d ? 3 : 2
-    sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave} ? [sources] : collect(sources)
-    all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave}, sources) ||
-        error("sources must be MomentTensorSource, ForceSource or PlaneWave")
+    sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave} ? [sources] : collect(sources)
+    all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave}, sources) ||
+        error("sources must be MomentTensorSource, ForceSource, PlaneWave or TeleseismicWave")
     stations = collect(Station, stations)
     isempty(sources) && error("at least one source is required")
     m = model_arrays(model)
@@ -176,7 +176,9 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
     moments = filter(active, MomentTensorSource[s for s in sources if s isa MomentTensorSource])   # as OpenSWPC, ignore sources
     forces = filter(active, ForceSource[s for s in sources if s isa ForceSource])                  # outside the model
     planewaves = PlaneWave[s for s in sources if s isa PlaneWave]
-    nused = length(moments) + length(forces) + length(planewaves)
+    teleseismic = TeleseismicWave[s for s in sources if s isa TeleseismicWave]
+    length(teleseismic) <= 1 || error("one TeleseismicWave per simulation")
+    nused = length(moments) + length(forces) + length(planewaves) + length(teleseismic)
     nused == 0 && error("all sources are outside the model or in the air (vp = vs = 0)")
     nused < length(sources) && me == 0 &&
         @warn "$(length(sources) - nused) of $(length(sources)) sources are outside the model or in the air (vp = vs = 0) and are ignored"
@@ -202,7 +204,7 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
     FSrc = sinc ? merge(FSrc0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in FS], spec_v, off, nl, dev, FT; derivatives=Val(true),
                                                   items=collect(eachindex(FS))))) : FSrc0
     fcut = max(maximum((1 / s.trise for s in moments); init=0.0), maximum((1 / s.trise for s in forces); init=0.0),
-               maximum((plane_wave_fcut(p, med, g) for p in planewaves); init=0.0))
+               maximum((plane_wave_fcut(p, med, g) for p in planewaves); init=0.0), maximum((1 / w.trise for w in teleseismic); init=0.0))
 
     # stations owned by this rank
     function station_cell(st)
@@ -231,6 +233,9 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
     F = attenuation ? merge(F0, memvars()) : F0
     scale = M0 * (N == 3 ? 1e-15 : 1e-12)     # wavefield units -> m/s (OpenSWPC convention)
     out = Output{N,mode}(model, size(m.rho), nl, dims, parallel, me, scale)
+    # a teleseismic wave: tables of the incoming field and the strips of corrected cells along its box
+    tw = isempty(teleseismic) ? nothing :
+         (injection_setup(teleseismic[1], Val(mode), med, g, na, off, nl, dev, stf, scale, tbeg, dt, nt, FT)..., injection_kernels(Val(mode)))
 
     # plane waves: initial wavefield; with the PML the side boundaries let them pass
     for p in planewaves
@@ -257,7 +262,7 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
                         components, med, m, g, na, fq_ref, rho_unit=density_scale(density_unit, maximum(model_arrays(model).rho)),
                         mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl, sources, moments, forces, M0, stf,
-                        iS, iF, sinc, volume=map(volume, moments), fvolume=map(volume, forces)))
+                        iS, iF, sinc, volume=map(volume, moments), fvolume=map(volume, forces), tw))
         parallel && IGG.finalize_global_grid(finalize_MPI=false)
         return res
     end
@@ -269,7 +274,7 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
     ckp = checkpoint === nothing ? nothing : parallel ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")
     tail = (nt, isempty(S), isempty(FS), length(own), record_every, snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt,
-            verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, pw_edges, edges, planes, backend)
+            verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, pw_edges, edges, planes, backend, tw)
     movie_out = absorber === :cerjan ? timeloop!(head..., ((ntuple(_ -> H, N), nl .- 2H, nothing),), tail...) :
                 timeloop!(head..., pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT), tail...)
     movie_out === nothing || movie_paraview(pvd=movie_out, Finalize=true)
@@ -367,7 +372,7 @@ stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, 
 # Function barrier: everything below is concretely typed.
 function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, force!, record!, plane!), regions, nt, nosource, noforce, nown, record_every,
                    snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, ckp, checkpoint_every, restart,
-                   pw_edges, edges, planes, backend)
+                   pw_edges, edges, planes, backend, tw)
     V, Σ = velocities(F), stresses(F)
     report = max(nt ÷ 10, 1)
     state = (values(F)..., pml_state(regions)..., acc, rec)
@@ -398,10 +403,12 @@ function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, in
         pw_edges && extrapolate_sides!(V, edges)
         map(((lo, ndr, P),) -> foreach_cell!(backend, stress!, (F, M, c, vc, dtT, P), lo, ndr), regions)
         nosource || run_once!(backend, inject!, (F, Src, it))
+        inject_wave!(tw, Val(:stress), F, M, c, vc, dtT, eltype(dtT)(tbeg + (it - 0.5) * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, Σ...))
         pw_edges && extrapolate_sides!(Σ, edges)
         map(((lo, ndr, P),) -> foreach_cell!(backend, vel!, (F, M, c, dtT, P), lo, ndr), regions)
         noforce || run_once!(backend, force!, (F, M, FSrc, it))
+        inject_wave!(tw, Val(:velocity), F, M, c, vc, dtT, eltype(dtT)(tbeg + it * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, V...))
         if verbose && it % report == 0
             KernelAbstractions.synchronize(backend)

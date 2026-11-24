@@ -129,6 +129,28 @@ end
     @test_throws ErrorException simulate(test_model(:sh); dt=DT, nt=1, sources=pw, wave=:sh, verbose=false)   # no P in SH
 end
 
+@testset "teleseismic waves (injected along a box)" begin
+    # homogeneous half-space: the free-surface response of a plane P wave (apparent angle ī: sin(ī/2) = β p)
+    α, β, dx = 6.0, 6.0 / sqrt(3), 0.1
+    x = range(dx / 2, step=dx, length=240); z = range(-12 + dx / 2, step=dx, length=122)
+    X, Y, Z = xyz_grid(x, 0, z); air = Z .> 0
+    hs = CartData(X, Y, Z, (; rho=ifelse.(air, 1.0, 2700.0), vp=ifelse.(air, 0.0, α), vs=ifelse.(air, 0.0, β)))
+    st = [[Station("S$i", xs, 0.0, 0.0; surface=true) for (i, xs) in enumerate(7.0:2.0:17.0)]; Station("O", 3.0, 0.0, 0.0; surface=true)]
+    w = TeleseismicWave(:p; angle=30.0, box=(4.0, 20.0, -8.0), trise=1.0, t0=0.3)
+    r = simulate(hs; dt=0.005, nt=900, sources=w, stations=st, verbose=false)
+    ax, az = vec(maximum(abs, r.v[:, 1, 1:6]; dims=1)), vec(maximum(abs, r.v[:, 2, 1:6]; dims=1))
+    @test all(q -> isapprox(q, tan(2asin(β * sind(30) / α)); rtol=2e-3), ax ./ az)
+    @test maximum(az) / minimum(az) < 1.001                                        # the same amplitude along the line
+    @test maximum(abs, r.v[:, :, 7]) < 2e-3 * maximum(az)                            # outside the box: only leakage
+    # the box must keep away from the absorbers; the background must be layered and elastic along the box
+    @test_throws ErrorException simulate(hs; dt=0.005, nt=2, verbose=false, sources=TeleseismicWave(:p; angle=0.0, box=(1.0, 20.0, -8.0), trise=1.0))
+    lump = CartData(X, Y, Z, merge(hs.fields, (; vs=ifelse.((X .- 4) .^ 2 .+ (Z .+ 3) .^ 2 .< 1, 3.0, hs.fields.vs))))
+    @test_throws ErrorException simulate(lump; dt=0.005, nt=2, sources=w, verbose=false)
+    @test_throws ErrorException simulate(CartData(X, Y, Z, merge(hs.fields, (; Qp=fill(100.0, size(X)), Qs=fill(50.0, size(X)))));
+                                         dt=0.005, nt=2, sources=w, verbose=false)
+    @test_throws ErrorException TeleseismicWave(:love; angle=0.0, box=(1, 2, -1), trise=1.0)
+end
+
 @testset "reciprocal Green's functions" begin
     model = test_model(:psv)
     p, rcv = (0.5, 0.0, -1.5), (-1.2, 0.0, -0.3)

@@ -180,3 +180,22 @@ end
     @test_throws ErrorException simulate(CartData(Xj, Yj, Zj, map(A -> A[:, :, [1:50; 50:99]], m.fields)); dt=DT, nt=2, sources=test_source(), verbose=false)
     @test_throws ErrorException simulate(m; dt=DT, nt=2, sources=PlaneWave(:p; depth=1.0, length=2.0), verbose=false)
 end
+
+@testset "teleseismic waves: gradients" begin
+    # injected along a box: the corrections are sources independent of the model inside; at the box boundary their
+    # dependence on the material is part of the adjoint: exact everywhere
+    m0 = test_model(:psv)
+    m = CartData(m0.x.val, m0.y.val, m0.z.val, Base.structdiff(m0.fields, NamedTuple{(:Qp, :Qs)}))
+    for (mode, wave) in ((:psv, :p), (:sh, :sh))
+        w = TeleseismicWave(wave; angle=20.0, box=(-3.5, 3.5, -3.0), trise=0.3, t0=0.05)
+        kw = (; dt=DT, nt=250, sources=w, T=Float64, wave=mode)
+        vs = copy(m.fields.vs); vs[90:110, 1, 50:60] .*= 1.05                         # observed: an anomaly in the box
+        obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs))); kw..., stations=test_stations(mode), verbose=false)
+        J, g = misfit_gradient(m, obs; kw...)
+        Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=25)
+        @test J ≈ misfit(m, obs, kw) ≈ Jad
+        for f in (:rho, :vp, :vs)
+            @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+        end
+    end
+end

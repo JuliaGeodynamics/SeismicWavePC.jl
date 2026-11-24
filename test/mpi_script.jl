@@ -51,6 +51,21 @@ for (mode, nproc, stretched) in ((:psv, 4, false), (:p3d, (2, 2), false), (:psv,
 end
 MPI.Barrier(MPI.COMM_WORLD)
 
+# teleseismic waves injected along a box that spans several ranks: forward and gradient as in serial
+let m0 = test_model(:psv), nproc = 4
+    m = CartData(m0.x.val, m0.y.val, m0.z.val, Base.structdiff(m0.fields, NamedTuple{(:Qp, :Qs)}))
+    w = TeleseismicWave(:p; angle=20.0, box=(-3.5, 3.5, -3.0), trise=0.3, t0=0.05)
+    kw = (; dt=DT, nt=300, sources=w, T=Float64)            # long enough for the scattered waves to reach the stations
+    s1, s2 = simulate(m; kw..., stations=test_stations(:psv), verbose=false), simulate(m; kw..., stations=test_stations(:psv), nproc, verbose=false)
+    vs = copy(m.fields.vs); vs[90:110, 1, 50:60] .*= 1.05
+    obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs))); kw..., stations=test_stations(:psv), verbose=false)
+    g1, g2 = misfit_gradient(m, obs; kw...)[2], misfit_gradient(m, obs; kw..., nproc)[2]
+    e = (maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v), maximum(abs, g1.fields.vs .- g2.fields.vs) / maximum(abs, g1.fields.vs))
+    rank == 0 && println("MPI teleseismic psv nproc=$nproc: seismograms, gradient: $e")
+    all(<(1e-9), e) || error("MPI result with a TeleseismicWave differs on rank $rank")   # rounding: positions per rank
+end
+MPI.Barrier(MPI.COMM_WORLD)
+
 # sources and stations between grid points (stencils across ranks)
 for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
     m = test_model(mode)

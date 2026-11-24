@@ -408,10 +408,12 @@ function forward_step!(F, M, Src, FSrc, St, rec, acc, regions, it, p, record=tru
     p.pw_edges && extrapolate_sides!(velocities(F), p.edges)
     map(((lo, ndr, P),) -> foreach_cell!(backend, stress!, (F, M, c, vc, dtT, P), lo, ndr), regions)
     p.nosource || run_once!(backend, inject!, (F, Src, it))
+    inject_wave!(p.tw, Val(:stress), F, M, c, vc, dtT, eltype(dtT)(p.tbeg + (it - 0.5) * p.dt), backend)
     p.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, p.nb, stresses(F)...))
     p.pw_edges && extrapolate_sides!(stresses(F), p.edges)
     map(((lo, ndr, P),) -> foreach_cell!(backend, vel!, (F, M, c, dtT, P), lo, ndr), regions)
     p.noforce || run_once!(backend, force!, (F, M, FSrc, it))
+    inject_wave!(p.tw, Val(:velocity), F, M, c, vc, dtT, eltype(dtT)(p.tbeg + it * p.dt), backend)
     p.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, p.nb, velocities(F)...))
     return nothing
 end
@@ -513,6 +515,7 @@ function (d::AdjointDriver)(s)
             L === nothing || foreach_cell!(backend, illuminate!, (L, Vn), inner...)
             map(((lo, ndr),) -> foreach_cell!(backend, grad!, (G, E, Rb, Qv, Δv, Vn, Vp, nothing, Ma, c, vc, dtT), lo, ndr), band)
             map((z, P, m) -> foreach_cell!(backend, grad!, (G, E, Rb, Qv, Δv, Vn, Vp, (; P, fm=m), Ma, c, vc, dtT), z[1], z[2]), zones, Zp, fm)
+            inject_wave_grad!(s.tw, G, E, Ma, c, dtT, eltype(dtT)(s.tbeg + (n - 0.5) * s.dt), backend)   # teleseismic wave
             foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, nothing), deep...)
             map(((lo, ndr),) -> foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, Δv), lo, ndr), rest)
             if s.sinc

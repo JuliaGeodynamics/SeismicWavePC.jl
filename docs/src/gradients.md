@@ -19,6 +19,8 @@ sgrad[1].M, sgrad[1].t0                                                 # ∂J/�
 - **Model gradient:** `grad` is a `CartData` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`. With
   `mute=(sources=r, stations=r)` it is tapered to zero within the distance `r` [km] of the sources and stations, where it is
   large and of little use.
+- **Teleseismic waves:** with a `TeleseismicWave` in `sources` the gradient is exact as well (the injection along the box acts
+  as sources that do not depend on the model inside it; its dependence on the material at the box boundary is included).
 - **Illumination:** with `illumination=true`, `grad` also has the field `illumination`: Σₜ |v|² of the source wavefield
   [(m/s)²] per cell (summed over the shots, not muted). Dividing the gradient by it (clipped near the sources, plus a small
   constant) is a simple preconditioner (the diagonal of a pseudo-Hessian) for inversions and compensates the illumination in

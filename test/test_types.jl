@@ -16,4 +16,11 @@ using Test, JET
         foreach(r -> println(sprint(show, r)), hot)
         @test isempty(hot)
     end
+    # a teleseismic wave (injected along a box)
+    tw = TeleseismicWave(:p; angle=20.0, box=(-3.5, 3.5, -3.0), trise=0.3)
+    reports = JET.get_reports(@report_opt target_modules=(SeismicWavePC,) simulate(elastic, Val(:psv), Val(:cell), Val(false); kw..., sources=tw))
+    boundary = ("convert(::Array{Float64, 3}", "axis(", "CartData(", "format(", (VERSION < v"1.11" ? ("failed to optimize due to recursion",) : ())...)
+    hot = filter(r -> !any(b -> occursin(b, sprint(show, r)), boundary), reports)
+    foreach(r -> println(sprint(show, r)), hot)
+    @test isempty(hot)
 end

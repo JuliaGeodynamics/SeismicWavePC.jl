@@ -14,6 +14,7 @@ MomentTensorSource
 DoubleCoupleSource
 ForceSource
 PlaneWave
+TeleseismicWave
 moment_rate
 SampledSTF
 Snapshots

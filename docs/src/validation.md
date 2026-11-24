@@ -54,6 +54,26 @@ The SeismicWavePC.jl seismograms barely change between 5 m and 1.25 m, whereas t
 with every refinement: JUDI.jl converges to the same solution, but more slowly on this model, as expected when the material
 is defined at the grid nodes (the sea floor lies between two nodes) rather than in the cells.
 
+## Teleseismic plane waves
+
+`TeleseismicWave` (a plane wave from below, injected along a box) against the analytical solution of a homogeneous
+half-space (vp = 6 km/s, vs = 3.46 km/s, 100 m grid, Ricker wavelet of 1 Hz): the incoming P (20°) or SV (15°) wave and the
+P and SV waves reflected at the free surface, whose amplitudes follow from the traction-free surface. Displacement at the
+surface and at 3–28 km depth
+([`examples/teleseismic_benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/teleseismic_benchmark.jl)):
+
+![Teleseismic benchmark](assets/teleseismic_benchmark.png)
+
+The relative L2 differences are 0.1–0.2 % (0.5 % for SV at the surface). Also checked:
+- a crust (30 km, vp = 6 km/s) over a mantle, P, SV and SH, against the exact layered solution: 0.1–0.25 %; the same on a grid
+  stretched in depth (50 m at the surface, 200 m at depth): 0.1–0.6 %;
+- 3D, a P wave from the backazimuth 240° and an SH wave from 200° (oblique to the grid) in a crust over a mantle: all three
+  components to 0.06–0.2 %;
+- the free-surface response of a half-space, P at 0–40°: the ratio of horizontal and vertical motion exact to 2·10⁻⁴, the
+  same amplitude everywhere along the surface (10⁻⁴), waves leaking out of the box 4–8·10⁻⁴ (`PlaneWave`, the OpenSWPC initial
+  wavefield, gives 4 % of spurious horizontal motion at vertical incidence and is cut at oblique incidence);
+- misfit gradients with a teleseismic wave against Enzyme (round-off, also at the box boundary), finite differences, and MPI.
+
 The tests also check:
 - misfit gradients against automatic differentiation (Enzyme, agree to round-off) and finite differences of whole simulations,
   in 2D and 3D, with attenuation and waves in the PML; source gradients, misfit options and several shots against finite
