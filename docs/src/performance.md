@@ -7,20 +7,32 @@ figures: [Examples](examples.md)).
 
 Benchmark ([`examples/benchmark_marmousi2.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl)): 2D P-SV on a 5 m grid (3401 × 703 cells),
 2 s (5317 steps), PML, an explosion 10 m below the sea surface and 641 receivers; time loop only, the better of two runs, on the
-Apple M4 Max laptop. [SeismicWaves.jl](https://github.com/GinvLab/SeismicWaves.jl) (v0.9.1, elastic, without attenuation) ran the
-same grid, time step and receivers with its threaded CPU backend.
+Apple M4 Max laptop. The other codes ran the same grid, time step and receivers:
+[SeismicWaves.jl](https://github.com/GinvLab/SeismicWaves.jl) (v0.9.1, elastic, threaded CPU backend) and
+[JUDI.jl](https://github.com/slimgroup/JUDI.jl) (v4.1.7 with Devito 4.8.23, elastic, OpenMP, see below).
 
 | Code | Time | Million cell updates / s |
 |---|---:|---:|
 | OpenSWPC, 1 core | 152 s | 84 |
 | OpenSWPC, 12 MPI ranks | 16.5 s | 770 |
 | SeismicWaves.jl, 12 threads | 170 s (29 s with 1 receiver) | 75 (439) |
-| SeismicWavePC.jl, 1 thread | 106 s | 120 |
-| SeismicWavePC.jl, 12 threads | 14.9 s | 851 |
-| SeismicWavePC.jl, Apple M4 Max GPU (Metal) | 5.0 s | 2552 |
+| JUDI.jl (Devito), 1 thread | 33.6 s | 377 |
+| JUDI.jl (Devito), 12 threads | 5.1 s (8th order: 7.4 s) | 2474 (1715) |
+| SeismicWavePC.jl, 1 thread | 60.7 s | 209 |
+| SeismicWavePC.jl, 12 threads | 9.8 s | 1297 |
+| SeismicWavePC.jl, Apple M4 Max GPU (Metal) | 2.6 s | 4826 |
 
-SeismicWavePC.jl and OpenSWPC also update the memory variables of attenuation (Q is infinite here). In SeismicWaves.jl most of
-the time goes to recording the 641 receivers; with a single receiver it reaches 439 million updates per second.
+Marmousi2 has no attenuation: SeismicWavePC.jl then leaves out the memory variables of the attenuation, OpenSWPC updates
+them. In SeismicWaves.jl most of the time goes to recording the 641 receivers; with a single receiver it reaches 439 million
+updates per second.
+
+JUDI.jl generates its kernels with Devito: optimized C with OpenMP, which computes the material factors (the harmonic mean of μ
+for the shear stresses, the damping) once before the time loop, uses the 4th-order stencil everywhere and a simple sponge
+(SeismicWavePC.jl: the PML, 2nd-order differences next to free surfaces as OpenSWPC, and the harmonic means in every step). On
+macOS its Julia interface crashed with OpenMP threads, so JUDI's propagators (its Python package `pysource`) ran directly from
+Python, with Homebrew's LLVM and OpenMP. JUDI's elastic modelling is forward only (explosions, pressure receivers): its
+gradients are acoustic. In accuracy both codes converge to the same seismograms; on a model with a flat sea floor
+SeismicWavePC.jl converges faster with the grid spacing (see [Validation](validation.md)).
 
 Misfit gradient (adjoint-state method, L2 misfit of all receivers) on the same problem.
 [`examples/benchmark_marmousi2.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl) with `gradient` as second argument:
@@ -29,11 +41,13 @@ Misfit gradient (adjoint-state method, L2 misfit of all receivers) on the same p
 |---|---:|---:|---:|
 | SeismicWaves.jl, 12 threads, 641 receivers | 169 s | 403 s | 2.4 |
 | SeismicWaves.jl, 12 threads, 1 receiver | 30 s | 121 s | 4.0 |
-| SeismicWavePC.jl, 12 threads, 641 receivers | 16.9 s | 80 s | 4.7 |
-| SeismicWavePC.jl, Apple M4 Max GPU (Metal), 641 receivers | 6.2 s | 30 s | 4.9 |
+| JUDI.jl, acoustic, 12 threads, optimal checkpointing | 2.6 s | 36 s | 14 |
+| SeismicWavePC.jl, 12 threads, 641 receivers | 10.2 s | 59 s | 5.8 |
+| SeismicWavePC.jl, Apple M4 Max GPU (Metal), 641 receivers | 3.0 s | 21 s | 7.2 |
 
-Both codes save the wavefield every √nt steps or so and recompute the steps in between. The forward times here include the
-setup.
+SeismicWavePC.jl and SeismicWaves.jl save the wavefield every √nt steps or so and recompute the steps in between; JUDI.jl
+uses optimal checkpointing (Revolve) and has no elastic gradients (its row is the acoustic gradient, a much cheaper
+equation). The forward times here include the setup.
 
 ## Examples
 

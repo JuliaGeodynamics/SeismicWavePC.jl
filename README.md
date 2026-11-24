@@ -72,8 +72,9 @@ J, gradient = misfit_gradient(model, observed; dt=0.004, nt=1500, sources=source
 The [documentation](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/) covers models, sources, GPUs and MPI, gradients,
 inversion with Turing, AdvancedHMC and Optim, the [examples](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/examples/)
 (3D volcanoes, Unzen, Marmousi2, Bayesian inversion), the transition from OpenSWPC, validation and
-[performance](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/performance/): on the Marmousi2 benchmark a laptop GPU is 3×
-faster than OpenSWPC on 12 MPI ranks, and a misfit gradient is 13× faster than with SeismicWaves.jl.
+[performance](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/performance/): on the Marmousi2 benchmark a laptop GPU is 6×
+faster than OpenSWPC on 12 MPI ranks, and a misfit gradient is 19× faster than with SeismicWaves.jl (comparisons with
+JUDI.jl/Devito included).
 
 ## References and license
 
