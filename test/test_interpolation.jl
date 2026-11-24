@@ -15,6 +15,11 @@
     @test_throws ErrorException simulate(hom; dt=DT, nt=10, sources=src(0.0), stations=[Station("air", 0.0, 0.0, 0.4)],
                                          interpolation=:sinc, verbose=false)
     @test_throws ErrorException simulate(hom; dt=DT, nt=10, sources=src(0.0), interpolation=:linear, verbose=false)
+    # explosion and station in water: no shear stress points, the shear stress is zero
+    water = CartData(m0.x.val, m0.y.val, m0.z.val, merge(f, (; vs=zero(f.vs))))
+    rw = simulate(water; dt=DT, nt=100, sources=MomentTensorSource(x0, 0.0, z0, 1e15, (1, 0, 1, 0, 0, 0); trise=0.3),
+                  stations=[Station("W", x0 + 0.5, 0.0, z0)], interpolation=:sinc, verbose=false)
+    @test maximum(abs, rw.v) > 0 && all(iszero, rw.stress[:, 3, :])
 
     # gradients: model, source location (exact with :sinc), cells below a station on the free surface
     m = test_model(:psv)

@@ -2,7 +2,8 @@
 # a cut-off radius of 4 grid points and the Kaiser shape 6.31 (as in SeismicWaves.jl). Every quantity is spread onto (or
 # sampled from) its own staggered grid. Points where the quantity is not defined are dropped and the other weights scaled to
 # the same sum: in the air (velocities, normal stresses) and where a cell of a shear stress point has μ = 0 (air, water),
-# as a stress injected there would never relax.
+# as a stress injected there would never relax. With no shear stress point left (a source or station in water), the shear
+# stress is zero: nothing is injected or recorded.
 
 const SINC_R, SINC_B = 4, 6.31
 
@@ -54,7 +55,8 @@ function sinc_points(g::Grid{N}, med, pos::NTuple{N,Float64}, cells, shear::Bool
         c = cidx(p)
         w(J) = prod(a -> kaiser_sinc(J[a] - c[a]), 1:N)
         S0, S = sum(w, R), sum(w, pts; init=0.0)
-        S == 0 && error("a source or station at $pos (internal coordinates) lies in the air, or in water for a shear component")
+        S == 0 && shear && return Float64[]          # shear stress in water: zero (not recorded, nothing injected)
+        S == 0 && error("a source or station at $pos (internal coordinates) lies in the air")
         return [w(J) * S0 / S for J in pts]
     end
     h = 1e-6 .* g.d
