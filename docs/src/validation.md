@@ -54,6 +54,20 @@ The SeismicWavePC.jl seismograms barely change between 5 m and 1.25 m, whereas t
 with every refinement: JUDI.jl converges to the same solution, but more slowly on this model, as expected when the material
 is defined at the grid nodes (the sea floor lies between two nodes) rather than in the cells.
 
+## Point force under a free surface: comparison with SPECFEM2D
+
+An independent benchmark from [flexOPT.jl](https://github.com/seismobassoon/flexOPT.jl/tree/main/application/forBoris): a
+vertical point force (Ricker wavelet, 0.65 Hz) 20 km deep in a homogeneous half-space (vp = 6 km/s, vs = 3.46 km/s,
+ρ = 2700 kg/m³) with a flat free surface, receivers 10 km deep at 0–20 km horizontal distance from the source, 500 m grid.
+Vertical displacement, each trace normalized to its peak, against SPECFEM2D (spectral elements), the optimal operators OPT3
+and OPT5 of flexOPT.jl, and two 3-point finite-difference schemes (FD3, convFD3):
+
+![Point force under a free surface: SeismicWavePC.jl, SPECFEM2D and flexOPT.jl](assets/point_force_codes.png)
+
+SeismicWavePC.jl (dotted) follows SPECFEM2D (black) in the direct P and S waves and in the waves reflected at the free
+surface. The other codes smooth the force with a Gaussian (σ = 500 m), SeismicWavePC.jl uses a point force; its traces
+are aligned in time by cross-correlation (the delay of its Ricker wavelet differs).
+
 ## Teleseismic plane waves
 
 `TeleseismicWave` (a plane wave from below, injected along a box) against the analytical solution of a homogeneous
