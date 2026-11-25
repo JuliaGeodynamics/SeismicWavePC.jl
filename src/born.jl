@@ -70,11 +70,12 @@ Jacobian of the seismograms with respect to the model), and the seismograms `bac
 
 It is the exact derivative of the discrete simulation, the transpose of the gradient of [`misfit_gradient`](@ref): for the
 L2 misfit, `misfit_gradient` gives Jᵀ r for the residuals r, and ⟨J δm, r⟩ = ⟨δm, Jᵀ r⟩. Together they give Gauss-Newton
-Hessian-vector products JᵀJ δm, and least-squares migration. It costs about 2-3 forward simulations. Not (yet) for teleseismic
-waves (plane waves are not differentiated, as in `misfit_gradient`) and MPI.
+Hessian-vector products JᵀJ δm, and least-squares migration. It costs about 2.5 forward simulations on GPUs and 4.5 on CPU
+threads, on one or several MPI processes (`nproc`). Not (yet) for teleseismic waves (plane waves are not differentiated, as in
+`misfit_gradient`).
 """
 function born(model::CartData, δm::CartData; T::Type{<:AbstractFloat}=Float32, kwargs...)
-    bad = intersect(keys(kwargs), (:snapshots, :callback, :checkpoint, :restart, :driver, :nproc))
+    bad = intersect(keys(kwargs), (:snapshots, :callback, :checkpoint, :restart, :driver))
     isempty(bad) || error("born does not take the keywords $(join(bad, ", "))")
     size(δm) == size(model) || error("δm must be on the grid of the model (size $(size(model)), got $(size(δm)))")
     keys(δm.fields) ⊆ (:rho, :vp, :vs, :Qp, :Qs) || error("δm may have the fields rho, vp, vs, Qp, Qs, got $(keys(δm.fields))")
@@ -109,14 +110,14 @@ function medium_perturbation(s, δm)
 end
 
 function (d::BornDriver)(s)
-    s.parallel && error("born: MPI (nproc > 1) is not supported yet")
     s.tw === nothing || error("born: teleseismic waves are not supported yet")
     (; F, M, St, rec, acc, regions, backend, nt, nc, scale) = s
     FT = typeof(value(zero(s.T)))
     δM = medium_perturbation(s, d.δm)
-    # the medium with its perturbation as tangent (the arrays of this rank: the whole padded grid)
+    # the medium with its perturbation as tangent (the part of the padded global grid on this rank)
+    R = ntuple(a -> s.off[a]+1:s.off[a]+s.nl[a], length(s.nl))
     function perturbed(A, δ)
-        B = Tan{FT}.(value.(Array(A)), FT.(δ))
+        B = Tan{FT}.(value.(Array(A)), FT.(δ[R...]))
         return copyto!(similar(A), B)
     end
     medium = (:rho, :lam, :mu, :taup, :taus)
@@ -129,13 +130,14 @@ function (d::BornDriver)(s)
         forward_step!(F, Mp, Src, FSrc, Stp, rec, acc, reg, it, p, true)
     end
     KernelAbstractions.synchronize(backend)
-    R = Array(rec)
-    ns = (size(R, 2) - 2nc) ÷ 2
+    rec_host = Array(rec)
+    ns = (size(rec_host, 2) - 2nc) ÷ 2
     tensor = s.mode === :psv ? (:xx, :zz, :xz) : s.mode === :sh ? (:yz, :xy) : (:xx, :yy, :zz, :yz, :xz, :xy)
     t = collect(s.tbeg .+ (0:s.nrec-1) .* (s.record_every * s.dt))
     function seismograms(part)
         traces = zeros(s.nrec, 2nc + 2ns, length(s.stations))
-        traces[:, :, s.own] .= part.(R[:, :, 1:s.nown])
+        traces[:, :, s.own] .= part.(rec_host[:, :, 1:s.nown])
+        s.parallel && MPI.Allreduce!(traces, +, MPI.COMM_WORLD)
         p(r, f) = traces[:, r, :] .* (scale * f)
         return Seismograms(t, p(1:nc, 1), p(nc+1:2nc, 1), p(2nc+1:2nc+ns, 1e6), p(2nc+ns+1:2nc+2ns, 1e-3), s.stations,
                            s.components, tensor, nothing)

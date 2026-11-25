@@ -1,5 +1,5 @@
 # Started by test_mpi.jl with 4 MPI processes. Exits with an error if a parallel run differs from the serial one.
-# The argument selects a part (forward, gradient, other; default all): test_mpi.jl starts each part in fresh processes, so that
+# The argument selects a part (forward, gradient, born, other; default all): test_mpi.jl starts each part in fresh processes, so that
 # the code compiled for one part does not stay in memory for the next (4 processes compiling everything need ~15 GB).
 using MPI
 MPI.Init()
@@ -56,6 +56,23 @@ for (mode, nproc, stretched) in ((:psv, 4, false), (:p3d, (2, 2), false), (:psv,
     err = maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs, :Qp, :Qs))
     rank == 0 && println("MPI gradient $mode nproc=$nproc$(stretched ? " stretched" : ""): misfit $(J2 / J1 - 1), gradient difference $err")
     (abs(J2 / J1 - 1) < 1e-12 && err < 1e-10) || error("MPI gradient differs for $mode on rank $rank")
+end
+MPI.Barrier(MPI.COMM_WORLD)
+end
+
+if runs("born")
+# Born modelling: the medium perturbation on every rank, the tangents through the halo exchange
+for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
+    m = test_model(mode)
+    X, Y, Z = m.x.val, m.y.val, m.z.val
+    b = @. exp(-((X - 0.3)^2 + Y^2 + (Z + 1.0)^2) / 0.4^2) * (m.fields.vp > 0)
+    δm = CartData(X, Y, Z, (; rho=200 .* b, vs=0.2 .* b, Qs=5 .* b))
+    kw = (; dt=DT, nt=150, sources=test_source(), stations=test_stations(mode), T=Float64)
+    d1, δ1 = born(m, δm; kw...)
+    d2, δ2 = born(m, δm; kw..., nproc)
+    e = (maximum(abs, d1.v .- d2.v) / maximum(abs, d1.v), maximum(abs, δ1.v .- δ2.v) / maximum(abs, δ1.v))
+    rank == 0 && println("MPI born $mode nproc=$nproc: background, scattered: $e")
+    all(<(1e-12), e) || error("MPI Born modelling differs for $mode on rank $rank")
 end
 MPI.Barrier(MPI.COMM_WORLD)
 end

@@ -265,7 +265,7 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
         res = driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode, sinc), regions, nt, nosource=isempty(S),
                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
                         components, med, m, g, na, fq_ref, rho_unit=density_scale(density_unit, maximum(model_arrays(model).rho)),
-                        mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl, sources, moments, forces, M0, stf,
+                        mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl, off, sources, moments, forces, M0, stf,
                         iS, iF, sinc, volume=map(volume, moments), fvolume=map(volume, forces), tw, rows))
         parallel && IGG.finalize_global_grid(finalize_MPI=false)
         return res

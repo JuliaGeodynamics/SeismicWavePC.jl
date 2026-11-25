@@ -47,5 +47,5 @@ end
     m3 = test_model(:p3d)
     a, b = dot_test(m3, test_perturbation(m3), (; kw..., nt=150, stations=test_stations(:p3d)))
     @test a ≈ b rtol = 1e-10
-    @test_throws "nproc" born(m, δm; kw..., nproc=2)
+    @test_throws "callback" born(m, δm; kw..., callback=(w, t) -> nothing)   # MPI: test_mpi.jl
 end

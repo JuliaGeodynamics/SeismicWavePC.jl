@@ -70,5 +70,5 @@ background, scattered = born(model, δm; dt, nt, sources, stations)
   the data.
 - **How:** the simulation runs with numbers that carry a tangent (forward-mode differentiation through the kernels): the
   medium holds the perturbation, and the tangent of the wavefield is the scattered wavefield.
-- **Cost:** about 2.5 forward simulations on GPUs, 4.5 on CPU threads. All keywords of `simulate` work, except MPI and
-  teleseismic waves (for now).
+- **Cost:** about 2.5 forward simulations on GPUs, 4.5 on CPU threads. All keywords of `simulate` work, including MPI
+  (`nproc`), except teleseismic waves (for now).
