@@ -60,8 +60,8 @@ end
 result = simulate(model; nproc=(2, 2), dt, nt, sources, stations)
 ```
 Sources are `MomentTensorSource`s and `ForceSource`s at their cells (`interpolation = :cell`); plane and teleseismic waves,
-`interpolation = :sinc` and [`misfit_gradient`](@ref) need a `CartData`. The wavefield at the end is not collected, unless
-`simulate` is called with `wavefield = true`.
+`interpolation = :sinc`, [`misfit_gradient`](@ref) and [`born`](@ref) need a `CartData`. The wavefield at the end is not
+collected, unless `simulate` is called with `wavefield = true`.
 """
 struct DistributedModel{F}
     f::F

@@ -67,7 +67,7 @@ The function returns a `NamedTuple` of arrays of size `(length(ix), length(iy), 
 a `CartData` model. The results are those of the same model given as a `CartData`. The memory a process needs for the setup
 then grows with its subdomain, not with the model. Moment tensor and force sources at their cells (`interpolation = :cell`),
 stations, snapshots, checkpoints, GPUs and stretched grids work as usual; plane and teleseismic waves, sources between grid
-points and misfit gradients need a `CartData`. The wavefield at the end is not collected (`wavefield = true` does).
+points, misfit gradients and Born modelling need a `CartData`. The wavefield at the end is not collected (`wavefield = true` does).
 
 ## Geographic coordinates
 

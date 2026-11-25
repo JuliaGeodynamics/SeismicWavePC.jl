@@ -135,7 +135,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     isempty(sources) && error("at least one source is required")
     distributed = model isa DistributedModel        # every rank has the medium of its own subdomain only
     distributed && !(interp === :cell && driver === nothing && all(s -> s isa Union{MomentTensorSource,ForceSource}, sources)) &&
-        error("a DistributedModel takes MomentTensorSource and ForceSource with interpolation = :cell; plane and teleseismic waves, interpolation = :sinc and misfit gradients need a CartData")
+        error("a DistributedModel takes MomentTensorSource and ForceSource with interpolation = :cell; plane and teleseismic waves, interpolation = :sinc, misfit gradients and Born modelling need a CartData")
     m = whole_model(model, density_unit)
     axes_ = model_axes(model)
     g = Grid(axes_, Val(N))
@@ -258,7 +258,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
         res = driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode, sinc), regions, nt, nosource=isempty(S),
                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
                         components, med, m, g, na, fq_ref, rho_unit=density_factor(density_unit),
-                        mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl, sources, moments, forces, M0, stf,
+                        mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl, off, sources, moments, forces, M0, stf,
                         iS, iF, sinc, volume=map(volume, moments), fvolume=map(volume, forces), tw, rows))
         parallel && IGG.finalize_global_grid(finalize_MPI=false)
         return res

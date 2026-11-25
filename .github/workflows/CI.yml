@@ -24,6 +24,15 @@ jobs:
         with:
           version: ${{ matrix.version }}
       - uses: julia-actions/cache@v2
+      - name: Swap file (Linux runners have 16 GB; the MPI test runs 4 Julia processes of ~3 GB each)
+        if: runner.os == 'Linux'
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 12G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
         with:
