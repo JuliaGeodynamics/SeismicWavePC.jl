@@ -48,6 +48,7 @@ seismogram
 
 ```@docs
 misfit_gradient
+born
 L2Misfit
 TravelTimeMisfit
 ModelParameters

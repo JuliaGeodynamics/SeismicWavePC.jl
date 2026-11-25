@@ -31,7 +31,8 @@ gradients for full-waveform inversion. It started as a Julia port of [OpenSWPC](
   ([MAGEMin](https://github.com/ComputationalThermodynamics/MAGEMin_C.jl)), random media.
 - **Full-waveform inversion (FWI):** exact adjoint-state gradients of least-squares, travel-time or custom misfits with
   respect to the model (`rho`, `vp`, `vs`, `Qp`, `Qs`) and the sources, for several shots, at the cost of about 5
-  simulations, on CPUs, GPUs and MPI; reverse-time migration (RTM) with illumination compensation.
+  simulations, on CPUs, GPUs and MPI; reverse-time migration (RTM) with illumination compensation; Born modelling
+  (the exact Jacobian J δm, the transpose of the gradient) for Gauss-Newton and least-squares migration.
 - **Deterministic and Bayesian FWI** with Optim.jl (L-BFGS), Turing.jl and AdvancedHMC.jl (Hamiltonian Monte Carlo), and
   other Julia packages.
 - **Live output:** plot or film the waves while the simulation runs; SAC and netCDF files for OpenSWPC users.

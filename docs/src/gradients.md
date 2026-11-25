@@ -51,3 +51,24 @@ sgrad[1].M, sgrad[1].t0                                                 # ∂J/�
 
 
 See [`misfit_gradient`](@ref), [`L2Misfit`](@ref) and [`TravelTimeMisfit`](@ref) for all options.
+
+## Born modelling (the Jacobian)
+
+[`born`](@ref) computes the seismograms of a model perturbation `δm` to first order, J δm (J: the Jacobian of the
+seismograms with respect to the model), together with the seismograms of the model itself, in one simulation:
+
+```julia
+δm = CartData(model.x.val, model.y.val, model.z.val, (; vp=0.1 .* blob))   # any of rho, vp, vs, Qp, Qs
+background, scattered = born(model, δm; dt, nt, sources, stations)
+```
+
+- **Exactness:** it is the exact linearization of the discrete simulation (free surface, PML, attenuation), and the
+  transpose of the gradient of `misfit_gradient`: ⟨J δm, r⟩ = ⟨δm, Jᵀ r⟩ to rounding errors (10⁻¹⁵ with `T = Float64`),
+  for P-SV, SH and 3D, moment tensors and forces, at cells or between them.
+- **Use:** with `misfit_gradient` (Jᵀ r) it gives Gauss-Newton Hessian-vector products JᵀJ δm (Newton-type inversions,
+  uncertainties of the Laplace approximation) and least-squares migration; alone, it shows how a model change shows up in
+  the data.
+- **How:** the simulation runs with numbers that carry a tangent (forward-mode differentiation through the kernels): the
+  medium holds the perturbation, and the tangent of the wavefield is the scattered wavefield.
+- **Cost:** about 2.5 forward simulations on GPUs, 4.5 on CPU threads. All keywords of `simulate` work, except MPI and
+  teleseismic waves (for now).
