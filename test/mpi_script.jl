@@ -25,22 +25,48 @@ for (mode, nproc, sources) in ((:p3d, (2, 2), test_source()), (:psv, 4, test_sou
 end
 MPI.Barrier(MPI.COMM_WORLD)
 
+# a DistributedModel: every rank builds the model of its own subdomain only, and gets the results of the whole model
+function distributed(model, asked=Ref{Any}(nothing))
+    ax = SeismicWavePC.model_axes(model)
+    return DistributedModel(ax.x, ax.y, ax.z) do ix, iy
+        asked[] = (ix, iy)
+        map(A -> A[ix, iy, :], model.fields)
+    end
+end
+for (mode, nproc) in ((:p3d, (2, 2)), (:psv, 4), (:sh, 4))
+    model, asked = test_model(mode), Ref{Any}(nothing)
+    stations = [test_stations(mode); Station("S", 1.4, 0.2, 0.0; surface=true)]
+    kw = (; dt=DT, nt=200, sources=[test_source(), ForceSource(0.3, -0.2, -0.6; fz=1e12, trise=0.3)], stations,
+          wave=mode === :p3d ? :psv : mode, verbose=false)
+    serial = simulate(model; kw...)
+    parallel = simulate(distributed(model, asked); nproc, kw..., wavefield=true)
+    part = prod(length, asked[]) / prod(size(model)[1:2])
+    part < 0.5 || error("rank $rank built $(round(100part))% of the columns of the model")
+    if rank == 0
+        err = maximum(abs, serial.v .- parallel.v) / maximum(abs, serial.v)
+        errV = maximum(i -> maximum(abs, serial.wavefield.fields.V[i] .- parallel.wavefield.fields.V[i]), 1:3)
+        println("MPI DistributedModel $mode nproc=$nproc: seismogram difference $err, wavefield difference $errV, columns built per rank $(round(100part))%")
+        (err < 1e-6 && errV < 1e-12 * maximum(abs, serial.wavefield.fields.V[1]) + 1e-20) || error("MPI result with a DistributedModel differs for $mode")
+    end
+end
+MPI.Barrier(MPI.COMM_WORLD)
+
 # snapshot planes: each rank fills its part, rank 0 writes; the files must equal those of a serial run
 using NCDatasets
-dirs = (mktempdir(), mktempdir())
-for (dir, nproc) in zip(dirs, (1, (2, 2)))
-    simulate(test_model(:p3d); dt=DT, nt=101, sources=test_source(), nproc, snapshot_every=50, snapshot_dir=dir, verbose=false,
+dirs = (mktempdir(), mktempdir(), mktempdir())
+for (dir, nproc, model) in zip(dirs, (1, (2, 2), (2, 2)), (test_model(:p3d), test_model(:p3d), distributed(test_model(:p3d))))
+    simulate(model; dt=DT, nt=101, sources=test_source(), nproc, snapshot_every=50, snapshot_dir=dir, verbose=false,
              snapshots=Snapshots(xy=-1.0, xz=0.1, fs=true, quantities=(:v, :u, :ps)))
 end
 if rank == 0
-    for f in readdir(dirs[1])
-        a, b = NCDataset(joinpath(dirs[1], f)), NCDataset(joinpath(dirs[2], f))
+    for dir in dirs[2:3], f in readdir(dirs[1])
+        a, b = NCDataset(joinpath(dirs[1], f)), NCDataset(joinpath(dir, f))
         for v in keys(a)
             a[v][:] == b[v][:] || error("MPI snapshot $f, $v differs from the serial one")
         end
         close(a); close(b)
     end
-    println("MPI snapshots: $(length(readdir(dirs[1]))) files identical to the serial run")
+    println("MPI snapshots: $(length(readdir(dirs[1]))) files identical to the serial run (CartData and DistributedModel)")
 end
 MPI.Barrier(MPI.COMM_WORLD)
 end

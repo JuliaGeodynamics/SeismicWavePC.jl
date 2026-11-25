@@ -23,6 +23,7 @@ Snapshots
 ## Models
 
 ```@docs
+DistributedModel
 random_medium
 perturb
 read_random_medium

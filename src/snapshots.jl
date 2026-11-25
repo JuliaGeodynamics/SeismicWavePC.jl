@@ -52,7 +52,7 @@ end
 Set up the planes of `s` on this rank: the points (global and local cells), device buffers and files (rank 0).
 Returns a vector of named tuples, one per plane.
 """
-function setup_planes(s::Snapshots, ::Val{mode}, g::Grid{N}, med, off, nl, dev, backend, ::Type{T}, dir, me) where {mode,N,T}
+function setup_planes(s::Snapshots, ::Val{mode}, g::Grid{N}, med, off, nl, dev, backend, ::Type{T}, dir, me, parallel) where {mode,N,T}
     mode !== :p3d && (s.xy !== nothing || s.yz !== nothing || s.ob || s.fs) && error("2D snapshots: only xz")
     mode === :sh && :ps in s.quantities && error("SH snapshots have no :ps")
     solver = mode === :p3d ? "3d" : string(mode)
@@ -68,7 +68,8 @@ function setup_planes(s::Snapshots, ::Val{mode}, g::Grid{N}, med, off, nl, dev, 
         s.xy === nothing || (k = cell_index(g, 3, -s.xy) - H; push!(planes, (:xy, [(i, j, k) for i in xi, j in yi][:], (ax(1, xi), ax(2, yi)))))
         s.xz === nothing || (j = cell_index(g, 2, s.xz) - H; push!(planes, (:xz, [(i, j, k) for i in xi, k in zi][:], (ax(1, xi), ax(3, zi)))))
         s.yz === nothing || (i = cell_index(g, 1, s.yz) - H; push!(planes, (:yz, [(i, j, k) for j in yi, k in zi][:], (ax(2, yi), ax(3, zi)))))
-        surf(kk) = [(i, j, kk[i+H, j+H] + 1) for i in xi, j in yi][:]
+        # (of a DistributedModel a rank knows the surface of the columns around it only: it owns no points of the others)
+        surf(kk) = [(i, j, held(kk, i + H, j + H) ? kk[i+H, j+H] + 1 : 1) for i in xi, j in yi][:]
         s.fs && push!(planes, (:fs, surf(med.kfs), (ax(1, xi), ax(2, yi))))
         s.ob && push!(planes, (:ob, surf(med.kob), (ax(1, xi), ax(2, yi))))
     else
@@ -86,8 +87,8 @@ function setup_planes(s::Snapshots, ::Val{mode}, g::Grid{N}, med, off, nl, dev, 
         pts = NamedTuple{names}(ntuple(a -> dev(Int32[G[n][a] - off[a] for n in own]), N))
         m = max(length(own), 1)
         files = Dict{Symbol,String}()
+        medium = plane_medium(med.rho, med, G, own, parallel, me)
         if me == 0
-            medium = (rho=[med.rho[c...] for c in G], lambda=[med.lam[c...] for c in G], mu=[med.mu[c...] for c in G])
             shape = (length(axes[1][2]), length(axes[2][2]))
             for q in s.quantities
                 vars, unit, _ = fields[q]
@@ -100,6 +101,21 @@ function setup_planes(s::Snapshots, ::Val{mode}, g::Grid{N}, med, off, nl, dev, 
            B=KernelAbstractions.zeros(backend, T, m, nq), U=KernelAbstractions.zeros(backend, T, m, nc),
            PK=KernelAbstractions.zeros(backend, T, m, 3))
     end
+end
+
+"Medium `(rho, lambda, mu)` at the plane points `G`, on rank 0 (`nothing` on the others)."
+plane_medium(::Array, med, G, own, parallel, me) =
+    me == 0 ? (rho=[med.rho[c...] for c in G], lambda=[med.lam[c...] for c in G], mu=[med.mu[c...] for c in G]) : nothing
+function plane_medium(::Window, med, G, own, parallel, me)      # a DistributedModel: collected from the ranks that own the points
+    fields = map((med.rho, med.lam, med.mu)) do A
+        v = zeros(length(G))
+        for n in own
+            v[n] = A[G[n]...]
+        end
+        parallel && MPI.Allreduce!(v, +, MPI.COMM_WORLD)
+        v
+    end
+    return me == 0 ? NamedTuple{(:rho, :lambda, :mu)}(fields) : nothing
 end
 
 "Collect the snapshot of every plane on rank 0 and append it to the files (number `isnap`, time `t`)."

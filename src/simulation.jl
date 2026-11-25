@@ -74,7 +74,7 @@ function igg_device(backend)
 end
 
 """
-    result = simulate(model::CartData; dt, nt, sources, kwargs...)
+    result = simulate(model; dt, nt, sources, kwargs...)
 
 Run a visco-elastic wave propagation simulation (OpenSWPC algorithm) on the velocity model `model` and return
 [`Seismograms`](@ref).
@@ -82,7 +82,8 @@ Run a visco-elastic wave propagation simulation (OpenSWPC algorithm) on the velo
 `model` is a `CartData` (coordinates in km, z up; constant spacing in x and y, constant or smoothly varying in z) with
 fields `rho` [kg/m³], `vp`, `vs` [km/s] and optionally `Qp`, `Qs` (default: no attenuation). Cells with `vp = vs = 0` are
 air: the free surface and topography follow from that. Cells with `vs = 0` and `vp > 0` are water. A `CartData` of size
-`(nx, 1, nz)` gives a 2D simulation in the x-z plane.
+`(nx, 1, nz)` gives a 2D simulation in the x-z plane. A model too large to hold as a whole is given as a
+[`DistributedModel`](@ref), of which every MPI process builds only its own subdomain.
 
 Keyword arguments
 - `dt`, `nt`: time step [s] and number of steps; `tbeg = 0.0` is the start time.
@@ -105,9 +106,11 @@ Keyword arguments
 - `backend = CPU()`: KernelAbstractions backend, e.g. `CUDABackend()`, `ROCBackend()`, `MetalBackend()`.
 - `T = Float32`: floating point type of the wavefield.
 - `nproc = 1`: MPI processes in x (2D), or `(npx, npy)` (3D); start julia with `mpiexec -n npx*npy`.
+- `wavefield = true`: return the velocity field at the end (collected on rank 0) in the result; `false` by default for a
+  `DistributedModel`.
 - `verbose = true`: print a summary and the progress (on rank 0).
 """
-function simulate(model::CartData; wave=:psv, interpolation=:cell, kwargs...)
+function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolation=:cell, kwargs...)
     mode = size(model)[2] == 1 ? wave : :p3d
     mode in (:psv, :sh, :p3d) || error("wave must be :psv or :sh, got :$wave")
     interpolation in (:cell, :sinc) || error("interpolation must be :cell or :sinc, got :$interpolation")
@@ -115,42 +118,30 @@ function simulate(model::CartData; wave=:psv, interpolation=:cell, kwargs...)
 end
 
 "Does the model have attenuation (finite `Qp` or `Qs` anywhere)? Without, the memory variables are left out."
-has_attenuation(model) = any(f -> haskey(model.fields, f) && any(isfinite, model.fields[f]), (:Qp, :Qs))
+has_attenuation(model::CartData) = any(f -> haskey(model.fields, f) && any(isfinite, model.fields[f]), (:Qp, :Qs))
+has_attenuation(model::DistributedModel) = model.attenuation
 
 # Function barrier on the solver type: from here on the dimension N is known to the compiler.
-function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{attenuation}=Val(true); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
+function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{attenuation}=Val(true); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
                   absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
-                  snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true) where {mode,interp,attenuation,FT}
+                  snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true,
+                  wavefield=model isa CartData) where {mode,interp,attenuation,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave} ? [sources] : collect(sources)
     all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave}, sources) ||
         error("sources must be MomentTensorSource, ForceSource, PlaneWave or TeleseismicWave")
     stations = collect(Station, stations)
     isempty(sources) && error("at least one source is required")
-    m = model_arrays(model)
-    m = merge(m, (; rho=m.rho ./ density_scale(density_unit, maximum(m.rho))))     # internal unit: g/cm³
-    g = Grid(m, Val(N))
+    distributed = model isa DistributedModel        # every rank has the medium of its own subdomain only
+    distributed && !(interp === :cell && driver === nothing && all(s -> s isa Union{MomentTensorSource,ForceSource}, sources)) &&
+        error("a DistributedModel takes MomentTensorSource and ForceSource with interpolation = :cell; plane and teleseismic waves, interpolation = :sinc, misfit gradients and Born modelling need a CartData")
+    m = whole_model(model, density_unit)
+    axes_ = model_axes(model)
+    g = Grid(axes_, Val(N))
     all(ntuple(a -> g.n[a] > (a < N ? 2na : na), N)) || error("the model ($(join(g.n, "×")) cells) must be larger than the absorbing layers (na = $na cells)")
-    med = setup_medium(m, g, na, fq_min, fq_max, fq_ref)
-    courant = courant_number(med, g, dt)
-    courant < 6 / 7 || error("unstable time step: Courant number $courant ≥ 6/7, use dt < $(dt * 6 / 7 / courant)")
-
-    # domain decomposition in x (and y); every rank owns n/dims cells plus H ghost cells on each side
-    dims = ntuple(a -> a < N && a <= length(nproc) ? nproc[a] : 1, N)
-    all(g.n .% dims .== 0) || error("cells per direction $(g.n) must be divisible by nproc $dims")
-    nl = g.n .÷ dims .+ 2H
-    parallel = prod(dims) > 1
-    me, coords = 0, ntuple(_ -> 0, N)
-    if parallel
-        me, _, _, c3 = IGG.init_global_grid(nl..., ntuple(_ -> 1, 3 - N)...; dimx=dims[1], dimy=N == 3 ? dims[2] : 1, dimz=1,
-                                            overlaps=(2H, 2H, 2H), halowidths=(H, H, H), init_MPI=!MPI.Initialized(),
-                                            device_type=igg_device(backend), quiet=true)
-        coords = ntuple(a -> Int(c3[a]), N)
-    end
-    nb = ntuple(a -> parallel ? (IGG.neighbor(1, a), IGG.neighbor(2, a)) : (-1, -1), N - 1)   # MPI neighbours (left, right)
-    off = coords .* (nl .- 2H)
-    R = ntuple(a -> off[a]+1:off[a]+nl[a], N)
+    decomposition, med, courant = decomposed_medium(model, m, g, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt)
+    (; dims, nl, parallel, me, nb, off, R) = decomposition
     dev(A) = (B = KernelAbstractions.allocate(backend, eltype(A), size(A)); copyto!(B, A); B)
 
     # medium on this rank
@@ -164,7 +155,7 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
                  fs_top=col(med.fs_top), fs_bot=col(med.fs_bot), ob_top=col(med.ob_top), ob_bot=col(med.ob_bot)), G)
     # coefficients of the differences: constant along x (and y); per layer in depth, for fields at cell centres and at faces
     c = (ntuple(a -> (FT(9 / 8 / g.d[a]), FT(1 / 24 / g.d[a]), FT(1 / g.d[a])), N - 1)..., map(t -> map(dev, t), depth_coefficients(g, FT))...)
-    attenuation || !(any(!iszero, med.taup) || any(!iszero, med.taus)) || error("the model has attenuation (finite Qp or Qs): use Val(true)")
+    attenuation || !med.attenuated || error("the model has attenuation (finite Qp or Qs): use Val(true)")
     vc = attenuation ? memory_coefficients(med.ts, dt, FT) : nothing         # nothing: elastic, no memory variables
     ijk = N == 3 ? (:i, :j, :k) : (:i, :k)
 
@@ -172,9 +163,9 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
     # the total moment and force (forces carry a factor 10³ for the units, as in OpenSWPC)
     position(x, y, z) = cell_position(g, x, y, z)
     inside(I) = all(H + 1 .<= I .<= g.n .+ H)
-    active(s) = (I = position(s.x, s.y, s.z); inside(I) && !(med.mu[I...] == 0 && med.lam[I...] == 0))
-    moments = filter(active, MomentTensorSource[s for s in sources if s isa MomentTensorSource])   # as OpenSWPC, ignore sources
-    forces = filter(active, ForceSource[s for s in sources if s isa ForceSource])                  # outside the model
+    active = active_sources(sources, g, med, distributed && parallel)                             # as OpenSWPC, ignore sources
+    moments = MomentTensorSource[s for (s, a) in zip(sources, active) if a && s isa MomentTensorSource]   # outside the model
+    forces = ForceSource[s for (s, a) in zip(sources, active) if a && s isa ForceSource]
     planewaves = PlaneWave[s for s in sources if s isa PlaneWave]
     teleseismic = TeleseismicWave[s for s in sources if s isa TeleseismicWave]
     length(teleseismic) <= 1 || error("one TeleseismicWave per simulation")
@@ -209,7 +200,9 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
     # stations owned by this rank
     function station_cell(st)
         I = position(st.x, st.y, st.z)
-        st.surface && all(H + 1 .<= Base.front(I) .<= Base.front(g.n) .+ H) && (I = (Base.front(I)..., med.kfs[Base.front(I)...] + 1 + H))
+        # (of a DistributedModel only the ranks around a column know its surface, the owner of the station among them)
+        st.surface && all(H + 1 .<= Base.front(I) .<= Base.front(g.n) .+ H) &&
+            (I = (Base.front(I)..., held(med.kfs, Base.front(I)...) ? med.kfs[Base.front(I)...] + 1 + H : H + 1))
         inside(I) || error("station $(st.name) is outside the model")
         return I
     end
@@ -232,7 +225,7 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
                 (; Rxx=zr(), Ryy=zr(), Rzz=zr(), Ryz=zr(), Rxz=zr(), Rxy=zr())     # one per stress component
     F = attenuation ? merge(F0, memvars()) : F0
     scale = M0 * (N == 3 ? 1e-15 : 1e-12)     # wavefield units -> m/s (OpenSWPC convention)
-    out = Output{N,mode}(model, size(m.rho), nl, dims, parallel, me, scale)
+    out = Output{N,mode,typeof(model)}(model, map(length, (axes_.x, axes_.y, axes_.z)), nl, dims, parallel, me, scale)
     # a teleseismic wave: tables of the incoming field and the strips of corrected cells along its box
     tw = isempty(teleseismic) ? nothing :
          (injection_setup(teleseismic[1], Val(mode), med, g, na, off, nl, dev, stf, scale, tbeg, dt, nt, FT)..., injection_kernels(Val(mode)))
@@ -264,13 +257,13 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
         rows = plain_blocks(regions[1], med, off; split)
         res = driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode, sinc), regions, nt, nosource=isempty(S),
                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
-                        components, med, m, g, na, fq_ref, rho_unit=density_scale(density_unit, maximum(model_arrays(model).rho)),
+                        components, med, m, g, na, fq_ref, rho_unit=density_factor(density_unit),
                         mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl, off, sources, moments, forces, M0, stf,
                         iS, iF, sinc, volume=map(volume, moments), fvolume=map(volume, forces), tw, rows))
         parallel && IGG.finalize_global_grid(finalize_MPI=false)
         return res
     end
-    planes = snapshots === nothing ? nothing : setup_planes(snapshots, Val(mode), g, med, off, nl, dev, backend, FT, snapshot_dir, me)
+    planes = snapshots === nothing ? nothing : setup_planes(snapshots, Val(mode), g, med, off, nl, dev, backend, FT, snapshot_dir, me, parallel)
     movie = (snapshot_every > 0 && me == 0 && callback === nothing && snapshots === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     wall = time()
     head = (F, M, Src, FSrc, St, rec, acc, c, vc, FT(dt), kernels(mode, sinc))
@@ -292,11 +285,92 @@ function simulate(model::CartData, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{
 
     traces = zeros(nrec, 2nc + 2ns, length(stations))
     traces[:, :, own] .= Array(rec)[:, :, 1:length(own)]
-    wavefield = velocity(out, F)
+    final = wavefield ? velocity(out, F) : nothing
     parallel && (MPI.Allreduce!(traces, +, MPI.COMM_WORLD); IGG.finalize_global_grid(finalize_MPI=false))
     part(r, f) = traces[:, r, :] .* (scale * f)  # wavefield units -> m/s, m, Pa, strain (OpenSWPC)
     return Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), part(1:nc, 1), part(nc+1:2nc, 1),
-                       part(2nc+1:2nc+ns, 1e6), part(2nc+ns+1:2nc+2ns, 1e-3), stations, components, tensor_components, wavefield)
+                       part(2nc+1:2nc+ns, 1e6), part(2nc+ns+1:2nc+2ns, 1e-3), stations, components, tensor_components, final)
+end
+
+"The arrays of a whole model (density in g/cm³, the internal unit); `nothing` for a model that no rank holds as a whole."
+whole_model(model::CartData, density_unit) = (m = model_arrays(model); merge(m, (; rho=m.rho ./ density_scale(density_unit, maximum(m.rho)))))
+whole_model(::DistributedModel, density_unit) = nothing
+
+"""
+Domain decomposition in x (and y) with ImplicitGlobalGrid: every rank owns `n / dims` cells plus `H` ghost cells on each side
+(`nl` cells; `R` are their indices in the padded global grid, `off` its offset, `nb` the MPI neighbours left and right).
+"""
+function decompose(g::Grid{N}, nproc, backend) where {N}
+    dims = ntuple(a -> a < N && a <= length(nproc) ? nproc[a] : 1, N)
+    all(g.n .% dims .== 0) || error("cells per direction $(g.n) must be divisible by nproc $dims")
+    nl = g.n .÷ dims .+ 2H
+    parallel = prod(dims) > 1
+    me, coords = 0, ntuple(_ -> 0, N)
+    if parallel
+        me, _, _, c3 = IGG.init_global_grid(nl..., ntuple(_ -> 1, 3 - N)...; dimx=dims[1], dimy=N == 3 ? dims[2] : 1, dimz=1,
+                                            overlaps=(2H, 2H, 2H), halowidths=(H, H, H), init_MPI=!MPI.Initialized(),
+                                            device_type=igg_device(backend), quiet=true)
+        coords = ntuple(a -> Int(c3[a]), N)
+    end
+    nb = ntuple(a -> parallel ? (IGG.neighbor(1, a), IGG.neighbor(2, a)) : (-1, -1), N - 1)
+    off = coords .* (nl .- 2H)
+    R = ntuple(a -> off[a]+1:off[a]+nl[a], N)
+    return (; dims, nl, parallel, me, nb, off, R)
+end
+
+"""
+The domain decomposition, the medium and the Courant number. Of a `CartData` every rank sets up the whole medium (arrays of
+the padded global grid); of a [`DistributedModel`](@ref) only the cells of its own subdomain ([`Window`](@ref)s), and the
+numbers of the whole model are collected from all ranks.
+"""
+function decomposed_medium(::CartData, m, g::Grid{N}, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt) where {N}
+    med = setup_medium(S -> model_block(m, S, Val(N)), g, ntuple(a -> 1:g.n[a]+2H, Val(N)), Val(false), na, fq_min, fq_max, fq_ref)
+    courant = stable_courant(med, g, dt)
+    return decompose(g, nproc, backend), med, courant
+end
+function decomposed_medium(model::DistributedModel, ::Nothing, g::Grid{N}, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt) where {N}
+    d = decompose(g, nproc, backend)
+    try
+        rho_max = Ref(-Inf)
+        block(S) = (b = model_block(model, S, Val(N), density_factor(density_unit)); rho_max[] = b.rho_max; b)
+        # the cells of this rank and 3 columns around them: the 2nd-order zones of its ghost columns depend on those
+        W = ntuple(a -> a < N ? (max(first(d.R[a]) - 3, 1):min(last(d.R[a]) + 3, g.n[a] + 2H)) : d.R[a], Val(N))
+        local_ = setup_medium(block, g, W, Val(true), na, fq_min, fq_max, fq_ref)
+        whole = if d.parallel
+            comm = MPI.COMM_WORLD
+            rho_max[] = MPI.Allreduce(rho_max[], max, comm)
+            (; vmax=MPI.Allreduce(local_.vmax, max, comm), vlayer=MPI.Allreduce(local_.vlayer, max, comm),
+               attenuated=MPI.Allreduce(Int(local_.attenuated), max, comm) > 0)
+        else
+            (; vmax=local_.vmax, vlayer=local_.vlayer, attenuated=local_.attenuated)
+        end
+        density_scale(density_unit, rho_max[])             # densities in the other unit?
+        med = merge(local_, whole)
+        return d, med, stable_courant(med, g, dt)
+    catch
+        d.parallel && IGG.finalize_global_grid(finalize_MPI=false)
+        rethrow()
+    end
+end
+
+"Courant number of the time step `dt`, which must be stable."
+function stable_courant(med, g, dt)
+    courant = courant_number(med, g, dt)
+    courant < 6 / 7 || error("unstable time step: Courant number $courant ≥ 6/7, use dt < $(dt * 6 / 7 / courant)")
+    return courant
+end
+
+"""
+Which sources take part: point sources inside the model and not in the air (`vp = vs = 0`), and all others. Of a
+[`DistributedModel`](@ref) the ranks that hold the cell of a source know; `shared` collects the answers of all ranks.
+"""
+function active_sources(sources, g::Grid, med, shared)
+    active = map(sources) do s
+        s isa Union{MomentTensorSource,ForceSource} || return true
+        I = cell_position(g, s.x, s.y, s.z)
+        all(H + 1 .<= I .<= g.n .+ H) && held(med.mu, I...) && !(med.mu[I...] == 0 && med.lam[I...] == 0)
+    end
+    return shared ? Vector{Bool}(MPI.Allreduce(Int.(active), max, MPI.COMM_WORLD) .> 0) : Vector{Bool}(active)
 end
 
 "Padded array indices of the cell that contains the point (x, y, z) [km], z up."
@@ -360,9 +434,13 @@ end
 
 "Factor from `unit` to g/cm³; `rho_max` guards against densities given in the other unit."
 function density_scale(unit, rho_max)
-    unit === :kg_m3 || unit === :g_cm3 || error("density_unit must be :kg_m3 or :g_cm3, got :$unit")
+    factor = density_factor(unit)
     unit === :kg_m3 && rho_max < 100 && error("densities up to $rho_max look like g/cm³: use kg/m³, or pass density_unit=:g_cm3")
     unit === :g_cm3 && rho_max > 100 && error("densities up to $rho_max look like kg/m³: drop density_unit=:g_cm3")
+    return factor
+end
+function density_factor(unit)
+    unit === :kg_m3 || unit === :g_cm3 || error("density_unit must be :kg_m3 or :g_cm3, got :$unit")
     return unit === :kg_m3 ? 1000.0 : 1.0
 end
 
@@ -458,8 +536,8 @@ function exchange_halo!(::CPU, nb, A::Vararg{Array{T,N}}) where {T,N}
 end
 
 "How to turn the local wavefields into a `CartData` of the whole model."
-struct Output{N,mode}
-    model::CartData
+struct Output{N,mode,M}
+    model::M
     size::NTuple{3,Int}
     nl::NTuple{N,Int}
     dims::NTuple{N,Int}
@@ -487,5 +565,7 @@ function velocity(o::Output{N,mode}, F) where {N,mode}
     f(A) = reshape(reverse(Float64.(A) .* o.scale, dims=N), o.size)
     zero_ = zeros(o.size)
     V = mode === :psv ? (f(glob[1]), zero_, f(glob[2])) : mode === :sh ? (zero_, f(glob[1]), zero_) : f.(glob)
-    return CartData(o.model.x.val, o.model.y.val, o.model.z.val, (; V))
+    return CartData(coordinates(o.model)..., (; V))
 end
+coordinates(m::CartData) = (m.x.val, m.y.val, m.z.val)
+coordinates(m::DistributedModel) = xyz_grid(m.x, m.y, m.z)
