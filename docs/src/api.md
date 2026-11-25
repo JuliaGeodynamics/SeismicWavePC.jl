@@ -18,6 +18,8 @@ TeleseismicWave
 moment_rate
 SampledSTF
 Snapshots
+read_snapshots
+SeismicWavePC.SnapshotSeries
 ```
 
 ## Models

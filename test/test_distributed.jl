@@ -102,3 +102,46 @@ end
         end
     end
 end
+
+@testset "snapshots in pieces" begin
+    # every process writes its own points (here: one process, one piece per file); read back they are the single files
+    bits(A) = reinterpret(UInt32, vec(Float32.(A)))
+    for mode in (:p3d, :psv)
+        model = test_model(mode)
+        dirs = (mktempdir(), mktempdir())
+        planes = mode === :p3d ? (; xy=-1.0, xz=0.1, yz=0.2, fs=true, quantities=(:v, :u, :ps), decimate=(2, 3, 1)) : (; xz=true, quantities=(:v, :u))
+        kw = (; dt=DT, nt=101, sources=test_source(), snapshot_every=50, verbose=false)
+        simulate(model; kw..., snapshot_dir=dirs[1], snapshots=Snapshots(; planes...))
+        simulate(distributed(model); kw..., snapshot_dir=dirs[2], snapshots=Snapshots(; planes..., pieces=true))
+        @test length(readdir(dirs[1])) == length(readdir(dirs[2])) == (mode === :p3d ? 12 : 2)
+        @test all(f -> endswith(f, ".0000.nc"), readdir(dirs[2]))
+        for f in readdir(dirs[1])
+            a, b = read_snapshots(joinpath(dirs[1], f)), read_snapshots(joinpath(dirs[2], f))
+            @test a.axes == b.axes && a.t == b.t && a.variables == b.variables && length(b.files) == 1
+            @test all(v -> bits(a[v]) == bits(b[v]), a.variables)
+            @test bits(a[a.variables[4], 2]) == bits(b[b.variables[4], 2]) == bits(b[b.variables[4]][:, :, 2])   # a field with time
+            @test_throws "has no time" b["rho", 1]
+            NCDataset(joinpath(dirs[1], f)) do ds                         # the reader gives what is in the file
+                @test all(v -> bits(a[v]) == bits(Array(ds[v].var)), a.variables)
+                @test a.t == ds["t"][:] && a.axes[1][2] == ds[a.axes[1][1]][:]
+            end
+        end
+        mode === :p3d && @test occursin("3 snapshot(s)", sprint(show, read_snapshots(joinpath(dirs[2], "swpc.3d.fs.v.nc"))))
+    end
+    @test_throws "no snapshot file" read_snapshots(joinpath(mktempdir(), "swpc.3d.fs.v.nc"))
+    # files of another run next to the pieces: an error, not a mix
+    dir = mktempdir()
+    simulate(test_model(:p3d); dt=DT, nt=2, sources=test_source(), snapshot_every=1, snapshot_dir=dir, verbose=false,
+             snapshots=Snapshots(xy=-1.0, pieces=true))
+    file, piece = joinpath(dir, "swpc.3d.xy.v.nc"), joinpath(dir, "swpc.3d.xy.v.0000.nc")
+    @test size(read_snapshots(file)["Vx", 2]) == size(read_snapshots(piece)["Vx", 2])          # one piece read on its own
+    cp(piece, joinpath(dir, "swpc.3d.xy.v.0001.nc"))
+    @test_throws "overlap" read_snapshots(file)
+    mv(joinpath(dir, "swpc.3d.xy.v.0001.nc"), file)
+    @test_throws "both" read_snapshots(file)
+    rm(file)
+    NCDataset(ds -> ds.attrib["whole_size"] = ds.attrib["whole_size"] .+ Int32[1, 0], piece, "a")      # as if a piece were missing
+    @test_throws "leave points" read_snapshots(file)
+    @test_throws "outside the model" simulate(test_model(:p3d); dt=DT, nt=2, sources=test_source(), snapshot_every=1, snapshot_dir=mktempdir(),
+                                               verbose=false, snapshots=Snapshots(xz=50.0, pieces=true))
+end

@@ -69,6 +69,21 @@ if rank == 0
     println("MPI snapshots: $(length(readdir(dirs[1]))) files identical to the serial run (CartData and DistributedModel)")
 end
 MPI.Barrier(MPI.COMM_WORLD)
+
+# snapshots in pieces: every rank writes the points of its subdomain; put together they are the files of the serial run
+piecedir = MPI.bcast(rank == 0 ? mktempdir() : nothing, 0, MPI.COMM_WORLD)       # one directory for all ranks
+simulate(distributed(test_model(:p3d)); dt=DT, nt=101, sources=test_source(), nproc=(2, 2), snapshot_every=50, snapshot_dir=piecedir, verbose=false,
+         snapshots=Snapshots(xy=-1.0, xz=0.1, fs=true, quantities=(:v, :u, :ps), pieces=true))
+MPI.Barrier(MPI.COMM_WORLD)
+if rank == 0
+    bits(A) = reinterpret(UInt32, vec(A))
+    for f in readdir(dirs[1])
+        a, b = read_snapshots(joinpath(dirs[1], f)), read_snapshots(joinpath(piecedir, f))
+        (a.axes == b.axes && a.t == b.t && all(v -> bits(a[v]) == bits(b[v]), a.variables)) || error("MPI snapshot pieces of $f differ from the serial file")
+    end
+    println("MPI snapshot pieces: $(length(readdir(piecedir))) files of 4 ranks, put together identical to the $(length(readdir(dirs[1]))) serial files, bit for bit")
+end
+MPI.Barrier(MPI.COMM_WORLD)
 end
 
 if runs("gradient")
