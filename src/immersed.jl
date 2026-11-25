@@ -341,6 +341,82 @@ function sinc_medium(med, s::Surface, g::Grid{2})
     return merge(med, (; lam, mu))
 end
 
+# ------------------------------------------------------------------ cut cells (free_surface = :cutcell)
+#
+# Finite volumes clipped at the surface: every staggered point has a control volume (the cell for Sxx, Szz; the dual
+# cells around Vx, Vz, Sxz), of which a fraction v is solid, and the stresses act on faces of which a fraction a is solid
+# (the vertical face through the cell centre for Sxx, the horizontal one for Szz; for Sxz the mean of its two faces).
+# With the stresses stored as a·σ, the scheme is the usual one with the density ρ v at the velocity points and the
+# stiffness D C D / v at the stress points, D = diag(a_xx, a_zz) (a symmetric C11, C13, C33: the VTI kernels), a²μ/v for
+# Sxz. Discrete energy is conserved for any such coefficients. Small cut cells: v is not taken below CUT_VMIN (the half
+# cells of a flat surface along cell faces, where this is the staircase scheme of OpenSWPC).
+const CUT_VMIN = Ref(0.5)
+const CUT_KIND = Ref(:aperture)  # :volume (stiffness v C, density ρ v) or :aperture (face fractions, D C D / v)
+
+"Solid fraction of the vertical segment x = x0, depth d1..d2 (solid below the surface)."
+vfrac(s::Surface, x0, d1, d2) = clamp((d2 - max(d1, surface_depth(s, x0))) / (d2 - d1), 0, 1)
+"Solid fraction of the horizontal segment depth = d0, x = x1..x2 (midpoint rule)."
+hfrac(s::Surface, d0, x1, x2; n=32) = count(j -> d0 > surface_depth(s, x1 + (j - 0.5) * (x2 - x1) / n), 1:n) / n
+"Solid fraction of the rectangle x1..x2, depth d1..d2."
+afrac(s::Surface, x1, x2, d1, d2; n=32) = sum(j -> vfrac(s, x1 + (j - 0.5) * (x2 - x1) / n, d1, d2), 1:n) / n
+
+"""
+The medium `med` (VTI form, padded arrays of the whole grid) with cut cells at the surface `s`: scaled stiffness (wx, wz,
+s13; mu and lam for the detection of air and the 2nd-order zones), per-point buoyancy (bx, bz) and shear modulus (mxz).
+"""
+function cutcell_medium(med, s::Surface, g::Grid{2})
+    sz = size(med.rho)
+    h = g.d[1]
+    xc(i) = g.beg[1] + (i - H - 0.5) * h                      # cell centre; faces at ± h/2
+    d0(k) = k == 1 ? g.zc[1] - (g.zf[1] - g.zc[1]) : g.zf[k-1]  # depth of the top face of cell k
+    wx, wz, s13, mu, lam = copy(med.wx), copy(med.wz), copy(med.s13), copy(med.mu), copy(med.lam)
+    bx, bz, mxz = zeros(sz), zeros(sz), zeros(sz)
+    ρ(I) = med.rho[I]
+    inside(i, k) = 1 <= i <= sz[1] && 1 <= k <= sz[2]
+    for I in CartesianIndices(sz)
+        i, k = Tuple(I)
+        x, top, bot = xc(i), d0(k), g.zf[k]
+        # Sxx, Szz: the cell
+        v = afrac(s, x - h / 2, x + h / 2, top, bot)
+        axx, azz = vfrac(s, x, top, bot), hfrac(s, g.zc[k], x - h / 2, x + h / 2)
+        ve = v > 0 ? max(v, axx^2, azz^2) : 0.0                # (a²/v ≤ 1: the stiffness not above the material's)
+        if ve > 0 && CUT_KIND[] === :volume                    # elastic energy v ε:C:ε of the cell
+            wx[I], wz[I], s13[I] = sqrt(v) * med.wx[I], sqrt(v) * med.wz[I], v * med.s13[I]
+        elseif ve > 0
+            wx[I], wz[I], s13[I] = axx * med.wx[I] / sqrt(ve), azz * med.wz[I] / sqrt(ve), axx * azz * med.s13[I] / ve
+        else
+            wx[I] = wz[I] = s13[I] = 0
+        end
+        v > 0 || (mu[I] = 0)
+        lam[I] = wz[I]^2 - 2mu[I]
+        # Vx (x + h/2, cell centre depth): the dual cell x..x+h, its faces Sxx at x and x + h, Sxz above and below
+        if inside(i + 1, k)
+            v = afrac(s, x, x + h, top, bot)
+            ve = v > 0 ? max(v, CUT_VMIN[]) : 0.0
+            bx[I] = ve > 0 ? 2 / ((ρ(I) + ρ(CartesianIndex(i + 1, k))) * ve) : 0.0
+        end
+        # Vz (cell centre x, face below): the dual cell between the centres of k and k + 1
+        if inside(i, k + 1)
+            ztop, zbot = g.zc[k], g.zc[k+1]
+            v = afrac(s, x - h / 2, x + h / 2, ztop, zbot)
+            ve = v > 0 ? max(v, CUT_VMIN[]) : 0.0
+            bz[I] = ve > 0 ? 2 / ((ρ(I) + ρ(CartesianIndex(i, k + 1))) * ve) : 0.0
+        end
+        # Sxz (x + h/2, face below): the dual cell between the centres; its faces, horizontal at its depth and vertical at x + h/2
+        if inside(i + 1, k + 1)
+            ztop, zbot = g.zc[k], g.zc[k+1]
+            v = afrac(s, x, x + h, ztop, zbot)
+            a = min(hfrac(s, bot, x, x + h), vfrac(s, x + h / 2, ztop, zbot))   # (zero on a surface along the face)
+            ve = v > 0 ? max(v, a^2) : 0.0
+            μ4 = havg4(med.mu[I], med.mu[i, k+1], med.mu[i+1, k], med.mu[i+1, k+1])
+            μs = maximum(J -> med.mu[J], (I, CartesianIndex(i, k + 1), CartesianIndex(i + 1, k), CartesianIndex(i + 1, k + 1)))  # (the solid cells)
+            mxz[I] = ve == 0 ? 0.0 : CUT_KIND[] === :volume ? v * μs : a^2 * μ4 / ve
+        end
+    end
+    z = surface_zones(lam, mu, g.n, map(n -> 1:n, sz))       # 2nd-order differences next to the surface
+    return merge(med, (; wx, wz, s13, mu, lam, bx, bz, mxz, fs_top=z.fs_top, fs_bot=z.fs_bot, kfs=z.kfs))
+end
+
 "Ghost value `n` of the table `T` for the fields `A` (a tuple of arrays of one group)."
 Base.@propagate_inbounds function fill_ghost!(A, T, n)
     acc = zero(eltype(A[1]))

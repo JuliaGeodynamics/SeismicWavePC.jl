@@ -118,7 +118,9 @@ function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolat
     mode = size(model)[2] == 1 ? wave : :p3d
     mode in (:psv, :sh, :p3d) || error("wave must be :psv or :sh, got :$wave")
     interpolation in (:cell, :sinc) || error("interpolation must be :cell or :sinc, got :$interpolation")
-    return simulate(model, Val(mode), Val(interpolation), Val(has_attenuation(model)), Val(has_anisotropy(model)); kwargs...)
+    fs = get(kwargs, :free_surface, :openswpc)                         # (a compile-time option: a Val)
+    rest = Base.structdiff(values(kwargs), NamedTuple{(:free_surface,)})
+    return simulate(model, Val(mode), Val(interpolation), Val(has_attenuation(model)), Val(has_anisotropy(model) || fs === :cutcell), Val(fs); rest...)
 end
 
 "Does the model have attenuation (finite `Qp` or `Qs` anywhere)? Without, the memory variables are left out."
@@ -126,11 +128,11 @@ has_attenuation(model::CartData) = any(f -> haskey(model.fields, f) && any(isfin
 has_attenuation(model::DistributedModel) = model.attenuation
 
 # Function barrier on the solver type: from here on the dimension N is known to the compiler.
-function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{attenuation}=Val(true), ::Val{aniso}=Val(false); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
+function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{attenuation}=Val(true), ::Val{aniso}=Val(false), ::Val{free_surface}=Val(:openswpc); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
                   absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
                   snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true,
-                  wavefield=model isa CartData, topography=nothing) where {mode,interp,attenuation,aniso,FT}
+                  wavefield=model isa CartData, topography=nothing) where {mode,interp,attenuation,aniso,free_surface,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave} ? [sources] : collect(sources)
     all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave}, sources) ||
@@ -144,16 +146,20 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     axes_ = model_axes(model)
     g = Grid(axes_, Val(N))
     surf = topography === nothing ? nothing : immersed_surface(topography, axes_.x, g, na)
-    if surf !== nothing                       # immersed free surface (immersed.jl)
+    free_surface in (:openswpc, :immersed, :cutcell) || error("free_surface must be :openswpc, :immersed or :cutcell, got :$free_surface")
+    free_surface !== :openswpc && surf === nothing && error("free_surface = :$free_surface needs the surface: topography = z(x)")
+    cut = free_surface === :cutcell                     # (compile time)
+    if surf !== nothing                       # immersed free surface or cut cells (immersed.jl)
         (mode === :psv && model isa CartData && prod(nproc) == 1 && driver === nothing) ||
             error("topography (immersed free surface) is implemented for P-SV, a CartData model and one process, without gradients and Born modelling (for now)")
         m = immersed_model(m, surf)
     end
     all(ntuple(a -> g.n[a] > (a < N ? 2na : na), N)) || error("the model ($(join(g.n, "×")) cells) must be larger than the absorbing layers (na = $na cells)")
-    decomposition, med, courant = decomposed_medium(model, m, g, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, Val(aniso))
+    decomposition, med0, courant = decomposed_medium(model, m, g, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, Val(aniso))
+    med = cut ? cutcell_medium(med0, surf, g) : med0          # (one assignment: closures capture med)
     (; dims, nl, parallel, me, nb, off, R) = decomposition
     dev(A) = (B = KernelAbstractions.allocate(backend, eltype(A), size(A)); copyto!(B, A); B)
-    ghosts = surf === nothing ? nothing : ghost_tables(surf, g, med, Val(mode), FT, dev, na)   # (sets the 2nd-order zones of med)
+    ghosts = surf === nothing || cut ? nothing : ghost_tables(surf, g, med, Val(mode), FT, dev, na)   # (sets the 2nd-order zones of med)
 
     # medium on this rank
     loc(A) = dev(FT.(A[R...]))
@@ -164,7 +170,8 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     G = N == 3 ? (; gx_c, gx_b, gy_c=sponge(2)[1], gy_b=sponge(2)[2], gz_c, gz_b) : (; gx_c, gx_b, gz_c, gz_b)
     M = merge((; rho=loc(med.rho), lam=loc(med.lam), mu=loc(med.mu), taup=loc(med.taup), taus=loc(med.taus),
                  fs_top=col(med.fs_top), fs_bot=col(med.fs_bot), ob_top=col(med.ob_top), ob_bot=col(med.ob_bot)), G,
-              aniso ? (; wx=loc(med.wx), wz=loc(med.wz), s13=loc(med.s13), mu66=loc(med.mu66)) : (;))
+              aniso ? (; wx=loc(med.wx), wz=loc(med.wz), s13=loc(med.s13), mu66=loc(med.mu66)) : (;),
+              haskey(med, :bx) ? (; bx=loc(med.bx), bz=loc(med.bz), mxz=loc(med.mxz)) : (;))
     # coefficients of the differences: constant along x (and y); per layer in depth, for fields at cell centres and at faces
     c = (ntuple(a -> (FT(9 / 8 / g.d[a]), FT(1 / 24 / g.d[a]), FT(1 / g.d[a])), N - 1)..., map(t -> map(dev, t), depth_coefficients(g, FT))...)
     attenuation || !med.attenuated || error("the model has attenuation (finite Qp or Qs): use Val(true)")
@@ -196,7 +203,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     ipos(x, y, z) = internal_position(g, x, y, z)
     spec_v = (cells=stagger(Val(mode)).velocity, shear=ntuple(_ -> false, length(stagger(Val(mode)).velocity)))
     spec_s = (cells=stagger(Val(mode)).stress, shear=stagger(Val(mode)).shear)
-    smed = surf === nothing ? med : sinc_medium(med, surf, g)    # immersed surface: interpolation skips the air cells
+    smed = surf === nothing || cut ? med : sinc_medium(med, surf, g)    # immersed surface: interpolation skips the air cells
     here(s) = sinc ? sinc_on_rank(g, smed, ipos(s.x, s.y, s.z), s isa ForceSource ? spec_v : spec_s, off, nl) :
               all(2 .<= position(s.x, s.y, s.z) .- off .<= nl)    # the stencil reaches i-1, k-1; ghost copies are overwritten by the halo update
     iS, iF = findall(here, moments), findall(here, forces)

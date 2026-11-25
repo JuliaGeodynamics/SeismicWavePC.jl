@@ -81,9 +81,18 @@ end
 
 "Velocity update from the stress divergence `sx`, `sz` (shared with the adjoint kernels)."
 Base.@propagate_inbounds function vel_update_psv!(F, M, dt, i, k, sx, sz)
-    F.Vx[i, k] = (F.Vx[i, k] + 2 / (M.rho[i, k] + M.rho[i+1, k]) * sx * dt) * M.gx_b[i] * M.gz_c[k]
-    F.Vz[i, k] = (F.Vz[i, k] + 2 / (M.rho[i, k] + M.rho[i, k+1]) * sz * dt) * M.gx_c[i] * M.gz_b[k]
+    bx, bz = buoyancy_psv(cutcells(M), M, i, k)
+    F.Vx[i, k] = (F.Vx[i, k] + bx * sx * dt) * M.gx_b[i] * M.gz_c[k]
+    F.Vz[i, k] = (F.Vz[i, k] + bz * sz * dt) * M.gx_c[i] * M.gz_b[k]
 end
+"Buoyancy at the Vx and Vz points: from the densities of the cells, or given per point (cut cells, immersed.jl)."
+Base.@propagate_inbounds buoyancy_psv(::Val{false}, M, i, k) = (2 / (M.rho[i, k] + M.rho[i+1, k]), 2 / (M.rho[i, k] + M.rho[i, k+1]))
+Base.@propagate_inbounds buoyancy_psv(::Val{true}, M, i, k) = (M.bx[i, k], M.bz[i, k])
+"Shear modulus at the Sxz point: harmonic mean of the four cells, or given per point (cut cells)."
+Base.@propagate_inbounds shear_xz(::Val{false}, M, i, k) = havg4(M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])
+Base.@propagate_inbounds shear_xz(::Val{true}, M, i, k) = M.mxz[i, k]
+"Cut-cell medium (per-point buoyancy and shear modulus)? Resolved at compile time from the fields of the medium."
+@generated cutcells(::NamedTuple{K}) where {K} = :bx in K ? :(Val(true)) : :(Val(false))
 
 Base.@propagate_inbounds function stress_psv!(F, M, c, vc, dt, P, i, k)
     (; Vx, Vz, Sxx, Szz, Sxz) = F

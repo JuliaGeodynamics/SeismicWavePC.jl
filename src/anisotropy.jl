@@ -68,7 +68,7 @@ Base.@propagate_inbounds function stress_update_psv!(::Val{true}, F, M, vc, dt, 
     gc = M.gx_c[i] * M.gz_c[k]
     Sxx[I] = (Sxx[I] + (wx * pe * tp1 + s13 * ts1 * dzVz + Rx) * dt) * gc
     Szz[I] = (Szz[I] + (wz * pe * tp1 + s13 * ts1 * dxVx + Rz) * dt) * gc
-    muxz = havg4(M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])          # C55
+    muxz = shear_xz(cutcells(M), M, i, k)                                               # C55
     Rxz = memvar!(memory(F, Val(:Rxz)), I, muxz * ts * e, vc, dt)
     Sxz[I] = (Sxz[I] + (muxz * ts1 * e + Rxz) * dt) * M.gx_b[i] * M.gz_b[k]
 end
