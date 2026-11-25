@@ -6,8 +6,8 @@ MPI.Init()
 include("setup.jl")
 
 rank = MPI.Comm_rank(MPI.COMM_WORLD)
-part = isempty(ARGS) ? "all" : ARGS[1]
-runs(p) = part == "all" || part == p
+const SELECTED = isempty(ARGS) ? "all" : ARGS[1]                  # (a const: no clash with local names in the loops)
+runs(p) = SELECTED == "all" || SELECTED == p
 
 if runs("forward")
 for (mode, nproc, sources) in ((:p3d, (2, 2), test_source()), (:psv, 4, test_source()), (:sh, 4, test_source()),
