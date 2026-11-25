@@ -43,7 +43,7 @@ function model_axes(d::CartData)
 end
 
 """
-    DistributedModel(f, x, y, z; attenuation=true)
+    DistributedModel(f, x, y, z; attenuation=true, anisotropy=false)
 
 A model that is built piece by piece, for runs on several MPI processes with models too large to hold as a whole: every
 process asks only for the part of the model in its own subdomain (see `nproc` of [`simulate`](@ref)).
@@ -56,6 +56,8 @@ It is called once per process, for a range that reaches a few cells into the nei
 absorbing layers at the sides, whose medium continues the cells next to them.
 
 `attenuation = false` leaves out the memory variables of the attenuation (for models without finite `Qp`, `Qs`).
+`anisotropy = true` makes the model VTI: `f` may then also return the Thomsen parameters `epsilon`, `delta`, `gamma` (0 if
+missing).
 
 ```julia
 x, y, z = range(0, 100, 2001), range(0, 80, 1601), range(-30, 2, 641)
@@ -76,14 +78,15 @@ struct DistributedModel{F}
     y::Vector{Float64}
     z::Vector{Float64}
     attenuation::Bool
+    anisotropy::Bool
 end
-DistributedModel(f, x, y, z; attenuation=true) =
-    DistributedModel(f, vec(collect(Float64, x)), vec(collect(Float64, y)), vec(collect(Float64, z)), attenuation)
+DistributedModel(f, x, y, z; attenuation=true, anisotropy=false) =
+    DistributedModel(f, vec(collect(Float64, x)), vec(collect(Float64, y)), vec(collect(Float64, z)), attenuation, anisotropy)
 Base.size(m::DistributedModel) = (length(m.x), length(m.y), length(m.z))
 model_axes(m::DistributedModel) = (; x=m.x, y=m.y, z=m.z)
 
 function Base.show(io::IO, m::DistributedModel)
-    print(io, "DistributedModel of ", join(size(m), "×"), " cells", m.attenuation ? "" : ", no attenuation")
+    print(io, "DistributedModel of ", join(size(m), "×"), " cells", m.attenuation ? "" : ", no attenuation", m.anisotropy ? ", VTI" : "")
 end
 
 """
@@ -95,8 +98,11 @@ function model_block(m::NamedTuple, S::NTuple{M,UnitRange{Int}}, ::Val{N}) where
     b = (; rho=cut(m.rho), vp=cut(m.vp), vs=cut(m.vs), Qp=cut(m.Qp), Qs=cut(m.Qs))
     return haskey(m, :epsilon) ? merge(b, (; epsilon=cut(m.epsilon), delta=cut(m.delta), gamma=cut(m.gamma))) : b
 end
-"The same, built by a [`DistributedModel`](@ref); `rho_max` is the largest density as given (`rho_factor` converts it to g/cm³)."
-function model_block(model::DistributedModel, S::NTuple{M,UnitRange{Int}}, ::Val{N}, rho_factor) where {M,N}
+"""
+The same, built by a [`DistributedModel`](@ref); `rho_max` is the largest density as given (`rho_factor` converts it to g/cm³).
+With `Val(true)` also the Thomsen parameters.
+"""
+function model_block(model::DistributedModel, S::NTuple{M,UnitRange{Int}}, ::Val{N}, rho_factor, ::Val{aniso}=Val(false)) where {M,N,aniso}
     ix, iy = S[1], N == 3 ? S[2] : (1:1)
     b = model.f(ix, iy)
     fields = b isa CartData ? b.fields : b
@@ -107,13 +113,17 @@ function model_block(model::DistributedModel, S::NTuple{M,UnitRange{Int}}, ::Val
             size(A) == sz || error("DistributedModel: the field `$name` of the columns ($ix, $iy) has size $(size(A)), expected $sz")
             return A
         end
+        name in (:epsilon, :delta, :gamma) && return zeros(sz)
         name in (:Qp, :Qs) || error("a DistributedModel must return the fields `rho`, `vp` and `vs` (and optionally `Qp`, `Qs`)")
         return fill(Inf, sz)
     end
+    !aniso && any(f -> haskey(fields, f), (:epsilon, :delta, :gamma)) &&
+        error("the DistributedModel returns Thomsen parameters: create it with `anisotropy = true`")
     rho = field(:rho)
     cut(A) = internal(A, Val(N))
-    return (; rho=cut(rho ./ rho_factor), vp=cut(field(:vp)), vs=cut(field(:vs)), Qp=cut(field(:Qp)), Qs=cut(field(:Qs)),
-              rho_max=maximum(rho))
+    b = (; rho=cut(rho ./ rho_factor), vp=cut(field(:vp)), vs=cut(field(:vs)), Qp=cut(field(:Qp)), Qs=cut(field(:Qs)),
+         rho_max=maximum(rho))
+    return aniso ? merge(b, (; epsilon=cut(field(:epsilon)), delta=cut(field(:delta)), gamma=cut(field(:gamma)))) : b
 end
 
 """

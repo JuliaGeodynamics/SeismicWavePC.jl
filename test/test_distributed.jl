@@ -2,9 +2,9 @@
 using Test, NCDatasets
 
 "The test model as a `DistributedModel`; `asked` gets the ranges it was asked for."
-function distributed(model, asked=Ref{Any}(nothing); attenuation=true, fields=model.fields)
+function distributed(model, asked=Ref{Any}(nothing); attenuation=true, anisotropy=false, fields=model.fields)
     ax = SeismicWavePC.model_axes(model)
-    return DistributedModel(ax.x, ax.y, ax.z; attenuation) do ix, iy
+    return DistributedModel(ax.x, ax.y, ax.z; attenuation, anisotropy) do ix, iy
         asked[] = (ix, iy)
         map(A -> A[ix, iy, :], fields)
     end
@@ -84,6 +84,16 @@ end
     @test_throws "has size" simulate(DistributedModel((ix, iy) -> map(A -> A[ix, iy, 1:end-1], model.fields), ax.x, ax.y, ax.z); kw...)
     @test_throws "unstable" simulate(distributed(model); kw..., dt=1.0)
     @test occursin("80×60×60", sprint(show, distributed(model)))
+    # VTI anisotropy (missing Thomsen parameters are 0)
+    for mode in (:psv, :sh, :p3d)
+        m = test_model(mode)
+        vti = CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; epsilon=fill(0.2, size(m)), delta=fill(0.1, size(m)))))
+        kw = (; dt=DT, nt=100, sources=test_source(), stations=test_stations(mode), wave=mode === :sh ? :sh : :psv, verbose=false)
+        @test simulate(distributed(vti; anisotropy=true); kw...).v == simulate(vti; kw...).v
+    end
+    vti = merge(model.fields, (; gamma=fill(0.1, size(model))))
+    @test_throws "anisotropy = true" simulate(distributed(model; fields=vti); kw...)
+    @test occursin("VTI", sprint(show, distributed(model; anisotropy=true)))
 end
 
 @testset "DistributedModel: snapshot planes" begin

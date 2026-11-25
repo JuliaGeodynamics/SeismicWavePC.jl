@@ -9,6 +9,15 @@ rank = MPI.Comm_rank(MPI.COMM_WORLD)
 const SELECTED = isempty(ARGS) ? "all" : ARGS[1]                  # (a const: no clash with local names in the loops)
 runs(p) = SELECTED == "all" || SELECTED == p
 
+# a DistributedModel: every rank builds the model of its own subdomain only, and gets the results of the whole model
+function distributed(model, asked=Ref{Any}(nothing); anisotropy=false)
+    ax = SeismicWavePC.model_axes(model)
+    return DistributedModel(ax.x, ax.y, ax.z; anisotropy) do ix, iy
+        asked[] = (ix, iy)
+        map(A -> A[ix, iy, :], model.fields)
+    end
+end
+
 if runs("forward")
 for (mode, nproc, sources) in ((:p3d, (2, 2), test_source()), (:psv, 4, test_source()), (:sh, 4, test_source()),
                                (:psv, 4, PlaneWave(:s; depth=2.5, length=1.0, dip=20.0)))
@@ -25,14 +34,6 @@ for (mode, nproc, sources) in ((:p3d, (2, 2), test_source()), (:psv, 4, test_sou
 end
 MPI.Barrier(MPI.COMM_WORLD)
 
-# a DistributedModel: every rank builds the model of its own subdomain only, and gets the results of the whole model
-function distributed(model, asked=Ref{Any}(nothing))
-    ax = SeismicWavePC.model_axes(model)
-    return DistributedModel(ax.x, ax.y, ax.z) do ix, iy
-        asked[] = (ix, iy)
-        map(A -> A[ix, iy, :], model.fields)
-    end
-end
 for (mode, nproc) in ((:p3d, (2, 2)), (:psv, 4), (:sh, 4))
     model, asked = test_model(mode), Ref{Any}(nothing)
     stations = [test_stations(mode); Station("S", 1.4, 0.2, 0.0; surface=true)]
@@ -119,13 +120,14 @@ MPI.Barrier(MPI.COMM_WORLD)
 end
 
 if runs("vti")
-# VTI anisotropy: forward (P-SV, 3D) and gradient (P-SV) as in serial
+# VTI anisotropy: forward (P-SV, 3D; CartData and DistributedModel) and gradient (P-SV) as in serial
 for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
     m0 = test_model(mode)
     m = CartData(m0.x.val, m0.y.val, m0.z.val, merge(m0.fields, (; epsilon=fill(0.2, size(m0)), delta=fill(0.1, size(m0)), gamma=fill(0.15, size(m0)))))
     kw = (; dt=DT, nt=150, sources=test_source(), T=Float64)
     s1, s2 = simulate(m; kw..., stations=test_stations(mode), verbose=false), simulate(m; kw..., stations=test_stations(mode), nproc, verbose=false)
-    e = maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v)
+    s3 = simulate(distributed(m; anisotropy=true); kw..., stations=test_stations(mode), nproc, verbose=false)
+    e = max(maximum(abs, s1.v .- s2.v), maximum(abs, s1.v .- s3.v)) / maximum(abs, s1.v)
     if mode === :psv
         obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kw..., stations=test_stations(mode), verbose=false)
         g1, g2 = misfit_gradient(m, obs; kw...)[2], misfit_gradient(m, obs; kw..., nproc)[2]

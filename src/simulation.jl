@@ -141,7 +141,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     axes_ = model_axes(model)
     g = Grid(axes_, Val(N))
     all(ntuple(a -> g.n[a] > (a < N ? 2na : na), N)) || error("the model ($(join(g.n, "×")) cells) must be larger than the absorbing layers (na = $na cells)")
-    decomposition, med, courant = decomposed_medium(model, m, g, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt)
+    decomposition, med, courant = decomposed_medium(model, m, g, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, Val(aniso))
     (; dims, nl, parallel, me, nb, off, R) = decomposition
     dev(A) = (B = KernelAbstractions.allocate(backend, eltype(A), size(A)); copyto!(B, A); B)
 
@@ -327,16 +327,16 @@ The domain decomposition, the medium and the Courant number. Of a `CartData` eve
 the padded global grid); of a [`DistributedModel`](@ref) only the cells of its own subdomain ([`Window`](@ref)s), and the
 numbers of the whole model are collected from all ranks.
 """
-function decomposed_medium(::CartData, m, g::Grid{N}, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt) where {N}
+function decomposed_medium(::CartData, m, g::Grid{N}, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, _) where {N}
     med = setup_medium(S -> model_block(m, S, Val(N)), g, ntuple(a -> 1:g.n[a]+2H, Val(N)), Val(false), na, fq_min, fq_max, fq_ref)
     courant = stable_courant(med, g, dt)
     return decompose(g, nproc, backend), med, courant
 end
-function decomposed_medium(model::DistributedModel, ::Nothing, g::Grid{N}, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt) where {N}
+function decomposed_medium(model::DistributedModel, ::Nothing, g::Grid{N}, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, aniso) where {N}
     d = decompose(g, nproc, backend)
     try
         rho_max = Ref(-Inf)
-        block(S) = (b = model_block(model, S, Val(N), density_factor(density_unit)); rho_max[] = b.rho_max; b)
+        block(S) = (b = model_block(model, S, Val(N), density_factor(density_unit), aniso); rho_max[] = b.rho_max; b)
         # the cells of this rank and 3 columns around them: the 2nd-order zones of its ghost columns depend on those
         W = ntuple(a -> a < N ? (max(first(d.R[a]) - 3, 1):min(last(d.R[a]) + 3, g.n[a] + 2H)) : d.R[a], Val(N))
         local_ = setup_medium(block, g, W, Val(true), na, fq_min, fq_max, fq_ref)
