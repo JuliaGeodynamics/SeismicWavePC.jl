@@ -196,7 +196,7 @@ Base.@propagate_inbounds function grad_psv!(::Val{false}, G, E, Rb, Q, Δ, Vn, V
     G.xz[I] += S[3] * vxz                                                  # μ at the Sxz point
     if Rb !== nothing                                                      # attenuation (resolved at compile time)
         G.tp[I] += (T[1] + T[2]) * (M.lam[I] + mu2) * div
-        muxz = havg4(M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])
+        muxz = havg4(shear_rule(M), M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])
         G.ts[I] += T[3] * muxz * vxz - (T[1] * dzVz + T[2] * dxVx) * mu2
     end
     G.bx[I] += Q.Vx[I] * (Vn[1][I] - Vp[1][I])                             # buoyancy at the velocity points
@@ -251,9 +251,10 @@ Base.@propagate_inbounds function grad_3d!(::Val{false}, G, E, Rb, Q, Δ, Vn, Vp
     G.xz[I] += S[5] * vxz
     G.xy[I] += S[6] * vxy
     if Rb !== nothing
-        muxz = havg4(mu[i, j, k], mu[i, j, k+1], mu[i+1, j, k], mu[i+1, j, k+1])
-        muxy = havg4(mu[i, j, k], mu[i+1, j, k], mu[i, j+1, k], mu[i+1, j+1, k])
-        muyz = havg4(mu[i, j, k], mu[i, j, k+1], mu[i, j+1, k], mu[i, j+1, k+1])
+        r = shear_rule(M)
+        muxz = havg4(r, mu[i, j, k], mu[i, j, k+1], mu[i+1, j, k], mu[i+1, j, k+1])
+        muxy = havg4(r, mu[i, j, k], mu[i+1, j, k], mu[i, j+1, k], mu[i+1, j+1, k])
+        muyz = havg4(r, mu[i, j, k], mu[i, j, k+1], mu[i, j+1, k], mu[i, j+1, k+1])
         G.tp[I] += (T[1] + T[2] + T[3]) * (M.lam[I] + mu2) * div
         G.ts[I] += T[4] * muyz * vyz + T[5] * muxz * vxz + T[6] * muxy * vxy - (T[1] * o[1] + T[2] * o[2] + T[3] * o[3]) * mu2
     end
@@ -359,9 +360,23 @@ function dhavg(m::NTuple{K}, a) where {K}
     S = sum(p, 1:K)
     return S == 0 ? 0.0 : K * p(a)^2 / S^2
 end
+dhavg(::Val{:openswpc}, m, a) = dhavg(m, a)
+dhavg(::Val{:corners}, m::NTuple{2}, a) = dhavg(m, a)
+"The same for `havg4(Val(:corners), m...)`: with a cell of μ = 0, the derivative of 3 e₃ / e₂ (elementary symmetric sums of `m`)."
+function dhavg(::Val{:corners}, m::NTuple{4}, a)
+    all(>(0), m) && return dhavg(m, a)
+    e2 = sum(m[l] * m[q] for l in 1:4 for q in l+1:4)
+    e2 == 0 && return 0.0
+    e3 = sum(prod(m[l] for l in 1:4 if l != q) for q in 1:4)
+    o1, o2, o3 = (m[l] for l in 1:4 if l != a)                         # the other three
+    return 3 * ((o1 * o2 + o1 * o3 + o2 * o3) * e2 - e3 * (o1 + o2 + o3)) / e2^2
+end
 
-"Gradients with respect to rho, lam, mu (internal arrays) from the accumulators `G` and the shear modulus `mu` (host arrays)."
-function assemble_gradient(G, mu, mode)
+"""
+Gradients with respect to rho, lam, mu (internal arrays) from the accumulators `G` and the shear modulus `mu` (host arrays);
+`rule` averages the shear moduli (`shear_rule` of the medium).
+"""
+function assemble_gradient(G, mu, mode, rule=Val(:openswpc))
     shear, buoy = adjoint_setup(Val(mode))[12:13]
     z = zero(mu)
     glam, gmu, grho = haskey(G, :lam) ? G.lam : copy(z), haskey(G, :mu) ? G.mu : copy(z), copy(z)
@@ -370,7 +385,7 @@ function assemble_gradient(G, mu, mode)
         all(o -> I + o in R, offs) || continue
         m = map(o -> mu[I+o], offs)
         for (a, o) in enumerate(offs)
-            gmu[I+o] += G[name][I] * dhavg(m, a)
+            gmu[I+o] += G[name][I] * dhavg(rule, m, a)
         end
     end
     for (name, e) in pairs(buoy), I in R                                  # B = 2 / (ρ₁ + ρ₂), or 1 / ρ (SH)
@@ -539,7 +554,7 @@ function (d::AdjointDriver)(s)
     KernelAbstractions.synchronize(backend)
     # accumulators of all ranks on the global grid (rank 0), chain rule there, result to all ranks
     Gg = map(A -> gather_interior(A, s), G)
-    g = s.me == 0 ? model_gradient(s, vti ? assemble_gradient_vti(Gg, s.med, s.mode) : assemble_gradient(Gg, s.med.mu, s.mode)) : nothing
+    g = s.me == 0 ? model_gradient(s, vti ? assemble_gradient_vti(Gg, s.med, s.mode) : assemble_gradient(Gg, s.med.mu, s.mode, shear_rule(s.med))) : nothing
     if L !== nothing
         Lg = gather_interior(L, s)
         if s.me == 0                    # the cells of the model (z up), in the wavefield units squared -> (m/s)²

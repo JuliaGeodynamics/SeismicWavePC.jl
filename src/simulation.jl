@@ -93,6 +93,12 @@ Keyword arguments
 - `interpolation = :cell`: sources and stations at the cell that contains them (as OpenSWPC), or `:sinc` at their exact
   position, between grid points (Kaiser-windowed sinc interpolation, Hicks 2002; strain is then still taken at the cell).
 - `wave = :psv`: `:psv` or `:sh`, for 2D models.
+- `free_surface = :openswpc`: the shear modulus at the shear-stress points is the harmonic mean of the four cells around them,
+  zero next to air or water (as OpenSWPC). On a stair-stepped topography this also zeroes the shear stress at the inner
+  corners of the steps, so a top cell one cell wide in x (or y) has no shear coupling to the ground in that direction and
+  its horizontal velocity stays exactly zero there. `:corners` takes the harmonic mean of the three solid cells at these
+  inner corners (one cell of the four with μ = 0); flat surfaces and outer corners are unchanged (identical results on a
+  flat free surface). P-SV and 3D (SH has no such points).
 - `absorber = :pml`: absorbing boundary at the sides and the bottom, `:pml` (perfectly matched layer) or `:cerjan` (sponge);
   `na = 20` is its thickness in cells.
 - `fq_min = 0.05`, `fq_max = 5.0`, `fq_ref = 1.0`: frequency band [Hz] of constant Q, and reference frequency of the velocities.
@@ -111,11 +117,12 @@ Keyword arguments
   `DistributedModel`.
 - `verbose = true`: print a summary and the progress (on rank 0).
 """
-function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolation=:cell, kwargs...)
+function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolation=:cell, free_surface=:openswpc, kwargs...)
     mode = size(model)[2] == 1 ? wave : :p3d
     mode in (:psv, :sh, :p3d) || error("wave must be :psv or :sh, got :$wave")
     interpolation in (:cell, :sinc) || error("interpolation must be :cell or :sinc, got :$interpolation")
-    return simulate(model, Val(mode), Val(interpolation), Val(has_attenuation(model)), Val(has_anisotropy(model)); kwargs...)
+    free_surface in (:openswpc, :corners) || error("free_surface must be :openswpc or :corners, got :$free_surface")
+    return simulate(model, Val(mode), Val(interpolation), Val(has_attenuation(model)), Val(has_anisotropy(model)), Val(free_surface); kwargs...)
 end
 
 "Does the model have attenuation (finite `Qp` or `Qs` anywhere)? Without, the memory variables are left out."
@@ -123,11 +130,12 @@ has_attenuation(model::CartData) = any(f -> haskey(model.fields, f) && any(isfin
 has_attenuation(model::DistributedModel) = model.attenuation
 
 # Function barrier on the solver type: from here on the dimension N is known to the compiler.
-function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{attenuation}=Val(true), ::Val{aniso}=Val(false); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
+function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{attenuation}=Val(true), ::Val{aniso}=Val(false),
+                  ::Val{fsurf}=Val(:openswpc); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
                   absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
                   snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true,
-                  wavefield=model isa CartData) where {mode,interp,attenuation,aniso,FT}
+                  wavefield=model isa CartData) where {mode,interp,attenuation,aniso,fsurf,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave} ? [sources] : collect(sources)
     all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave}, sources) ||
@@ -141,8 +149,10 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     axes_ = model_axes(model)
     g = Grid(axes_, Val(N))
     all(ntuple(a -> g.n[a] > (a < N ? 2na : na), N)) || error("the model ($(join(g.n, "×")) cells) must be larger than the absorbing layers (na = $na cells)")
-    decomposition, med, courant = decomposed_medium(model, m, g, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt)
+    decomposition, med0, courant = decomposed_medium(model, m, g, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt)
     (; dims, nl, parallel, me, nb, off, R) = decomposition
+    rule = fsurf === :openswpc ? (;) : (; free_surface=Val(fsurf))     # averaging of the shear moduli (`shear_rule`)
+    med = merge(med0, rule)
     dev(A) = (B = KernelAbstractions.allocate(backend, eltype(A), size(A)); copyto!(B, A); B)
 
     # medium on this rank
@@ -154,7 +164,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     G = N == 3 ? (; gx_c, gx_b, gy_c=sponge(2)[1], gy_b=sponge(2)[2], gz_c, gz_b) : (; gx_c, gx_b, gz_c, gz_b)
     M = merge((; rho=loc(med.rho), lam=loc(med.lam), mu=loc(med.mu), taup=loc(med.taup), taus=loc(med.taus),
                  fs_top=col(med.fs_top), fs_bot=col(med.fs_bot), ob_top=col(med.ob_top), ob_bot=col(med.ob_bot)), G,
-              aniso ? (; wx=loc(med.wx), wz=loc(med.wz), s13=loc(med.s13), mu66=loc(med.mu66)) : (;))
+              aniso ? (; wx=loc(med.wx), wz=loc(med.wz), s13=loc(med.s13), mu66=loc(med.mu66)) : (;), rule)
     # coefficients of the differences: constant along x (and y); per layer in depth, for fields at cell centres and at faces
     c = (ntuple(a -> (FT(9 / 8 / g.d[a]), FT(1 / 24 / g.d[a]), FT(1 / g.d[a])), N - 1)..., map(t -> map(dev, t), depth_coefficients(g, FT))...)
     attenuation || !med.attenuated || error("the model has attenuation (finite Qp or Qs): use Val(true)")

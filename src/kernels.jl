@@ -11,6 +11,22 @@
 @inline havg2(a, b) = 2a * b / (a + b + eps(typeof(a)))
 @inline havg4(a, b, c, d) = 4a * b * c * d / (a * b * c + a * b * d + a * c * d + b * c * d + eps(typeof(a)))
 
+# Shear modulus at the shear-stress points between four cells (`free_surface` of `simulate`): `Val(:openswpc)` the harmonic
+# mean (zero if a cell is air or water, as OpenSWPC), `Val(:corners)` the same except at the inner corners of a stair-stepped
+# surface (exactly one of the four cells with μ = 0), which get the harmonic mean of the other three: a column one cell wide
+# keeps its shear coupling to the ground. Points with two cells of μ = 0 (flat surface) or three (outer corner) stay zero.
+# The rule is the field `free_surface` of the medium (absent: OpenSWPC), a compile-time constant.
+"Rule for the shear moduli at the shear-stress points of the medium `M`."
+@inline shear_rule(M) = haskey(M, :free_surface) ? M.free_surface : Val(:openswpc)
+@inline havg4(::Val{:openswpc}, a, b, c, d) = havg4(a, b, c, d)
+@inline function havg4(::Val{:corners}, a, b, c, d)
+    n = 4a * b * c * d                                         # as havg4 (the same operations: identical where n > 0)
+    s3 = a * b * c + a * b * d + a * c * d + b * c * d
+    s2 = a * b + a * c + a * d + b * c + b * d + c * d
+    solid = n > 0
+    return ifelse(solid, n, 3s3) / (ifelse(solid, s3, s2) + eps(typeof(a)))
+end
+
 "Crank-Nicolson update of the NM memory variables of one stress component; returns their weighted sum."
 Base.@propagate_inbounds function memvar!(R, I, f, vc, dt)
     c1, c2, d1, _ = vc
@@ -114,7 +130,7 @@ Base.@propagate_inbounds function stress_update_psv!(::Val{false}, F, M, vc, dt,
     gc = M.gx_c[i] * M.gz_c[k]
     Sxx[I] = (Sxx[I] + (l2m * tp1 * div - mu2 * ts1 * dzVz + Rx) * dt) * gc
     Szz[I] = (Szz[I] + (l2m * tp1 * div - mu2 * ts1 * dxVx + Rz) * dt) * gc
-    muxz = havg4(M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])
+    muxz = havg4(shear_rule(M), M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])
     Rxz = memvar!(memory(F, Val(:Rxz)), I, muxz * ts * e, vc, dt)
     Sxz[I] = (Sxz[I] + (muxz * ts1 * e + Rxz) * dt) * M.gx_b[i] * M.gz_b[k]
 end
@@ -266,9 +282,10 @@ Base.@propagate_inbounds function stress_update_3d!(::Val{false}, F, M, vc, dt, 
     Sxx[I] = (Sxx[I] + (l2m * tp1 * div - mu2 * ts1 * (dyVy + dzVz) + Rx) * dt) * gc
     Syy[I] = (Syy[I] + (l2m * tp1 * div - mu2 * ts1 * (dxVx + dzVz) + Ry) * dt) * gc
     Szz[I] = (Szz[I] + (l2m * tp1 * div - mu2 * ts1 * (dxVx + dyVy) + Rz) * dt) * gc
-    muxz = havg4(mu[i, j, k], mu[i, j, k+1], mu[i+1, j, k], mu[i+1, j, k+1])
-    muxy = havg4(mu[i, j, k], mu[i+1, j, k], mu[i, j+1, k], mu[i+1, j+1, k])
-    muyz = havg4(mu[i, j, k], mu[i, j, k+1], mu[i, j+1, k], mu[i, j+1, k+1])
+    r = shear_rule(M)
+    muxz = havg4(r, mu[i, j, k], mu[i, j, k+1], mu[i+1, j, k], mu[i+1, j, k+1])
+    muxy = havg4(r, mu[i, j, k], mu[i+1, j, k], mu[i, j+1, k], mu[i+1, j+1, k])
+    muyz = havg4(r, mu[i, j, k], mu[i, j, k+1], mu[i, j+1, k], mu[i, j+1, k+1])
     Ryz = memvar!(memory(F, Val(:Ryz)), I, muyz * ts * eyz, vc, dt)
     Rxz = memvar!(memory(F, Val(:Rxz)), I, muxz * ts * exz, vc, dt)
     Rxy = memvar!(memory(F, Val(:Rxy)), I, muxy * ts * exy, vc, dt)

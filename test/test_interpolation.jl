@@ -42,4 +42,10 @@
         pert(d) = CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=(A = copy(m.fields.vs); A[I] += d; A))))
         @test g.fields.vs[I] ≈ (misfit([mt, force], pert(1e-4)) - misfit([mt, force], pert(-1e-4))) / 2e-4 rtol = 1e-5
     end
+
+    # shear stress points with one cell of μ = 0 among four (inner corners of the surface): defined with free_surface = :corners
+    xz = SeismicWavePC.stagger(Val(:psv)).stress[3]
+    corner, flat = [1.0 0.0; 1.0 1.0], [1.0 0.0; 1.0 0.0]                 # cells (x, depth) around the point
+    valid(mu, rule...) = SeismicWavePC.valid_point(merge((; mu, lam=mu), rule...), CartesianIndex(1, 1), xz, true)
+    @test !valid(corner) && valid(corner, (; free_surface=Val(:corners))) && !valid(flat, (; free_surface=Val(:corners)))
 end
