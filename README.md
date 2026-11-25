@@ -6,14 +6,15 @@
 **Seismic wave propagation and full-waveform inversion (FWI) in 2D and 3D visco-elastic media, in pure Julia, on CPUs,
 GPUs and MPI clusters.**
 
-![Waves through the magmatic system below Unzen](docs/src/assets/Unzen_2D_waves.gif)
+![Waves through the magmatic system below Unzen](docs/src/assets/Unzen_2D_waves_10m.gif)
 
-![Seismograms of the Unzen example](docs/src/assets/Unzen_2D_seismograms.png)
+![Seismograms of the Unzen example](docs/src/assets/Unzen_2D_seismograms_10m.png)
 
-*A Mw 4 earthquake below Unzen, through the temperature field of a
+*A Mw 3 earthquake (Brune source, frequencies up to ~20 Hz) below Unzen, through the temperature field of a
 [MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl) model with MAGEMin velocities (white lines:
-more than 10 % melt). Stations above the partially molten region (shaded) record weaker S waves and a longer coda
-([example](examples/MagmaThermoKinematics/Unzen_2D.jl)).*
+more than 10 % melt). Stations above the partially molten region (shaded) record weaker S waves and a longer coda. The
+waves are computed on a 10 m grid (10 million cells, 23 400 time steps) in 2.5 minutes on a laptop GPU (Apple Metal); the
+[example](examples/MagmaThermoKinematics/Unzen_2D.jl) runs the same setup on a 100 m grid.*
 
 SeismicWavePC.jl simulates seismic waves through any model built with
 [GeophysicalModelGenerator.jl](https://github.com/JuliaGeodynamics/GeophysicalModelGenerator.jl) and computes exact misfit
