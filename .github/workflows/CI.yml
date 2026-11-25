@@ -12,7 +12,7 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 180                # macOS with Julia 1 takes ~1.5 h (Enzyme compilation)
     strategy:
       fail-fast: false
       matrix:
