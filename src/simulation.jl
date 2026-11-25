@@ -110,6 +110,9 @@ Keyword arguments
 - `wavefield = true`: return the velocity field at the end (collected on rank 0) in the result; `false` by default for a
   `DistributedModel`.
 - `verbose = true`: print a summary and the progress (on rank 0).
+- `topography = nothing`: experimental (P-SV, one process, no gradients): the free surface z(x) [km] (a function, or the
+  heights at the model's x coordinates) at its true position between grid points (immersed free surface, `immersed.jl`)
+  instead of the staircase of air cells.
 """
 function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolation=:cell, kwargs...)
     mode = size(model)[2] == 1 ? wave : :p3d
@@ -127,7 +130,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
                   absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
                   snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true,
-                  wavefield=model isa CartData) where {mode,interp,attenuation,aniso,FT}
+                  wavefield=model isa CartData, topography=nothing) where {mode,interp,attenuation,aniso,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave} ? [sources] : collect(sources)
     all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave}, sources) ||
@@ -140,10 +143,17 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     m = whole_model(model, density_unit, Val(aniso))
     axes_ = model_axes(model)
     g = Grid(axes_, Val(N))
+    surf = topography === nothing ? nothing : immersed_surface(topography, axes_.x, g, na)
+    if surf !== nothing                       # immersed free surface (immersed.jl)
+        (mode === :psv && model isa CartData && prod(nproc) == 1 && driver === nothing) ||
+            error("topography (immersed free surface) is implemented for P-SV, a CartData model and one process, without gradients and Born modelling (for now)")
+        m = immersed_model(m, surf)
+    end
     all(ntuple(a -> g.n[a] > (a < N ? 2na : na), N)) || error("the model ($(join(g.n, "×")) cells) must be larger than the absorbing layers (na = $na cells)")
     decomposition, med, courant = decomposed_medium(model, m, g, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, Val(aniso))
     (; dims, nl, parallel, me, nb, off, R) = decomposition
     dev(A) = (B = KernelAbstractions.allocate(backend, eltype(A), size(A)); copyto!(B, A); B)
+    ghosts = surf === nothing ? nothing : ghost_tables(surf, g, med, Val(mode), FT, dev, na)   # (sets the 2nd-order zones of med)
 
     # medium on this rank
     loc(A) = dev(FT.(A[R...]))
@@ -172,6 +182,10 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     teleseismic = TeleseismicWave[s for s in sources if s isa TeleseismicWave]
     length(teleseismic) <= 1 || error("one TeleseismicWave per simulation")
     aniso && !(isempty(planewaves) && isempty(teleseismic)) && error("plane waves and teleseismic waves need an isotropic model (for now)")
+    surf !== nothing && !(isempty(planewaves) && isempty(teleseismic)) && error("plane waves and teleseismic waves need the staircase free surface (no topography, for now)")
+    surf !== nothing && any(st -> st.surface, stations) && error("stations at the surface (surface = true) need the staircase free surface (no topography, for now): give them a depth")
+    surf !== nothing && any(s -> s isa Union{MomentTensorSource,ForceSource} && in_air(surf, internal_position(g, s.x, s.y, s.z)), sources) &&
+        error("a source is above the topography")
     nused = length(moments) + length(forces) + length(planewaves) + length(teleseismic)
     nused == 0 && error("all sources are outside the model or in the air (vp = vs = 0)")
     nused < length(sources) && me == 0 &&
@@ -182,7 +196,8 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     ipos(x, y, z) = internal_position(g, x, y, z)
     spec_v = (cells=stagger(Val(mode)).velocity, shear=ntuple(_ -> false, length(stagger(Val(mode)).velocity)))
     spec_s = (cells=stagger(Val(mode)).stress, shear=stagger(Val(mode)).shear)
-    here(s) = sinc ? sinc_on_rank(g, med, ipos(s.x, s.y, s.z), s isa ForceSource ? spec_v : spec_s, off, nl) :
+    smed = surf === nothing ? med : sinc_medium(med, surf, g)    # immersed surface: interpolation skips the air cells
+    here(s) = sinc ? sinc_on_rank(g, smed, ipos(s.x, s.y, s.z), s isa ForceSource ? spec_v : spec_s, off, nl) :
               all(2 .<= position(s.x, s.y, s.z) .- off .<= nl)    # the stencil reaches i-1, k-1; ghost copies are overwritten by the halo update
     iS, iF = findall(here, moments), findall(here, forces)
     # volume of the source: of its cell, or nominal between grid points (the weights carry the local spacing in depth)
@@ -193,9 +208,9 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     FSrc0 = merge(source_cells(FS, position, off, dev, Val(N)), (; F=dev(FT[s.F[m] * (m == 3 ? -1 : 1) for s in FS, m in 1:3]),
                                 s=dev(FT[1e3 / M0 * moment_rate(stf, tbeg + it * dt, s.t0, s.trise) * dt / volume(s) for s in FS, it in 1:nt])))
     # between grid points: the weights of the points around the sources (Kaiser-windowed sinc)
-    Src = sinc ? merge(Src0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in S], spec_s, off, nl, dev, FT; derivatives=Val(true),
+    Src = sinc ? merge(Src0, first(sinc_tables(g, smed, [ipos(s.x, s.y, s.z) for s in S], spec_s, off, nl, dev, FT; derivatives=Val(true),
                                                 items=collect(eachindex(S))))) : Src0
-    FSrc = sinc ? merge(FSrc0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in FS], spec_v, off, nl, dev, FT; derivatives=Val(true),
+    FSrc = sinc ? merge(FSrc0, first(sinc_tables(g, smed, [ipos(s.x, s.y, s.z) for s in FS], spec_v, off, nl, dev, FT; derivatives=Val(true),
                                                   items=collect(eachindex(FS))))) : FSrc0
     fcut = max(maximum((1 / s.trise for s in moments); init=0.0), maximum((1 / s.trise for s in forces); init=0.0),
                maximum((plane_wave_fcut(p, med, g) for p in planewaves); init=0.0), maximum((1 / w.trise for w in teleseismic); init=0.0))
@@ -210,7 +225,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
         return I
     end
     SI = map(station_cell, stations)
-    own, St = sinc ? sinc_stations(stations, SI, g, med, ipos, spec_v, spec_s, off, nl, dev, FT, Val(ijk)) :
+    own, St = sinc ? sinc_stations(stations, SI, g, smed, ipos, spec_v, spec_s, off, nl, dev, FT, Val(ijk)) :
                      cell_stations(SI, off, nl, dev, Val(ijk))
     components = mode === :psv ? (:x, :z) : mode === :sh ? (:y,) : (:x, :y, :z)
     tensor_components = mode === :psv ? (:xx, :zz, :xz) : mode === :sh ? (:yz, :xy) : (:xx, :yy, :zz, :yz, :xz, :xy)
@@ -273,7 +288,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     ckp = checkpoint === nothing ? nothing : parallel ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")
     tail = (nt, isempty(S), isempty(FS), length(own), record_every, snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt,
-            verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, pw_edges, edges, planes, backend, tw)
+            verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, pw_edges, edges, planes, backend, tw, ghosts)
     # (separate variables per branch: each call sees concrete regions)
     movie_out = if absorber === :cerjan
         whole = ((ntuple(_ -> H, N), nl .- 2H, nothing),)
@@ -463,7 +478,7 @@ stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, 
 # Function barrier: everything below is concretely typed.
 function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, force!, record!, plane!), (regions, rows), nt, nosource, noforce, nown, record_every,
                    snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, ckp, checkpoint_every, restart,
-                   pw_edges, edges, planes, backend, tw)
+                   pw_edges, edges, planes, backend, tw, ghosts)
     V, Σ = velocities(F), stresses(F)
     cells = (rows..., Base.tail(regions)...)                   # the interior by rows, and the PML zones
     report = max(nt ÷ 10, 1)
@@ -498,10 +513,12 @@ function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, in
         inject_wave!(tw, Val(:stress), F, M, c, vc, dtT, eltype(dtT)(tbeg + (it - 0.5) * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, Σ...))
         pw_edges && extrapolate_sides!(Σ, edges)
+        ghosts === nothing || fill_ghosts!(backend, Σ, ghosts.stress)
         foreach_region!(backend, vel!, (F, M, c, dtT), cells)
         noforce || run_once!(backend, force!, (F, M, FSrc, it))
         inject_wave!(tw, Val(:velocity), F, M, c, vc, dtT, eltype(dtT)(tbeg + it * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, V...))
+        ghosts === nothing || fill_ghosts!(backend, V, ghosts.velocity)
         if verbose && it % report == 0
             KernelAbstractions.synchronize(backend)
             vmax = maximum(A -> maximum(abs, A), V) * out.scale

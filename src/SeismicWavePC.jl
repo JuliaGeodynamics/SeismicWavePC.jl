@@ -16,7 +16,7 @@ using Printf
 using Serialization: serialize, deserialize
 using FFTW: fft, ifft, fftfreq, rfft, irfft
 using SparseArrays: sparse
-using LinearAlgebra: LinearAlgebra
+using LinearAlgebra: LinearAlgebra, svd, pinv
 import Random
 
 include("viscoelastic.jl")
@@ -38,6 +38,7 @@ include("gradient.jl")
 include("adjoint.jl")
 include("born.jl")
 include("anisotropy.jl")
+include("immersed.jl")
 include("inversion.jl")
 
 export MomentTensorSource, DoubleCoupleSource, ForceSource, PlaneWave, TeleseismicWave, Station, Seismograms, simulate, moment_rate, SampledSTF, CPU, DistributedModel
