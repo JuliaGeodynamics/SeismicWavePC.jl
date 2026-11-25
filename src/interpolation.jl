@@ -46,7 +46,11 @@ function sinc_points(g::Grid{N}, med, pos::NTuple{N,Float64}, cells, shear::Bool
     c0 = point_index(g, pos, o)
     R = CartesianIndices(ntuple(a -> floor(Int, c0[a])-SINC_R+1:floor(Int, c0[a])+SINC_R, Val(N)))
     pts = [J for J in R if valid_point(med, J, cells, shear)]
-    return pts, sinc_weights(g, pos, o, R, pts, shear, source), weight_derivatives(g, pos, o, R, pts, shear, source)
+    w = sinc_weights(g, pos, o, R, pts, shear, source)
+    # a shear stress with no weight left: zero, no points (the remaining points can all have weight 0, e.g. the levels below
+    # a station at the centre of its top cell, where sinc vanishes at integer distances)
+    isempty(w) && return empty(pts), w, ntuple(_ -> Float64[], Val(N))
+    return pts, w, weight_derivatives(g, pos, o, R, pts, shear, source)
 end
 # (top-level functions, no nested closures: inferable on all Julia versions)
 

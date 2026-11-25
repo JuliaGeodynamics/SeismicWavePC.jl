@@ -20,6 +20,15 @@
     rw = simulate(water; dt=DT, nt=100, sources=MomentTensorSource(x0, 0.0, z0, 1e15, (1, 0, 1, 0, 0, 0); trise=0.3),
                   stations=[Station("W", x0 + 0.5, 0.0, z0)], interpolation=:sinc, verbose=false)
     @test maximum(abs, rw.v) > 0 && all(iszero, rw.stress[:, 3, :])
+    # station on a single cell above the surface (SH): no Sxy point at its level, and the levels below have weight 0
+    msh = test_model(:sh)
+    fb = map(copy, msh.fields)
+    i = 120
+    k = findlast(>(0), fb.vs[i, 1, :]) + 1
+    foreach(q -> (q[i, 1, k] = q[i, 1, k-1]), (fb.rho, fb.vp, fb.vs, fb.Qp, fb.Qs))
+    rb = simulate(CartData(msh.x.val, msh.y.val, msh.z.val, fb); dt=DT, nt=100, sources=test_source(), wave=:sh,
+                  stations=[Station("bump", msh.x.val[i, 1, 1] + 0.01, 0.0, 0.0; surface=true)], interpolation=:sinc, verbose=false)
+    @test maximum(abs, rb.v) > 0 && maximum(abs, rb.stress[:, 1, :]) > 0 && all(iszero, rb.stress[:, 2, :])
 
     # gradients: model, source location (exact with :sinc), cells below a station on the free surface
     m = test_model(:psv)
