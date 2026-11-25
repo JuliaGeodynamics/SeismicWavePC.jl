@@ -43,6 +43,6 @@ export MomentTensorSource, DoubleCoupleSource, ForceSource, PlaneWave, Teleseism
 export ReciprocalGreen, reciprocal_green, seismogram, Snapshots, random_medium, perturb, read_random_medium, misfit_gradient, born,
        L2Misfit, TravelTimeMisfit, ModelParameters, initial_parameters, to_model, WaveformProblem, objective,
        objective_and_gradient, fg!
-export read_netcdf, write_sac, read_sac, read_lhm, read_lgm, read_grd, flatten_earth, flatten_depth
+export read_netcdf, write_sac, read_sac, read_lhm, read_lgm, read_grd, flatten_earth, flatten_depth, read_snapshots, SnapshotSeries
 
 end
