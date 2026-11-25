@@ -38,6 +38,15 @@ Bottom: vertical velocity of a Mw 4 earthquake (star), recorded by seismometers 
 *Vertical velocity at the seismometers (left) and peak velocities (right). Stations above the partially molten region (shaded)
 record weaker S waves and a longer coda.*
 
+The movie of the README is the same setup on a 10 m grid (10 million cells, 23 400 time steps; 2.5 minutes on an Apple
+M-series GPU): [`Unzen_2D_10m_model.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/MagmaThermoKinematics/Unzen_2D_10m_model.jl)
+interpolates the temperature of the 100 m MTK run onto the fine grid and computes the velocities with MAGEMin, and
+[`Unzen_2D_10m_waves.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/MagmaThermoKinematics/Unzen_2D_10m_waves.jl)
+simulates a Mw 3 earthquake with a Brune (ω⁻²) source time function (corner frequency 7 Hz for a stress drop of 3 MPa),
+which the 10 m grid resolves up to ~20 Hz:
+
+![Waves through the magmatic system below Unzen on a 10 m grid](assets/Unzen_2D_waves_10m.gif)
+
 ## Marmousi2
 
 The elastic Marmousi2 model (Martin et al., 2006; 17 km × 3.5 km, 451 m of water) is the classic benchmark of seismic wave
