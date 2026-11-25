@@ -15,6 +15,7 @@ result = simulate(model; dt, nt, sources, stations, stf=:kupper, absorber=:pml, 
 - **GPUs:** `backend = CUDABackend()`, `ROCBackend()` or `MetalBackend()` (after `using CUDA`, `AMDGPU` or `Metal`).
 - **MPI:** start with `mpiexecjl -n 4 julia script.jl` and pass `nproc = 4` in 2D (subdomains in x) or `nproc = (2, 2)` in
   3D (x and y). This works on CPUs and on CUDA or AMD GPUs, one GPU per process, and gives the same results as a serial run.
+  Every process sets up the whole model; for models too large for that, see [Models built per MPI process](@ref).
 - **Checkpoints:** `checkpoint = "run1", checkpoint_every = 1000` saves the state; `restart = true` continues from it (also
   with MPI).
 - **Progress:** `verbose = true` (default) prints a summary and the progress.

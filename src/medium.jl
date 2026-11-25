@@ -20,8 +20,7 @@ Concretely typed copy of the parts of a `CartData` the solver needs (GMG stores 
 coordinate axes and the fields `rho`, `vp`, `vs`, `Qp`, `Qs` as `Array{Float64,3}` (Q = Inf if missing).
 """
 function model_arrays(d::CartData)
-    axis(A, I...) = Vector{Float64}(A[I...])::Vector{Float64}
-    x, y, z = axis(d.x.val, :, 1, 1), axis(d.y.val, 1, :, 1), axis(d.z.val, 1, 1, :)
+    x, y, z = model_axes(d)
     function field(name)
         haskey(d.fields, name) && return convert(Array{Float64,3}, d.fields[name])::Array{Float64,3}
         name in (:Qp, :Qs) || error("the CartData model needs fields `rho`, `vp` and `vs` (and optionally `Qp`, `Qs`)")
@@ -29,6 +28,101 @@ function model_arrays(d::CartData)
     end
     return (; x, y, z, rho=field(:rho), vp=field(:vp), vs=field(:vs), Qp=field(:Qp), Qs=field(:Qs))
 end
+
+"Coordinates `(; x, y, z)` [km] of the cell centres along the axes of the model (z up)."
+function model_axes(d::CartData)
+    axis(A, I...) = Vector{Float64}(A[I...])::Vector{Float64}
+    return (; x=axis(d.x.val, :, 1, 1), y=axis(d.y.val, 1, :, 1), z=axis(d.z.val, 1, 1, :))
+end
+
+"""
+    DistributedModel(f, x, y, z; attenuation=true)
+
+A model that is built piece by piece, for runs on several MPI processes with models too large to hold as a whole: every
+process asks only for the part of the model in its own subdomain (see `nproc` of [`simulate`](@ref)).
+
+`x`, `y`, `z` are the coordinates [km] of the cell centres of the whole grid (z up; constant spacing in x and y, constant or
+smoothly varying in z), as for a `CartData` made with `xyz_grid(x, y, z)`; a single `y` gives a 2D model. `f(ix, iy)` returns
+the model of the columns `x[ix]`, `y[iy]` (index ranges) over all of `z`: a `CartData`, or a `NamedTuple` of arrays of size
+`(length(ix), length(iy), length(z))`, with the fields `rho`, `vp`, `vs` and optionally `Qp`, `Qs` (as in a `CartData` model).
+It is called once per process, for a range that reaches a few cells into the neighbouring subdomains and leaves out the
+absorbing layers at the sides, whose medium continues the cells next to them.
+
+`attenuation = false` leaves out the memory variables of the attenuation (for models without finite `Qp`, `Qs`).
+
+```julia
+x, y, z = range(0, 100, 2001), range(0, 80, 1601), range(-30, 2, 641)
+model = DistributedModel(x, y, z; attenuation=false) do ix, iy
+    X, Y, Z = xyz_grid(x[ix], y[iy], z)
+    air = Z .> 0
+    (rho=ifelse.(air, 1.0, 2700.0), vp=ifelse.(air, 0.0, 5.0), vs=ifelse.(air, 0.0, 2.9))
+end
+result = simulate(model; nproc=(2, 2), dt, nt, sources, stations)
+```
+Sources are `MomentTensorSource`s and `ForceSource`s at their cells (`interpolation = :cell`); plane and teleseismic waves,
+`interpolation = :sinc` and [`misfit_gradient`](@ref) need a `CartData`. The wavefield at the end is not collected, unless
+`simulate` is called with `wavefield = true`.
+"""
+struct DistributedModel{F}
+    f::F
+    x::Vector{Float64}
+    y::Vector{Float64}
+    z::Vector{Float64}
+    attenuation::Bool
+end
+DistributedModel(f, x, y, z; attenuation=true) =
+    DistributedModel(f, vec(collect(Float64, x)), vec(collect(Float64, y)), vec(collect(Float64, z)), attenuation)
+Base.size(m::DistributedModel) = (length(m.x), length(m.y), length(m.z))
+model_axes(m::DistributedModel) = (; x=m.x, y=m.y, z=m.z)
+
+function Base.show(io::IO, m::DistributedModel)
+    print(io, "DistributedModel of ", join(size(m), "×"), " cells", m.attenuation ? "" : ", no attenuation")
+end
+
+"""
+Fields `rho` [g/cm³], `vp`, `vs`, `Qp`, `Qs` of the cells `S` (index ranges in x, (y); all depths) as internal arrays: cut
+out of the arrays `m` of a whole model.
+"""
+function model_block(m::NamedTuple, S::NTuple{M,UnitRange{Int}}, ::Val{N}) where {M,N}
+    cut(A) = internal(N == 3 ? view(A, S[1], S[2], :) : view(A, S[1], :, :), Val(N))
+    return (; rho=cut(m.rho), vp=cut(m.vp), vs=cut(m.vs), Qp=cut(m.Qp), Qs=cut(m.Qs))
+end
+"The same, built by a [`DistributedModel`](@ref); `rho_max` is the largest density as given (`rho_factor` converts it to g/cm³)."
+function model_block(model::DistributedModel, S::NTuple{M,UnitRange{Int}}, ::Val{N}, rho_factor) where {M,N}
+    ix, iy = S[1], N == 3 ? S[2] : (1:1)
+    b = model.f(ix, iy)
+    fields = b isa CartData ? b.fields : b
+    sz = (length(ix), length(iy), length(model.z))
+    function field(name)
+        if haskey(fields, name)
+            A = convert(Array{Float64,3}, fields[name])::Array{Float64,3}
+            size(A) == sz || error("DistributedModel: the field `$name` of the columns ($ix, $iy) has size $(size(A)), expected $sz")
+            return A
+        end
+        name in (:Qp, :Qs) || error("a DistributedModel must return the fields `rho`, `vp` and `vs` (and optionally `Qp`, `Qs`)")
+        return fill(Inf, sz)
+    end
+    rho = field(:rho)
+    cut(A) = internal(A, Val(N))
+    return (; rho=cut(rho ./ rho_factor), vp=cut(field(:vp)), vs=cut(field(:vs)), Qp=cut(field(:Qp)), Qs=cut(field(:Qs)),
+              rho_max=maximum(rho))
+end
+
+"""
+Part of an array of the padded global grid: the cells `r` (global index ranges) that an MPI rank holds, indexed with global
+indices. The medium of a [`DistributedModel`](@ref) consists of these: no rank has the whole.
+"""
+struct Window{T,N}
+    a::Array{T,N}
+    r::NTuple{N,UnitRange{Int}}
+end
+Base.@propagate_inbounds Base.getindex(w::Window{T,N}, I::Vararg{Integer,N}) where {T,N} = w.a[ntuple(d -> I[d] - first(w.r[d]) + 1, Val(N))...]
+Base.@propagate_inbounds Base.getindex(w::Window{T,N}, I::CartesianIndex{N}) where {T,N} = w[Tuple(I)...]
+Base.@propagate_inbounds Base.getindex(w::Window{T,N}, R::Vararg{AbstractUnitRange{<:Integer},N}) where {T,N} =
+    w.a[ntuple(d -> R[d] .- (first(w.r[d]) - 1), Val(N))...]
+"Is the cell `I` (global indices) among the cells held on this rank?"
+held(w::Window{T,N}, I::Vararg{Integer,N}) where {T,N} = all(ntuple(d -> I[d] in w.r[d], Val(N)))
+held(a::Array{T,N}, I::Vararg{Integer,N}) where {T,N} = checkbounds(Bool, a, I...)
 
 """
 Grid of the model: every `CartData` node becomes a cell centre. The spacing is constant in x (and y); in depth it may vary
@@ -63,12 +157,11 @@ Courant number of the time step `dt`: on a stretched grid per layer, with its la
 """
 function courant_number(med, g::Grid{N}, dt) where {N}
     g.uniform && return med.vmax * dt * sqrt(sum(1 ./ g.d .^ 2))
-    vp = sqrt.((med.lam .+ 2 .* med.mu) ./ med.rho)
     hx = sum(1 ./ Base.front(g.d) .^ 2)
     c = 0.0
     for k in H+1:H+g.n[N]
         h = min(g.zc[k+1] - g.zc[k], g.zc[k] - g.zc[k-1])
-        c = max(c, maximum(selectdim(vp, N, k)) * dt * sqrt(hx + 1 / h^2))
+        c = max(c, med.vlayer[k] * dt * sqrt(hx + 1 / h^2))
     end
     return c
 end
@@ -127,7 +220,7 @@ Base.@propagate_inbounds rowcoef(x::NamedTuple{(:a, :b, :c)}, k) =
 @inline rowcoef(x, k) = x
 
 "Field `A` as an internal array: z flipped so that k = 1 is the top, squeezed to (x, z) in 2D."
-function internal(A::Array{Float64,3}, ::Val{N}) where {N}
+function internal(A::AbstractArray{Float64,3}, ::Val{N}) where {N}
     f = reverse(A, dims=3)
     return N == 3 ? f : f[:, 1, :]
 end
@@ -146,59 +239,79 @@ function pad_absorber(A::Array{Float64,N}, n::NTuple{N,Int}, na) where {N}
 end
 
 """
-Build padded material arrays `(rho, lam, mu, taup, taus)`, the 2nd-order zones near free surfaces
-`(fs_top, fs_bot, ob_top, ob_bot)` and the maximum P velocity.
+Build the material arrays `(rho, lam, mu, taup, taus)` of the padded cells `W` (global index ranges: the whole grid, or the
+cells of an MPI rank with a few around them), the 2nd-order zones near free surfaces `(fs_top, fs_bot, ob_top, ob_bot)` and
+the maximum P velocity (`vlayer` per layer). `block(S)` gives the fields of the physical cells `S` (ranges in x, (y)) as
+internal arrays. With `Val(true)` the arrays are returned as [`Window`](@ref)s, otherwise (the whole grid) as plain arrays.
 """
-function setup_medium(m::NamedTuple, g::Grid{N}, na, fq_min, fq_max, fq_ref) where {N}
-    rho, vp, vs, qp, qs = internal(m.rho, Val(N)), internal(m.vp, Val(N)), internal(m.vs, Val(N)), internal(m.Qp, Val(N)), internal(m.Qs, Val(N))
-    rho = max.(rho, 0.001)   # air needs a small non-zero density (as in OpenSWPC)
-
+function setup_medium(block, g::Grid{N}, W::NTuple{N,UnitRange{Int}}, ::Val{windows}, na, fq_min, fq_max, fq_ref) where {N,windows}
     n = g.n
-    rho, vp, vs, qp, qs = pad_absorber(rho, n, na), pad_absorber(vp, n, na), pad_absorber(vs, n, na), pad_absorber(qp, n, na), pad_absorber(qs, n, na)
+    # the physical cell whose medium a padded cell gets: itself, or for the padding and the absorber zone (`na` cells at the
+    # sides and the bottom, homogenized as in OpenSWPC) the nearest cell outside them
+    J = ntuple(a -> [a == N ? clamp(i - H, 1, n[a] - na) : clamp(i - H, na + 1, n[a] - na) for i in W[a]], Val(N))
+    S = ntuple(a -> first(J[a]):last(J[a]), Val(N - 1))
+    b = block(S)
+    pad(A) = A[ntuple(a -> a == N ? J[a] : J[a] .- (first(S[a]) - 1), Val(N))...]
+    rho = pad(max.(b.rho, 0.001))   # air needs a small non-zero density (as in OpenSWPC)
+    vp, vs, qp, qs = pad(b.vp), pad(b.vs), pad(b.Qp), pad(b.Qs)
 
     ts = relaxation_times(fq_min, fq_max)
     zeta = constq_zeta(fq_min, fq_max, ts)
     taup, taus = NM * zeta ./ qp, NM * zeta ./ qs
     mu = @. rho * vs^2 / visco_chi((ts,), taus, fq_ref)^2       # unrelaxed moduli
     lam = @. rho * vp^2 / visco_chi((ts,), taup, fq_ref)^2 - 2mu
-    vmax = maximum(sqrt.((lam .+ 2mu) ./ rho))
+    columns = CartesianIndices(Base.front(size(rho)))
+    vlayer = [maximum(C -> sqrt((lam[C, k] + 2mu[C, k]) / rho[C, k]), columns) for k in axes(rho, N)]
+    attenuated = any(!iszero, taup) || any(!iszero, taus)
+    z = surface_zones(lam, mu, n, W)
 
-    return (; rho, lam, mu, taup, taus, ts, vmax, surface_zones(lam, mu, n)...)
+    Wc = Base.front(W)
+    cells(A) = windows ? Window(A, W) : A
+    cols(A, r=Wc) = windows ? Window(A, r) : A
+    return (; rho=cells(rho), lam=cells(lam), mu=cells(mu), taup=cells(taup), taus=cells(taus), ts, vmax=maximum(vlayer), vlayer,
+              attenuated, fs_top=cols(z.fs_top), fs_bot=cols(z.fs_bot), ob_top=cols(z.ob_top), ob_bot=cols(z.ob_bot),
+              kfs=cols(z.kfs, z.held), kob=cols(z.kob, z.held))   # kfs, kob are indexed by padded column
 end
 
 """
 Free-surface (`fs`) and ocean-bottom (`ob`) zones, per column, where 2nd-order instead of
-4th-order differences are used (OpenSWPC `surface_detection`).
+4th-order differences are used (OpenSWPC `surface_detection`). `lam`, `mu` are those of the padded cells `W` (global index
+ranges); the zones are those of the padded columns `W` whose neighbours (2 before, 3 after) are among them, the others are empty.
 """
-function surface_zones(lam, mu, n::NTuple{N}) where {N}
+function surface_zones(lam, mu, n::NTuple{N}, W::NTuple{N,UnitRange{Int}}) where {N}
     ϵ = eps(Float32)
     nz = n[N]
     hn = Base.front(n)
-    # kfs/kob: last k (physical) with vacuum above material; 0 if none. Detected on columns 0:n+2, as in OpenSWPC.
-    kfs = zeros(Int, hn .+ (2H + 1))       # physical columns -1 : n+3  ->  index i + 2
-    kob = zeros(Int, hn .+ (2H + 1))
-    for C in CartesianIndices(kfs)
-        ip = Tuple(C) .- 2                # physical column
-        all(0 .<= ip .<= hn .+ 2) || continue
-        col = CartesianIndex(ip .+ H)
+    Wc = Base.front(W)                 # padded columns (physical column + H)
+    o = first.(Wc) .- 1
+    # kfs/kob: last k (physical) with vacuum above material; 0 if none. Detected on the physical columns 0:n+2, as in OpenSWPC;
+    # indexed by padded column, up to the column n + 3 (one beyond the padding, never detected)
+    held = map((r, m) -> first(r):(last(r) == m + 2H ? last(r) + 1 : last(r)), Wc, hn)
+    kfs, kob = zeros(Int, length.(held)), zeros(Int, length.(held))
+    for P in CartesianIndices(Wc)
+        all(0 .<= Tuple(P) .- H .<= hn .+ 2) || continue
+        col = CartesianIndex(Tuple(P) .- o)
         for k in 1:nz-1
-            abs(mu[col, k+H]) < ϵ && abs(mu[col, k+1+H]) > ϵ && (kob[C] = k)
-            abs(lam[col, k+H]) < ϵ && abs(lam[col, k+1+H]) > ϵ && (kfs[C] = k)
+            abs(mu[col, k+H]) < ϵ && abs(mu[col, k+1+H]) > ϵ && (kob[col] = k)
+            abs(lam[col, k+H]) < ϵ && abs(lam[col, k+1+H]) > ϵ && (kfs[col] = k)
         end
     end
     # zone = padded k-range [top, bot]; ghost columns get an empty zone (top > bot)
     function zone(kk)
-        top, bot = fill(Int32(1), hn .+ 2H), fill(Int32(0), hn .+ 2H)
-        for C in CartesianIndices(hn)
-            w = kk[CartesianIndices(map(c -> c:c+5, Tuple(C)))]   # physical columns i-2 : i+3
-            P = C + CartesianIndex(ntuple(_ -> H, N - 1))
-            top[P] = max(minimum(w) - 2, 1) + H
-            bot[P] = min(maximum(w) + 2, nz) + H
+        top, bot = fill(Int32(1), length.(Wc)), fill(Int32(0), length.(Wc))
+        for P in CartesianIndices(Wc)
+            p = Tuple(P)
+            all(1 .<= p .- H .<= hn) || continue
+            all(map((q, r) -> first(r) <= q - 2 && q + 3 <= last(r), p, held)) || continue   # a column of another rank
+            w = kk[CartesianIndices(map(q -> q-2:q+3, p .- o))]   # physical columns i-2 : i+3
+            col = CartesianIndex(p .- o)
+            top[col] = max(minimum(w) - 2, 1) + H
+            bot[col] = min(maximum(w) + 2, nz) + H
         end
         return top, bot
     end
     (fs_top, fs_bot), (ob_top, ob_bot) = zone(kfs), zone(kob)
-    return (; fs_top, fs_bot, ob_top, ob_bot, kfs, kob)   # kfs, kob are indexed by padded column
+    return (; fs_top, fs_bot, ob_top, ob_bot, kfs, kob, held)
 end
 
 """

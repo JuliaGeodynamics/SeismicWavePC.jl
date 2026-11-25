@@ -2,7 +2,8 @@
     SeismicWavePC
 
 Julia version of the OpenSWPC finite-difference seismic wave propagation code (Maeda et al., 2017),
-for 2D (P-SV, SH) and 3D visco-elastic media given as GeophysicalModelGenerator `CartData`.
+for 2D (P-SV, SH) and 3D visco-elastic media given as GeophysicalModelGenerator `CartData`, or built per MPI process
+(`DistributedModel`).
 Runs on CPUs and GPUs (KernelAbstractions) and on multiple MPI processes (ImplicitGlobalGrid).
 """
 module SeismicWavePC
@@ -37,7 +38,7 @@ include("gradient.jl")
 include("adjoint.jl")
 include("inversion.jl")
 
-export MomentTensorSource, DoubleCoupleSource, ForceSource, PlaneWave, TeleseismicWave, Station, Seismograms, simulate, moment_rate, SampledSTF, CPU
+export MomentTensorSource, DoubleCoupleSource, ForceSource, PlaneWave, TeleseismicWave, Station, Seismograms, simulate, moment_rate, SampledSTF, CPU, DistributedModel
 export ReciprocalGreen, reciprocal_green, seismogram, Snapshots, random_medium, perturb, read_random_medium, misfit_gradient,
        L2Misfit, TravelTimeMisfit, ModelParameters, initial_parameters, to_model, WaveformProblem, objective,
        objective_and_gradient, fg!

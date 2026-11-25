@@ -8,7 +8,8 @@ velocities of one station. `write_sac(result, dir)` writes SAC files as OpenSWPC
 
 ## Wavefield and movies
 
-- `result.wavefield`: the velocity field at the end, as a `CartData`.
+- `result.wavefield`: the velocity field at the end, as a `CartData` (collected on one process; `wavefield = false` leaves it
+  out).
 - `snapshot_every = 100`: writes the velocity field to `snapshot_dir` as a ParaView movie (`wavefield.pvd`).
 - `callback = (wavefield, t) -> …`: called every `snapshot_every` steps with the wavefield as a `CartData` (field `V`),
   instead of writing files, e.g. to plot the waves while the simulation runs (see [Getting started](@ref) and the movies in

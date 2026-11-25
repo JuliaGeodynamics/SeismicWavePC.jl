@@ -46,6 +46,29 @@ uniform 5 m grid:
 | uniform 10 m | 302 | 1.7 s | 10 %, 5.3 % |
 | uniform 20 m | 152 | 1.1 s | 67 %, 29 % |
 
+## Models built per MPI process
+
+A `CartData` holds the whole model, and in a run on several MPI processes every process sets up the whole medium before it
+keeps the part of its subdomain. A model that does not fit into the memory of one process is given as a
+[`DistributedModel`](@ref) instead: the coordinates of the whole grid and a function that builds the model of a range of
+columns. Every process calls it once, for its own subdomain:
+
+```julia
+x, y, z = range(0, 100, 2001), range(0, 80, 1601), range(-30, 2, 641)     # cell centres [km], z up
+model = DistributedModel(x, y, z) do ix, iy
+    X, Y, Z = xyz_grid(x[ix], y[iy], z)                                   # this part of the grid: use any GMG tool on it
+    air = Z .> 0
+    (rho=ifelse.(air, 1.0, 2700.0), vp=ifelse.(air, 0.0, 5.0), vs=ifelse.(air, 0.0, 2.9), Qp=fill(200.0, size(X)), Qs=fill(100.0, size(X)))
+end
+result = simulate(model; nproc=(2, 2), dt, nt, sources, stations)
+```
+
+The function returns a `NamedTuple` of arrays of size `(length(ix), length(iy), length(z))` or a `CartData`, with the fields of
+a `CartData` model. The results are those of the same model given as a `CartData`. The memory a process needs for the setup
+then grows with its subdomain, not with the model. Moment tensor and force sources at their cells (`interpolation = :cell`),
+stations, snapshots, checkpoints, GPUs and stretched grids work as usual; plane and teleseismic waves, sources between grid
+points and misfit gradients need a `CartData`. The wavefield at the end is not collected (`wavefield = true` does).
+
 ## Geographic coordinates
 
 Models built from geographic data with a GMG `ProjectionPoint` keep their projection: sources and stations can be given in
