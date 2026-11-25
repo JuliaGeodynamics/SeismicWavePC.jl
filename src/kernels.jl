@@ -99,8 +99,9 @@ Base.@propagate_inbounds function stress_psv!(F, M, c, vc, dt, P, i, k)
     stress_update_psv!(F, M, vc, dt, i, k, dxVx, dzVz, dxVz + dzVx)
 end
 
-"Stress update from the strain rates (shared with the adjoint kernels)."
-Base.@propagate_inbounds function stress_update_psv!(F, M, vc, dt, i, k, dxVx, dzVz, e)
+"Stress update from the strain rates (shared with the adjoint kernels); isotropic or VTI (anisotropy.jl) by the medium."
+Base.@propagate_inbounds stress_update_psv!(F, M, vc, dt, i, k, dxVx, dzVz, e) = stress_update_psv!(anisotropic(M), F, M, vc, dt, i, k, dxVx, dzVz, e)
+Base.@propagate_inbounds function stress_update_psv!(::Val{false}, F, M, vc, dt, i, k, dxVx, dzVz, e)
     (; Sxx, Szz, Sxz) = F
     I = CartesianIndex(i, k)
     mu2 = 2M.mu[I]
@@ -167,7 +168,8 @@ Base.@propagate_inbounds function stress_sh!(F, M, c, vc, dt, P, i, k)
     stress_update_sh!(F, M, vc, dt, i, k, dzVy, dxVy)
 end
 
-Base.@propagate_inbounds function stress_update_sh!(F, M, vc, dt, i, k, dzVy, dxVy)
+Base.@propagate_inbounds stress_update_sh!(F, M, vc, dt, i, k, dzVy, dxVy) = stress_update_sh!(anisotropic(M), F, M, vc, dt, i, k, dzVy, dxVy)
+Base.@propagate_inbounds function stress_update_sh!(::Val{false}, F, M, vc, dt, i, k, dzVy, dxVy)
     (; Syz, Sxy) = F
     I = CartesianIndex(i, k)
     ts = M.taus[I]
@@ -246,7 +248,9 @@ Base.@propagate_inbounds function stress_3d!(F, M, c, vc, dt, P, i, j, k)
     stress_update_3d!(F, M, vc, dt, i, j, k, dxVx, dyVy, dzVz, eyz, exz, exy)
 end
 
-Base.@propagate_inbounds function stress_update_3d!(F, M, vc, dt, i, j, k, dxVx, dyVy, dzVz, eyz, exz, exy)
+Base.@propagate_inbounds stress_update_3d!(F, M, vc, dt, i, j, k, dxVx, dyVy, dzVz, eyz, exz, exy) =
+    stress_update_3d!(anisotropic(M), F, M, vc, dt, i, j, k, dxVx, dyVy, dzVz, eyz, exz, exy)
+Base.@propagate_inbounds function stress_update_3d!(::Val{false}, F, M, vc, dt, i, j, k, dxVx, dyVy, dzVz, eyz, exz, exy)
     (; Sxx, Syy, Szz, Syz, Sxz, Sxy) = F
     I = CartesianIndex(i, j, k)
     mu = M.mu

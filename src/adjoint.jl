@@ -174,7 +174,8 @@ end
 # velocities vⁿ and vⁿ⁻¹ (tuples). A stress component increases by Δt (C_U ε + Σ d1 R) with R driven by -c2 Δt A ε (A: the
 # moduli times τ); its adjoint weights are aU = Δt η (unrelaxed part) and aR (memory part).
 
-Base.@propagate_inbounds function grad_psv!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, k)
+Base.@propagate_inbounds grad_psv!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, k) = grad_psv!(anisotropic(M), G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, k)
+Base.@propagate_inbounds function grad_psv!(::Val{false}, G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, k)
     I, ex, ez = CartesianIndex(i, k), CartesianIndex(1, 0), CartesianIndex(0, 1)
     two = M.two[I]
     η = adjoint_strain!(E, I, adjoint_strain_psv(AdjD(M, c), Q, Δ, I), dt)
@@ -202,7 +203,8 @@ Base.@propagate_inbounds function grad_psv!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc
     G.bz[I] += Q.Vz[I] * (Vn[2][I] - Vp[2][I])
 end
 
-Base.@propagate_inbounds function grad_sh!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, k)
+Base.@propagate_inbounds grad_sh!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, k) = grad_sh!(anisotropic(M), G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, k)
+Base.@propagate_inbounds function grad_sh!(::Val{false}, G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, k)
     I = CartesianIndex(i, k)
     two = M.two[I]
     η = adjoint_strain!(E, I, adjoint_strain_sh(AdjD(M, c), Q, Δ, I), dt)
@@ -220,7 +222,8 @@ Base.@propagate_inbounds function grad_sh!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc,
     G.by[I] += Q.Vy[I] * (Vn[1][I] - Vp[1][I])
 end
 
-Base.@propagate_inbounds function grad_3d!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, j, k)
+Base.@propagate_inbounds grad_3d!(G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, j, k) = grad_3d!(anisotropic(M), G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, j, k)
+Base.@propagate_inbounds function grad_3d!(::Val{false}, G, E, Rb, Q, Δ, Vn, Vp, Z, M, c, vc, dt, i, j, k)
     I = CartesianIndex(i, j, k)
     ex, ey, ez = CartesianIndex(1, 0, 0), CartesianIndex(0, 1, 0), CartesianIndex(0, 0, 1)
     two = M.two[I]
@@ -430,6 +433,8 @@ function (d::AdjointDriver)(s)
     observed_velocities(d.observed, s)
     (; F, M, St, rec, acc, regions, backend, nt, nown, c, vc, dtT, record_every) = s
     mt_sample, f_sample, vel!, stress!, grad!, residual!, stretch_v!, stretch_s!, fmnames, names, nE = adjoint_setup(Val(s.mode))
+    vti = anisotropic(M) === Val(true)
+    vti && (names = vti_gradient_setup(Val(s.mode))[1])
     s.sinc && (residual! = sinc_kernels(s.mode)[3])
     sg = stagger(Val(s.mode))
     V = velocities(F)
@@ -534,7 +539,7 @@ function (d::AdjointDriver)(s)
     KernelAbstractions.synchronize(backend)
     # accumulators of all ranks on the global grid (rank 0), chain rule there, result to all ranks
     Gg = map(A -> gather_interior(A, s), G)
-    g = s.me == 0 ? model_gradient(s, assemble_gradient(Gg, s.med.mu, s.mode)) : nothing
+    g = s.me == 0 ? model_gradient(s, vti ? assemble_gradient_vti(Gg, s.med, s.mode) : assemble_gradient(Gg, s.med.mu, s.mode)) : nothing
     if L !== nothing
         Lg = gather_interior(L, s)
         if s.me == 0                    # the cells of the model (z up), in the wavefield units squared -> (m/s)²

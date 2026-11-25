@@ -1,5 +1,5 @@
 # Started by test_mpi.jl with 4 MPI processes. Exits with an error if a parallel run differs from the serial one.
-# The argument selects a part (forward, gradient, born, other; default all): test_mpi.jl starts each part in fresh processes, so that
+# The argument selects a part (forward, gradient, born, vti, other; default all): test_mpi.jl starts each part in fresh processes, so that
 # the code compiled for one part does not stay in memory for the next (4 processes compiling everything need ~15 GB).
 using MPI
 MPI.Init()
@@ -99,6 +99,25 @@ for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
     e = (maximum(abs, d1.v .- d2.v) / maximum(abs, d1.v), maximum(abs, δ1.v .- δ2.v) / maximum(abs, δ1.v))
     rank == 0 && println("MPI born $mode nproc=$nproc: background, scattered: $e")
     all(<(1e-12), e) || error("MPI Born modelling differs for $mode on rank $rank")
+end
+MPI.Barrier(MPI.COMM_WORLD)
+end
+
+if runs("vti")
+# VTI anisotropy: forward (P-SV, 3D) and gradient (P-SV) as in serial
+for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
+    m0 = test_model(mode)
+    m = CartData(m0.x.val, m0.y.val, m0.z.val, merge(m0.fields, (; epsilon=fill(0.2, size(m0)), delta=fill(0.1, size(m0)), gamma=fill(0.15, size(m0)))))
+    kw = (; dt=DT, nt=150, sources=test_source(), T=Float64)
+    s1, s2 = simulate(m; kw..., stations=test_stations(mode), verbose=false), simulate(m; kw..., stations=test_stations(mode), nproc, verbose=false)
+    e = maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v)
+    if mode === :psv
+        obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kw..., stations=test_stations(mode), verbose=false)
+        g1, g2 = misfit_gradient(m, obs; kw...)[2], misfit_gradient(m, obs; kw..., nproc)[2]
+        e = max(e, maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:vp, :epsilon, :delta)))
+    end
+    rank == 0 && println("MPI VTI $mode nproc=$nproc: seismograms (and gradient) difference $e")
+    e < 1e-10 || error("MPI result with VTI anisotropy differs for $mode on rank $rank")
 end
 MPI.Barrier(MPI.COMM_WORLD)
 end

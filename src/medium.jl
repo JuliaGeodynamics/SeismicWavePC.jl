@@ -17,8 +17,15 @@ Grid{N}(n, d, beg) where {N} = (z = beg[N] .+ ((1:n[N]+2H) .- H .- 0.5) .* d[N];
 
 """
 Concretely typed copy of the parts of a `CartData` the solver needs (GMG stores them untyped):
-coordinate axes and the fields `rho`, `vp`, `vs`, `Qp`, `Qs` as `Array{Float64,3}` (Q = Inf if missing).
+coordinate axes and the fields `rho`, `vp`, `vs`, `Qp`, `Qs` as `Array{Float64,3}` (Q = Inf if missing), and with
+`Val(true)` the Thomsen parameters `epsilon`, `delta`, `gamma` (0 if missing).
 """
+function model_arrays(d::CartData, ::Val{true})
+    m = model_arrays(d)
+    field(name) = haskey(d.fields, name) ? convert(Array{Float64,3}, d.fields[name])::Array{Float64,3} : zeros(size(m.rho))
+    return merge(m, (; epsilon=field(:epsilon), delta=field(:delta), gamma=field(:gamma)))
+end
+model_arrays(d::CartData, ::Val{false}) = model_arrays(d)
 function model_arrays(d::CartData)
     x, y, z = model_axes(d)
     function field(name)
@@ -85,7 +92,8 @@ out of the arrays `m` of a whole model.
 """
 function model_block(m::NamedTuple, S::NTuple{M,UnitRange{Int}}, ::Val{N}) where {M,N}
     cut(A) = internal(N == 3 ? view(A, S[1], S[2], :) : view(A, S[1], :, :), Val(N))
-    return (; rho=cut(m.rho), vp=cut(m.vp), vs=cut(m.vs), Qp=cut(m.Qp), Qs=cut(m.Qs))
+    b = (; rho=cut(m.rho), vp=cut(m.vp), vs=cut(m.vs), Qp=cut(m.Qp), Qs=cut(m.Qs))
+    return haskey(m, :epsilon) ? merge(b, (; epsilon=cut(m.epsilon), delta=cut(m.delta), gamma=cut(m.gamma))) : b
 end
 "The same, built by a [`DistributedModel`](@ref); `rho_max` is the largest density as given (`rho_factor` converts it to g/cm³)."
 function model_block(model::DistributedModel, S::NTuple{M,UnitRange{Int}}, ::Val{N}, rho_factor) where {M,N}
@@ -258,19 +266,22 @@ function setup_medium(block, g::Grid{N}, W::NTuple{N,UnitRange{Int}}, ::Val{wind
     ts = relaxation_times(fq_min, fq_max)
     zeta = constq_zeta(fq_min, fq_max, ts)
     taup, taus = NM * zeta ./ qp, NM * zeta ./ qs
-    mu = @. rho * vs^2 / visco_chi((ts,), taus, fq_ref)^2       # unrelaxed moduli
-    lam = @. rho * vp^2 / visco_chi((ts,), taup, fq_ref)^2 - 2mu
-    columns = CartesianIndices(Base.front(size(rho)))
-    vlayer = [maximum(C -> sqrt((lam[C, k] + 2mu[C, k]) / rho[C, k]), columns) for k in axes(rho, N)]
-    attenuated = any(!iszero, taup) || any(!iszero, taus)
-    z = surface_zones(lam, mu, n, W)
-
     Wc = Base.front(W)
     cells(A) = windows ? Window(A, W) : A
     cols(A, r=Wc) = windows ? Window(A, r) : A
+    v = haskey(b, :epsilon) ? vti_medium(rho, vp, vs, pad(b.epsilon), pad(b.delta), pad(b.gamma), taup, taus, ts, fq_ref) : nothing   # VTI
+    mu = v === nothing ? @.(rho * vs^2 / visco_chi((ts,), taus, fq_ref)^2) : v.mu       # unrelaxed moduli
+    lam = v === nothing ? @.(rho * vp^2 / visco_chi((ts,), taup, fq_ref)^2 - 2mu) : v.lam
+    vfast = v === nothing ? @.(sqrt((lam + 2mu) / rho)) : v.vpmax                    # VTI: the fastest direction
+    columns = CartesianIndices(Base.front(size(rho)))
+    vlayer = [maximum(C -> vfast[C, k], columns) for k in axes(rho, N)]
+    vti = v === nothing ? (;) : (; wx=cells(v.wx), wz=cells(v.wz), s13=cells(v.s13), mu66=cells(v.mu66))
+    attenuated = any(!iszero, taup) || any(!iszero, taus)
+    z = surface_zones(lam, mu, n, W)
+
     return (; rho=cells(rho), lam=cells(lam), mu=cells(mu), taup=cells(taup), taus=cells(taus), ts, vmax=maximum(vlayer), vlayer,
               attenuated, fs_top=cols(z.fs_top), fs_bot=cols(z.fs_bot), ob_top=cols(z.ob_top), ob_bot=cols(z.ob_bot),
-              kfs=cols(z.kfs, z.held), kob=cols(z.kob, z.held))   # kfs, kob are indexed by padded column
+              kfs=cols(z.kfs, z.held), kob=cols(z.kob, z.held), vti...)   # kfs, kob are indexed by padded column
 end
 
 """

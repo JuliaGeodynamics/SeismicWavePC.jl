@@ -21,8 +21,8 @@ a source or a vector of sources) the misfits and model gradients of all shots ar
   migration (see the Marmousi2 RTM example).
 - `kwargs` are those of [`simulate`](@ref) (`dt`, `nt`, `stf`, `record_every`, `absorber`, `T`, `backend`, `nproc`, …) and
   must describe the simulation that `observed` is compared with.
-- `gradient`: a `CartData` on the grid of `model` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`: ∂J/∂ of the model field in
-  its units (per kg/m³ (or g/cm³ with `density_unit = :g_cm3`), per km/s, per unit Q). Cells in the absorbing layers are
+- `gradient`: a `CartData` on the grid of `model` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs` (VTI models: also
+  `epsilon`, `delta`, `gamma`): ∂J/∂ of the model field in its units (per kg/m³ (or g/cm³ with `density_unit = :g_cm3`), per km/s, per unit Q). Cells in the absorbing layers are
   homogenized in the simulation, so their sensitivity is added to the cells next to the layers.
 - `source_gradients`: one entry per source (per shot: a vector of them), `nothing` for plane waves and ignored sources:
   - moment tensors: `M` (∂J/∂ of the six components `M0 .* M` [per N m]), `M0` (at fixed `M`);
@@ -104,6 +104,7 @@ Gradient with respect to the model fields from the gradient `dM` with respect to
 `mu`, `taup`, `taus` (chain rule of `setup_medium`, the absorber padding and the units). `s` is the setup of `simulate`.
 """
 function model_gradient(s, dM)
+    haskey(dM, :wx) && return model_gradient_vti(s, dM)                    # VTI (anisotropy.jl)
     m, g, N = s.m, s.g, length(s.g.n)
     ts = s.med.ts
     pad(A) = pad_absorber(internal(A, Val(N)), g.n, s.na)
@@ -123,16 +124,23 @@ function model_gradient(s, dM)
         dqs = isfinite(qs[I]) ? -dts * taus[I] / qs[I] : 0.0
         (drho / s.rho_unit, dvp, dvs, dqp, dqs)
     end
-    # adjoint of the padding (absorber zones and ghost cells copy cells of the model) and of `internal`
-    n = g.n
-    fields = map(1:5) do q
+    return unpad_gradient(s, G, (:rho, :vp, :vs, :Qp, :Qs))
+end
+
+"""
+The gradient as a `CartData` of the model with the fields `names`, from the per-cell tuples `G` on the padded grid: the
+adjoint of the padding (absorber zones and ghost cells copy cells of the model) and of `internal`.
+"""
+function unpad_gradient(s, G, names)
+    n, N = s.g.n, length(s.g.n)
+    fields = map(1:length(names)) do q
         A = zeros(n)
         for I in CartesianIndices(G)
             J = ntuple(a -> a == N ? clamp(I[a] - H, 1, n[a] - s.na) : clamp(I[a] - H, s.na + 1, n[a] - s.na), N)
             A[J...] += G[I][q]
         end
-        reverse(reshape(A, size(m.rho)), dims=3)
+        reverse(reshape(A, size(s.m.rho)), dims=3)
     end
     x, y, z = s.model.x.val, s.model.y.val, s.model.z.val
-    return CartData(x, y, z, (; rho=fields[1], vp=fields[2], vs=fields[3], Qp=fields[4], Qs=fields[5]))
+    return CartData(x, y, z, NamedTuple{names}(Tuple(fields)))
 end

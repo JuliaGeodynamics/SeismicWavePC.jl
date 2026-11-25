@@ -80,7 +80,8 @@ Run a visco-elastic wave propagation simulation (OpenSWPC algorithm) on the velo
 [`Seismograms`](@ref).
 
 `model` is a `CartData` (coordinates in km, z up; constant spacing in x and y, constant or smoothly varying in z) with
-fields `rho` [kg/m³], `vp`, `vs` [km/s] and optionally `Qp`, `Qs` (default: no attenuation). Cells with `vp = vs = 0` are
+fields `rho` [kg/m³], `vp`, `vs` [km/s] and optionally `Qp`, `Qs` (default: no attenuation) and the Thomsen parameters
+`epsilon`, `delta`, `gamma` (VTI anisotropy; `vp`, `vs` are then vertical velocities). Cells with `vp = vs = 0` are
 air: the free surface and topography follow from that. Cells with `vs = 0` and `vp > 0` are water. A `CartData` of size
 `(nx, 1, nz)` gives a 2D simulation in the x-z plane. A model too large to hold as a whole is given as a
 [`DistributedModel`](@ref), of which every MPI process builds only its own subdomain.
@@ -114,7 +115,7 @@ function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolat
     mode = size(model)[2] == 1 ? wave : :p3d
     mode in (:psv, :sh, :p3d) || error("wave must be :psv or :sh, got :$wave")
     interpolation in (:cell, :sinc) || error("interpolation must be :cell or :sinc, got :$interpolation")
-    return simulate(model, Val(mode), Val(interpolation), Val(has_attenuation(model)); kwargs...)
+    return simulate(model, Val(mode), Val(interpolation), Val(has_attenuation(model)), Val(has_anisotropy(model)); kwargs...)
 end
 
 "Does the model have attenuation (finite `Qp` or `Qs` anywhere)? Without, the memory variables are left out."
@@ -122,11 +123,11 @@ has_attenuation(model::CartData) = any(f -> haskey(model.fields, f) && any(isfin
 has_attenuation(model::DistributedModel) = model.attenuation
 
 # Function barrier on the solver type: from here on the dimension N is known to the compiler.
-function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{attenuation}=Val(true); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
+function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{attenuation}=Val(true), ::Val{aniso}=Val(false); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
                   absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
                   snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true,
-                  wavefield=model isa CartData) where {mode,interp,attenuation,FT}
+                  wavefield=model isa CartData) where {mode,interp,attenuation,aniso,FT}
     N = mode === :p3d ? 3 : 2
     sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave} ? [sources] : collect(sources)
     all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave}, sources) ||
@@ -136,7 +137,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     distributed = model isa DistributedModel        # every rank has the medium of its own subdomain only
     distributed && !(interp === :cell && driver === nothing && all(s -> s isa Union{MomentTensorSource,ForceSource}, sources)) &&
         error("a DistributedModel takes MomentTensorSource and ForceSource with interpolation = :cell; plane and teleseismic waves, interpolation = :sinc, misfit gradients and Born modelling need a CartData")
-    m = whole_model(model, density_unit)
+    m = whole_model(model, density_unit, Val(aniso))
     axes_ = model_axes(model)
     g = Grid(axes_, Val(N))
     all(ntuple(a -> g.n[a] > (a < N ? 2na : na), N)) || error("the model ($(join(g.n, "×")) cells) must be larger than the absorbing layers (na = $na cells)")
@@ -152,7 +153,8 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     (gx_c, gx_b), (gz_c, gz_b) = sponge(1), sponge(N)
     G = N == 3 ? (; gx_c, gx_b, gy_c=sponge(2)[1], gy_b=sponge(2)[2], gz_c, gz_b) : (; gx_c, gx_b, gz_c, gz_b)
     M = merge((; rho=loc(med.rho), lam=loc(med.lam), mu=loc(med.mu), taup=loc(med.taup), taus=loc(med.taus),
-                 fs_top=col(med.fs_top), fs_bot=col(med.fs_bot), ob_top=col(med.ob_top), ob_bot=col(med.ob_bot)), G)
+                 fs_top=col(med.fs_top), fs_bot=col(med.fs_bot), ob_top=col(med.ob_top), ob_bot=col(med.ob_bot)), G,
+              aniso ? (; wx=loc(med.wx), wz=loc(med.wz), s13=loc(med.s13), mu66=loc(med.mu66)) : (;))
     # coefficients of the differences: constant along x (and y); per layer in depth, for fields at cell centres and at faces
     c = (ntuple(a -> (FT(9 / 8 / g.d[a]), FT(1 / 24 / g.d[a]), FT(1 / g.d[a])), N - 1)..., map(t -> map(dev, t), depth_coefficients(g, FT))...)
     attenuation || !med.attenuated || error("the model has attenuation (finite Qp or Qs): use Val(true)")
@@ -169,6 +171,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     planewaves = PlaneWave[s for s in sources if s isa PlaneWave]
     teleseismic = TeleseismicWave[s for s in sources if s isa TeleseismicWave]
     length(teleseismic) <= 1 || error("one TeleseismicWave per simulation")
+    aniso && !(isempty(planewaves) && isempty(teleseismic)) && error("plane waves and teleseismic waves need an isotropic model (for now)")
     nused = length(moments) + length(forces) + length(planewaves) + length(teleseismic)
     nused == 0 && error("all sources are outside the model or in the air (vp = vs = 0)")
     nused < length(sources) && me == 0 &&
@@ -293,8 +296,9 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
 end
 
 "The arrays of a whole model (density in g/cm³, the internal unit); `nothing` for a model that no rank holds as a whole."
-whole_model(model::CartData, density_unit) = (m = model_arrays(model); merge(m, (; rho=m.rho ./ density_scale(density_unit, maximum(m.rho)))))
-whole_model(::DistributedModel, density_unit) = nothing
+whole_model(model::CartData, density_unit, aniso=Val(false)) =
+    (m = model_arrays(model, aniso); merge(m, (; rho=m.rho ./ density_scale(density_unit, maximum(m.rho)))))
+whole_model(::DistributedModel, density_unit, aniso=Val(false)) = nothing
 
 """
 Domain decomposition in x (and y) with ImplicitGlobalGrid: every rank owns `n / dims` cells plus `H` ghost cells on each side

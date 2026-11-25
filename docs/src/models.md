@@ -6,11 +6,40 @@ A model is a GMG `CartData` (coordinates in km, z up; constant spacing in x and 
 - `rho` [kg/m³] (or g/cm³ with `density_unit = :g_cm3`, as in OpenSWPC),
 - `vp`, `vs` [km/s],
 - optionally `Qp`, `Qs` (without them the model is elastic). Q is constant between `fq_min` and `fq_max`, and the velocities
-  apply at `fq_ref` (keywords of `simulate`; defaults 0.05, 5 and 1 Hz).
+  apply at `fq_ref` (keywords of `simulate`; defaults 0.05, 5 and 1 Hz),
+- optionally `epsilon`, `delta`, `gamma`: VTI anisotropy (see below).
 
 Cells with `vp = vs = 0` are air: the free surface and topography follow from them. Cells with `vs = 0` and `vp > 0` are
 water (oceans, lakes). A `CartData` of size `(nx, 1, nz)` is a 2D model (P-SV by default, `wave = :sh` for SH waves).
 Any GMG tool can be used to build the model: layers, volcanoes, spheres, slabs, geographic data and projections.
+
+## Anisotropy (VTI)
+
+With any of the fields `epsilon`, `delta`, `gamma` (Thomsen parameters; missing ones are 0) the model is transversely
+isotropic with a vertical symmetry axis (VTI: layered sediments, horizontally aligned cracks or melt lenses). `vp` and `vs`
+are then the vertical velocities:
+
+| | |
+|---|---|
+| qP | `vp` vertically, `vp √(1 + 2ε)` horizontally; `δ` shapes the wavefront near the vertical |
+| SH | `vs` vertically, `vs √(1 + 2γ)` horizontally |
+| qSV | `vs` vertically and horizontally, its anisotropy follows from ε − δ |
+
+```julia
+model = CartData(X, Y, Z, (; rho, vp, vs, epsilon=fill(0.1, size(X)), delta=fill(0.05, size(X)), gamma=fill(0.08, size(X))))
+```
+
+- The symmetry axis is the z axis of the grid: every stress needs only the strain rates at its own point, as in isotropic
+  media, so the accuracy and the stability (time step: the fastest qP direction) are those of the isotropic code. Tilted
+  axes (TTI) are not supported.
+- **Attenuation:** the normal stiffness is split as in the isotropic scheme into a P part (`Qp`) and the rest (`Qs`), and
+  stays symmetric: qP waves along the axes attenuate with `Qp`, S waves with `Qs`; isotropic media give exactly the
+  isotropic scheme.
+- Everything else works as for isotropic models: free surface and topography, oceans, PML, sources and stations between
+  grid points, GPUs, MPI, gradients (`misfit_gradient` also returns `epsilon`, `delta`, `gamma`; exact, as checked against
+  automatic differentiation) and Born modelling. Not yet: plane waves and teleseismic waves (their incoming field assumes
+  isotropic layers).
+- Models without these fields run the isotropic kernels: anisotropy costs nothing when it is not used.
 
 ## Finer cells near the surface
 

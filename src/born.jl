@@ -41,6 +41,7 @@ Base.:(==)(a::Tan, b::Tan) = a.v == b.v && a.d == b.d
 Base.:<(a::Tan, b::Tan) = a.v < b.v
 Base.:<=(a::Tan, b::Tan) = a.v <= b.v
 Base.isfinite(a::Tan) = isfinite(a.v) && isfinite(a.d)
+@inline Base.sqrt(a::Tan) = (r = sqrt(a.v); Tan(r, ifelse(r > 0, a.d / 2r, zero(r))))     # 0 at 0 (air)
 value(x::Tan) = x.v
 tangent(x::Tan) = x.d
 
@@ -63,8 +64,8 @@ plain_region((lo, ndr, P)) = (lo, ndr, plain_zone(P))
 Born (linearized) modelling: the seismograms `scattered` of the model perturbation `δm` to first order, J δm (J: the
 Jacobian of the seismograms with respect to the model), and the seismograms `background` of `model`, from one simulation.
 
-- `δm`: a `CartData` on the grid of `model` with any of the fields `rho`, `vp`, `vs`, `Qp`, `Qs` (missing fields: no
-  perturbation), in the units of the model.
+- `δm`: a `CartData` on the grid of `model` with any of the fields `rho`, `vp`, `vs`, `Qp`, `Qs` (and, for VTI models,
+  `epsilon`, `delta`, `gamma`; missing fields: no perturbation), in the units of the model.
 - `kwargs` are those of [`simulate`](@ref) (`dt`, `nt`, `stf`, `wave`, `interpolation`, `absorber`, `backend`, …);
   `T` is the floating-point type (`Float64` for tests of the linearization).
 
@@ -78,7 +79,10 @@ function born(model::CartData, δm::CartData; T::Type{<:AbstractFloat}=Float32, 
     bad = intersect(keys(kwargs), (:snapshots, :callback, :checkpoint, :restart, :driver))
     isempty(bad) || error("born does not take the keywords $(join(bad, ", "))")
     size(δm) == size(model) || error("δm must be on the grid of the model (size $(size(model)), got $(size(δm)))")
-    keys(δm.fields) ⊆ (:rho, :vp, :vs, :Qp, :Qs) || error("δm may have the fields rho, vp, vs, Qp, Qs, got $(keys(δm.fields))")
+    keys(δm.fields) ⊆ (:rho, :vp, :vs, :Qp, :Qs, :epsilon, :delta, :gamma) ||
+        error("δm may have the fields rho, vp, vs, Qp, Qs (and epsilon, delta, gamma), got $(keys(δm.fields))")
+    has_anisotropy(δm) && !has_anisotropy(model) &&
+        error("δm perturbs epsilon, delta or gamma: give the model these fields (zero for an isotropic background)")
     return simulate(model; kwargs..., T=Tan{T}, verbose=false, driver=BornDriver(δm))
 end
 
@@ -91,6 +95,7 @@ The perturbation of the internal (padded) arrays `rho`, `lam`, `mu`, `taup`, `ta
 fields: the derivative of `setup_medium` (with the absorber padding and the units), whose transpose is `model_gradient`.
 """
 function medium_perturbation(s, δm)
+    haskey(s.med, :wx) && return medium_perturbation_vti(s, δm)        # VTI (anisotropy.jl)
     m, g, N = s.m, s.g, length(s.g.n)
     ts, f = s.med.ts, s.fq_ref
     pad(A) = pad_absorber(internal(A, Val(N)), g.n, s.na)
@@ -120,7 +125,7 @@ function (d::BornDriver)(s)
         B = Tan{FT}.(value.(Array(A)), FT.(δ[R...]))
         return copyto!(similar(A), B)
     end
-    medium = (:rho, :lam, :mu, :taup, :taus)
+    medium = keys(δM)
     Mp = merge(map(plain, Base.structdiff(M, NamedTuple{medium})),
                map(k -> perturbed(getfield(M, k), getfield(δM, k)), NamedTuple{medium}(medium)))
     p = merge(s, (; c=plain(s.c), vc=plain(s.vc), dtT=plain(s.dtT)))

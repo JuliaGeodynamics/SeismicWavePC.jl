@@ -37,6 +37,7 @@ include("misfits.jl")
 include("gradient.jl")
 include("adjoint.jl")
 include("born.jl")
+include("anisotropy.jl")
 include("inversion.jl")
 
 export MomentTensorSource, DoubleCoupleSource, ForceSource, PlaneWave, TeleseismicWave, Station, Seismograms, simulate, moment_rate, SampledSTF, CPU, DistributedModel

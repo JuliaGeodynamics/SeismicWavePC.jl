@@ -5,7 +5,8 @@
 """
     ModelParameters(model::CartData, fields::Symbol...; mask=nothing, log=false, basis=nothing)
 
-Parametrization of `model` by a vector θ: the listed `fields` (`:vp`, `:vs`, `:rho`, `:Qp`, `:Qs`) vary, everything else
+Parametrization of `model` by a vector θ: the listed `fields` (`:vp`, `:vs`, `:rho`, `:Qp`, `:Qs`, and for VTI models
+`:epsilon`, `:delta`, `:gamma`) vary, everything else
 stays as in `model`.
 - Without `basis`: one parameter per cell where `mask` is true (default: solid rock, `vs > 0`), the field value or, with
   `log = true`, its logarithm (keeps it positive, often better scaled for optimization and sampling).
