@@ -236,12 +236,12 @@ function ghost_tables(s::Surface, g::Grid{2}, med, mode::Val{:psv}, FT, dev, na)
     stiffness(P) = cell_stiffness(med, CartesianIndex(clamp(cell_index(g, 1, P[1]), 1, sz[1]), clamp(cell_index(g, 2, P[2] + 0.5h), 1, sz[2])))
     tables = map((:velocity, :stress)) do grp
         other = grp === :velocity ? :stress : :velocity       # the solid points of `other` read the ghosts of `grp`
-        needed = Set{Tuple{Int,CartesianIndex{2}}}()
+        needed = Dict{Tuple{Int,CartesianIndex{2}},Vector{Int}}()   # ghost point => the axes along which it is read
         for I in CartesianIndices(sz), (fo, oo) in enumerate(offs[other])
             (cellsolid[I] && computed(other, fo, I)) || continue
             for (fr, d) in reads(other, fo, flagged[I])
                 J = I + CartesianIndex(d)
-                inside(J) && air(J, offs[grp][fr]) && push!(needed, (fr, J))
+                inside(J) && air(J, offs[grp][fr]) && push!(get!(Vector{Int}, needed, (fr, J)), d[1] != 0 ? 1 : 2)
             end
         end
         tf, ti, ptr, sf, si, sw = Int8[], Int32[], Int32[1], Int8[], Int32[], FT[]
@@ -253,14 +253,20 @@ function ghost_tables(s::Surface, g::Grid{2}, med, mode::Val{:psv}, FT, dev, na)
         for I in CartesianIndices(sz), (f, o) in enumerate(offs[grp])
             (near[I] && air(I, o)) || (side(I) && all(c -> aircell(I + c), cells_of[f])) || continue
             push!(tf, f); push!(ti, L[I])
-            if (f, I) in needed
+            if haskey(needed, (f, I))
                 q = point_position(g, I, o)
                 data = ghost_data(s, g, I, q, offs[grp], sz, (J, od, _) -> get!(() -> ghosted(s, point_position(g, J, od), h), cache, (J, od)))
                 P, _ = nearest_surface_point(s, q)
                 C = stiffness(P)
                 edge = min(I[1] - first(interior), last(interior) - I[1]) < GHOST_EDGE[]   # next to the absorbing layers
-                wts = ghost_weights(Val(grp), s, q, f, data, h, C; degree=edge ? min(2, GHOST_DEGREE[]) : GHOST_DEGREE[])
-                for ((fd, J, _), wj) in zip(data, wts)
+                isg = (J, od) -> !(1 <= J[1] <= sz[1] && 1 <= J[2] <= sz[2]) || get!(() -> ghosted(s, point_position(g, J, od), h), cache, (J, od))
+                lf = GHOST_METHOD[] === :xgfm ? xgfm_ghost(Val(grp), s, g, I, q, f, unique(needed[(f, I)]), offs[grp], isg, C) :
+                     GHOST_METHOD[] === :normal ? normal_ghost(Val(grp), s, g, q, f, offs[grp], isg, C) : nothing
+                if lf === nothing                                    # the polynomial fit (or where xGFM finds no points)
+                    wts = ghost_weights(Val(grp), s, q, f, data, h, C; degree=edge ? min(2, GHOST_DEGREE[]) : GHOST_DEGREE[])
+                    lf = Dict((fd, J) => wj for ((fd, J, _), wj) in zip(data, wts))
+                end
+                for ((fd, J), wj) in lf
                     abs(wj) > 1e-12 || continue
                     push!(sf, fd); push!(si, L[J]); push!(sw, FT(wj))
                 end
@@ -269,7 +275,7 @@ function ghost_tables(s::Surface, g::Grid{2}, med, mode::Val{:psv}, FT, dev, na)
         end
         # the filter: solid points near the surface, in x and in depth, of the highest order (6, 4, 2) whose points are
         # solid or ghost points in use
-        usable(f, J) = inside(J) && (J[1] in interior ? (!air(J, offs[grp][f]) || (f, J) in needed) : !all(c -> aircell(J + c), cells_of[f]))
+        usable(f, J) = inside(J) && (J[1] in interior ? (!air(J, offs[grp][f]) || haskey(needed, (f, J))) : !all(c -> aircell(J + c), cells_of[f]))
         ff, fi, fptr, fsf, fsi, fsw = Int8[], Int32[], Int32[1], Int8[], Int32[], FT[]
         if FILTER[] > 0
             for I in CartesianIndices(sz), (f, o) in enumerate(offs[grp])
@@ -311,6 +317,216 @@ function ghost_tables(s::Surface, g::Grid{2}, med, mode::Val{:psv}, FT, dev, na)
            filter=(; ff=dev(ff), fi=dev(fi), ptr=dev(fptr), sf=dev(fsf), si=dev(fsi), sw=dev(fsw), buf=dev(zeros(FT, length(fi))), n=length(fi)))
     end
     return (; velocity=tables[1], stress=tables[2])
+end
+
+# ------------------------------------------------------------------ xGFM ghost values (Egan & Gibou 2020)
+#
+# Ghost-fluid values along the grid line on which a ghost point is read, completed with the tangential part of the jump
+# (xGFM). Stresses (Dirichlet type): linear between the solid neighbour on that line and the surface point, where
+# σ = σ_tt t⊗t (σ n = 0), σ_tt extrapolated along the normal from 1.5 and 2.5 cells deep. Velocities (Neumann type):
+# v_in + ∇v (q - p_in) with the full gradient at the surface, ∇v = ∂n v ⊗ n + ∂t v ⊗ t: ∂t v extrapolated along the
+# normal, ∂n v from the traction-free condition (C : ∇v) n = 0. All linear in the solid values: weights.
+
+const GHOST_METHOD = Ref(:fit)   # :normal (xGFM along the normal), :xgfm (along grid lines) or :fit (ghost_weights)
+const LinForm = Dict{Tuple{Int,CartesianIndex{2}},Float64}
+addto!(acc::LinForm, lf::LinForm, c) = (for (key, v) in lf; acc[key] = get(acc, key, 0.0) + c * v; end; acc)
+
+"Bilinear interpolation of field `f` (offsets `offs`) at the point `p`, as weights; `nothing` if it needs a ghost point."
+function interp_form(g::Grid{2}, offs, f, p, isg)
+    h, o = g.d[1], offs[f]
+    ui = (p[1] - g.beg[1]) / h + H + 0.5 - o[1]
+    zref = o[2] == 0 ? g.zc : g.zf
+    uk = (p[2] - zref[1]) / h + 1
+    i0, k0 = floor(Int, ui), floor(Int, uk)
+    fx, fz = ui - i0, uk - k0
+    lf = LinForm()
+    for (di, wx) in ((0, 1 - fx), (1, fx)), (dk, wz) in ((0, 1 - fz), (1, fz))
+        w = wx * wz
+        w > 1e-14 || continue
+        J = CartesianIndex(i0 + di, k0 + dk)
+        isg(J, o) && return nothing
+        lf[(f, J)] = get(lf, (f, J), 0.0) + w
+    end
+    return lf
+end
+
+"σ_tt (tangential normal stress) at the point `p` as weights, for the tangent `t`."
+function stt_form(g, offs, p, t, isg)
+    acc = LinForm()
+    for (f, c) in ((1, t[1]^2), (2, t[2]^2), (3, 2t[1] * t[2]))
+        lf = interp_form(g, offs, f, p, isg)
+        lf === nothing && return nothing
+        addto!(acc, lf, c)
+    end
+    return acc
+end
+
+"A quantity at the surface point P, extrapolated along the normal from three depths (quadratic; from 1 cell deep on)."
+function extrapolated(form, P, n, h)
+    for d0 in (1.0h, 1.5h, 2.0h, 2.5h)
+        ds = (d0, d0 + h, d0 + 2h)
+        vals = [form((P[1] - d * n[1], P[2] - d * n[2])) for d in ds]
+        any(isnothing, vals) && continue
+        acc = LinForm()
+        for (j, d) in enumerate(ds)                            # Lagrange weight of depth d at depth 0
+            w = prod((0 - dk) / (d - dk) for (m, dk) in enumerate(ds) if m != j)
+            addto!(acc, vals[j], w)
+        end
+        return acc
+    end
+    return nothing
+end
+
+"The solid neighbour of the ghost point `I` (offset `o`) along `axis` and its distance; the side with the solid point."
+function line_neighbour(g, I, o, axis, isg)
+    e = CartesianIndex(ntuple(==(axis), 2))
+    for J in (I - e, I + e)
+        isg(J, o) || return J
+    end
+    return nothing
+end
+
+"Distance from `p` along the unit direction `e` to the surface (the first change from solid to air), up to `smax`."
+function surface_distance(s::Surface, p, e, smax)
+    φ(r) = surface_depth(s, p[1] + r * e[1]) - (p[2] + r * e[2])    # > 0 in the air
+    φ(smax) > 0 || return nothing
+    a, b = 0.0, smax
+    for _ in 1:60
+        m = (a + b) / 2
+        φ(m) > 0 ? (b = m) : (a = m)
+    end
+    return (a + b) / 2
+end
+
+"xGFM ghost value of the stress field `f` at the ghost point `I` (position q), read along `axes`."
+function xgfm_ghost(::Val{:stress}, s::Surface, g::Grid{2}, I, q, f, axes, offs, isg, _)
+    h = g.d[1]
+    best = nothing
+    for axis in axes
+        J = line_neighbour(g, I, offs[f], axis, isg)
+        J === nothing && continue
+        p = point_position(g, J, offs[f])
+        sq = hypot(q[1] - p[1], q[2] - p[2])
+        e = ((q[1] - p[1]) / sq, (q[2] - p[2]) / sq)
+        sI = surface_distance(s, p, e, sq + 2h)
+        sI === nothing && continue
+        (best === nothing || sI > best[3]) && (best = (J, sq, sI, p, e))
+    end
+    best === nothing && return nothing
+    J, sq, sI, p, e = best
+    PI = (p[1] + sI * e[1], p[2] + sI * e[2])
+    _, n = nearest_surface_point(s, PI)
+    t = (-n[2], n[1])
+    stt = extrapolated(x -> stt_form(g, offs, x, t, isg), PI, n, h)
+    stt === nothing && return nothing
+    coef = (t[1]^2, t[2]^2, t[1] * t[2])[f]                     # σ = σ_tt t⊗t at the surface
+    r = sq / sI
+    return addto!(LinForm((f, J) => 1 - r), stt, r * coef)
+end
+
+"xGFM ghost value of the velocity component `f` at the ghost point `I` (position q), read along `axes`."
+function xgfm_ghost(::Val{:velocity}, s::Surface, g::Grid{2}, I, q, f, axes, offs, isg, C)
+    h = g.d[1]
+    J = nothing
+    for axis in axes
+        J = line_neighbour(g, I, offs[f], axis, isg)
+        J === nothing || break
+    end
+    J === nothing && return nothing
+    p = point_position(g, J, offs[f])
+    P, n = nearest_surface_point(s, q)
+    t = (-n[2], n[1])
+    # tangential derivatives of both components at the surface
+    dt(c) = extrapolated(x -> begin
+            a = interp_form(g, offs, c, (x[1] + h * t[1], x[2] + h * t[2]), isg)
+            b = interp_form(g, offs, c, (x[1] - h * t[1], x[2] - h * t[2]), isg)
+            (a === nothing || b === nothing) ? nothing : addto!(addto!(LinForm(), a, 1 / 2h), b, -1 / 2h)
+        end, P, n, h)
+    τ = (dt(1), dt(2))
+    (τ[1] === nothing || τ[2] === nothing) && return nothing
+    # ∂n v = M ∂t v from the traction-free condition (C : sym ∇v) n = 0
+    C11, C13, C33, C55 = C
+    function traction(G)                                       # G[c, d] = ∂_d v_c
+        sxx = C11 * G[1, 1] + C13 * G[2, 2]
+        szz = C13 * G[1, 1] + C33 * G[2, 2]
+        sxz = C55 * (G[1, 2] + G[2, 1])
+        return [sxx * n[1] + sxz * n[2], sxz * n[1] + szz * n[2]]
+    end
+    unit(c, dir) = (G = zeros(2, 2); G[c, :] .= dir; G)
+    A = hcat(traction(unit(1, n)), traction(unit(2, n)))
+    B = hcat(traction(unit(1, t)), traction(unit(2, t)))
+    M = -(A \ B)
+    d = (q[1] - p[1], q[2] - p[2])
+    dn, dtan = d[1] * n[1] + d[2] * n[2], d[1] * t[1] + d[2] * t[2]
+    lf = LinForm((f, J) => 1.0)
+    addto!(lf, τ[f], dtan)                                     # ∂t v_f (q - p)·t
+    addto!(lf, τ[1], M[f, 1] * dn)                             # ∂n v_f (q - p)·n
+    addto!(lf, τ[2], M[f, 2] * dn)
+    return lf
+end
+
+"Values at depths ζ1 = 1, ζ2 = 2 cells below the surface point P along the normal (deeper if needed): (ζ1, ζ2, form1, form2)."
+function normal_values(form, P, n, h)
+    for d0 in (1.0h, 1.5h, 2.0h)
+        a, b = form((P[1] - d0 * n[1], P[2] - d0 * n[2])), form((P[1] - (d0 + h) * n[1], P[2] - (d0 + h) * n[2]))
+        (a === nothing || b === nothing) && continue
+        return d0, d0 + h, a, b
+    end
+    return nothing
+end
+
+"""
+xGFM ghost value along the normal (`GHOST_METHOD = :normal`): a quadratic in the depth ζ below the surface through the
+surface value (stresses: σ = σ_tt t⊗t) or with the surface derivative (velocities: ∂n v from the traction-free condition
+with the tangential derivatives), and two interior values. O(h³) ghost values.
+"""
+function normal_ghost(::Val{:stress}, s::Surface, g::Grid{2}, q, f, offs, isg, _)
+    h = g.d[1]
+    P, n = nearest_surface_point(s, q)
+    t = (-n[2], n[1])
+    ζq = -((q[1] - P[1]) * n[1] + (q[2] - P[2]) * n[2])          # depth of q below the surface (< 0 in the air)
+    stt = extrapolated(x -> stt_form(g, offs, x, t, isg), P, n, h)
+    nv = normal_values(x -> interp_form(g, offs, f, x, isg), P, n, h)
+    (stt === nothing || nv === nothing) && return nothing
+    ζ1, ζ2, v1, v2 = nv
+    coef = (t[1]^2, t[2]^2, t[1] * t[2])[f]
+    w0 = (ζq - ζ1) * (ζq - ζ2) / (ζ1 * ζ2)                     # Lagrange through ζ = 0, ζ1, ζ2
+    w1 = ζq * (ζq - ζ2) / (ζ1 * (ζ1 - ζ2))
+    w2 = ζq * (ζq - ζ1) / (ζ2 * (ζ2 - ζ1))
+    return addto!(addto!(addto!(LinForm(), stt, w0 * coef), v1, w1), v2, w2)
+end
+function normal_ghost(::Val{:velocity}, s::Surface, g::Grid{2}, q, f, offs, isg, C)
+    h = g.d[1]
+    P, n = nearest_surface_point(s, q)
+    t = (-n[2], n[1])
+    ζq = -((q[1] - P[1]) * n[1] + (q[2] - P[2]) * n[2])
+    dt(c) = extrapolated(x -> begin
+            a = interp_form(g, offs, c, (x[1] + h * t[1], x[2] + h * t[2]), isg)
+            b = interp_form(g, offs, c, (x[1] - h * t[1], x[2] - h * t[2]), isg)
+            (a === nothing || b === nothing) ? nothing : addto!(addto!(LinForm(), a, 1 / 2h), b, -1 / 2h)
+        end, P, n, h)
+    τ = (dt(1), dt(2))
+    nv = normal_values(x -> interp_form(g, offs, f, x, isg), P, n, h)
+    (τ[1] === nothing || τ[2] === nothing || nv === nothing) && return nothing
+    C11, C13, C33, C55 = C
+    function traction(G)
+        sxx = C11 * G[1, 1] + C13 * G[2, 2]
+        szz = C13 * G[1, 1] + C33 * G[2, 2]
+        sxz = C55 * (G[1, 2] + G[2, 1])
+        return [sxx * n[1] + sxz * n[2], sxz * n[1] + szz * n[2]]
+    end
+    unit(c, dir) = (G = zeros(2, 2); G[c, :] .= dir; G)
+    M = -(hcat(traction(unit(1, n)), traction(unit(2, n))) \ hcat(traction(unit(1, t)), traction(unit(2, t))))
+    b = addto!(addto!(LinForm(), τ[1], -M[f, 1]), τ[2], -M[f, 2])    # dv/dζ at the surface = -∂n v_f
+    ζ1, ζ2, v1, v2 = nv
+    # v(ζ) = a + b ζ + c ζ²: c = ((v2 - b ζ2) - (v1 - b ζ1)) / (ζ2² - ζ1²), a = v1 - b ζ1 - c ζ1²
+    D = ζ2^2 - ζ1^2
+    wc1, wc2, wcb = -1 / D, 1 / D, (ζ1 - ζ2) / D                # c = wc1 v1 + wc2 v2 + wcb b
+    lf = LinForm()
+    addto!(lf, v1, 1 + wc1 * (ζq^2 - ζ1^2))                     # v(ζq) = v1 + b (ζq - ζ1) + c (ζq² - ζ1²)
+    addto!(lf, v2, wc2 * (ζq^2 - ζ1^2))
+    addto!(lf, b, (ζq - ζ1) + wcb * (ζq^2 - ζ1^2))
+    return lf
 end
 
 """
