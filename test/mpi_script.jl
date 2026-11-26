@@ -248,14 +248,14 @@ if runs("curvilinear")
     base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=200 .* one.(X), Qs=100 .* one.(X))
     srcs = [DoubleCoupleSource(-2.0, 0.0, -7.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0)]
     sts = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -9:3:9]
-    kw = (; dt=stable_dt(addfield(mesh, base), srcs), tmax=4.0, sources=srcs, T=Float64)
+    kw = (; dt=stable_dt(addfield(mesh, base), srcs), tmax=4.0, sources=srcs, T=Float64, absorber=:pml, na=10)
     obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* (1 .+ 0.03 .* exp.(-(X .^ 2 .+ (Z .+ 2) .^ 2) ./ 4))))); kw..., stations=sts, verbose=false)
     J1, g1, sg1 = misfit_gradient(addfield(mesh, base), obs; kw..., illumination=true)
     J2, g2, sg2 = misfit_gradient(addfield(mesh, base), obs; kw..., nproc=4, illumination=true)
     srcdiff(a, b) = maximum(k -> maximum(abs, collect(a[k]) .- collect(b[k])) / maximum(abs, collect(a[k])), (:x, :z, :M, :t0, :stf))
     e = (abs(J1 / J2 - 1), maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs, :Qp, :Qs, :illumination)),
          srcdiff(sg1[1], sg2[1]))
-    rank == 0 && println("MPI curvilinear gradient (attenuation) nproc=4: misfit, gradient $e")
+    rank == 0 && println("MPI curvilinear gradient (attenuation, PML) nproc=4: misfit, gradient $e")
     all(<(1e-10), e) || error("MPI curvilinear gradient differs on rank $rank")
     # misfit gradient (3D, VTI)
     mesh = curvilinear_mesh(range(-8, 8, length=41), range(-7, 7, length=37), [topo3, moho3]; dz=0.5, bottom=-12)
@@ -265,13 +265,13 @@ if runs("curvilinear")
             delta=ifelse.(low, 0.02, 0.06), gamma=ifelse.(low, 0.03, 0.1))
     srcs = [DoubleCoupleSource(-1.0, 0.5, -7.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0)]
     sts = [Station("s$x$y", Float64(x), Float64(y), 0.0; surface=true) for x in -6:3:6 for y in (-4, 0, 5)]
-    kw = (; dt=stable_dt(addfield(mesh, base), srcs), tmax=3.0, sources=srcs, T=Float64)
+    kw = (; dt=stable_dt(addfield(mesh, base), srcs), tmax=3.0, sources=srcs, T=Float64, absorber=:pml, na=6)
     obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* (1 .+ 0.03 .* exp.(-(X .^ 2 .+ Y .^ 2 .+ (Z .+ 2) .^ 2) ./ 4))))); kw..., stations=sts, verbose=false)
     J1, g1, sg1 = misfit_gradient(addfield(mesh, base), obs; kw...)
     J2, g2, sg2 = misfit_gradient(addfield(mesh, base), obs; kw..., nproc=(2, 2))
     e = (abs(J1 / J2 - 1), maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs, :epsilon, :delta, :gamma)),
          srcdiff(sg1[1], sg2[1]))
-    rank == 0 && println("MPI curvilinear 3D gradient (VTI) nproc=(2, 2): misfit, gradient $e")
+    rank == 0 && println("MPI curvilinear 3D gradient (VTI, PML) nproc=(2, 2): misfit, gradient $e")
     all(<(1e-10), e) || error("MPI curvilinear 3D gradient differs on rank $rank")
     # Born modelling (3D)
     δm = addfield(mesh, (; vs=0.1 .* exp.(-((X .- 1) .^ 2 .+ Y .^ 2 .+ (Z .+ 2) .^ 2) ./ 4), rho=zero(X)))

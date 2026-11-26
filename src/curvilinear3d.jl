@@ -17,46 +17,76 @@ in global indices). No closure over the element type: the kernels stay type stab
     B.G3[i, j, k] = jx * B.S13[i, j, k] + jy * B.S23[i, j, k] + B.S33[i, j, k]
 end
 
-# Momentum at node (i, j, k); the region flags (fx, fy, fz): interior in x, y, η (no closures, no SAT terms there).
-@inline Base.@propagate_inbounds function momentum3_cv!(B, Bd, Bu, dt, damp, ::Val{flags}, i, j, k) where {flags}
+"The arrays of a neighbouring block that the interface terms read (small kernel arguments: Metal allows 4 kB)."
+neighbour3(B) = (; V1=B.V1, V2=B.V2, V3=B.V3, G1=B.G1, G2=B.G2, G3=B.G3)
+neighbour3(::Nothing) = nothing
+
+# Momentum at node (i, j, k); the region flags (fx, fy, fz[, px, py, pz]): interior in x, y, η (no closures, no SAT terms
+# there), and in the PML layers of x, y, the bottom. The parts in ξ, ψ, η (with their SAT terms) are summed (the adjoint
+# applies them separately: `part`; the PML stretches them, see curvilinear.jl).
+@inline flags3(F) = length(F) == 3 ? (F..., false, false, false) : F
+@inline yslab(P, jg) = jg <= P.np ? jg : jg - P.nyg + 2P.np
+@inline Base.@propagate_inbounds function momentum3_cv!(B, Bd, Bu, dt, damp, ::Val{F}, i, j, k) where {F}
     (; V1, V2, V3, S11, S22, S33, S23, S13, S12, G1, G2, G3, J, iρJ, a1, a2, a3, hξ, hψ, hη, ox, oy, nxg, nyg) = B
+    flags = flags3(F)
     fx, fy, fz = Val(flags[1]), Val(flags[2]), Val(flags[3])
     nx, ny, nz = size(V1)
     T = eltype(V1)
     w = T(SBP_W[1])
     # J σ_c1 along ξ, J σ_c2 along ψ, G_c along η
-    d1 = dmin(q -> @inbounds(J[q, j, k] * S11[q, j, k]), i, ox, nxg, fx, T) / hξ + dmin(q -> @inbounds(J[i, q, k] * S12[i, q, k]), j, oy, nyg, fy, T) / hψ +
-         dmin(q -> @inbounds(G1[i, j, q]), k, 0, nz, fz, T) / hη
-    d2 = dmin(q -> @inbounds(J[q, j, k] * S12[q, j, k]), i, ox, nxg, fx, T) / hξ + dmin(q -> @inbounds(J[i, q, k] * S22[i, q, k]), j, oy, nyg, fy, T) / hψ +
-         dmin(q -> @inbounds(G2[i, j, q]), k, 0, nz, fz, T) / hη
-    d3 = dmin(q -> @inbounds(J[q, j, k] * S13[q, j, k]), i, ox, nxg, fx, T) / hξ + dmin(q -> @inbounds(J[i, q, k] * S23[i, q, k]), j, oy, nyg, fy, T) / hψ +
-         dmin(q -> @inbounds(G3[i, j, q]), k, 0, nz, fz, T) / hη
+    x1 = dmin(q -> @inbounds(J[q, j, k] * S11[q, j, k]), i, ox, nxg, fx, T) / hξ
+    x2 = dmin(q -> @inbounds(J[q, j, k] * S12[q, j, k]), i, ox, nxg, fx, T) / hξ
+    x3 = dmin(q -> @inbounds(J[q, j, k] * S13[q, j, k]), i, ox, nxg, fx, T) / hξ
+    y1 = dmin(q -> @inbounds(J[i, q, k] * S12[i, q, k]), j, oy, nyg, fy, T) / hψ
+    y2 = dmin(q -> @inbounds(J[i, q, k] * S22[i, q, k]), j, oy, nyg, fy, T) / hψ
+    y3 = dmin(q -> @inbounds(J[i, q, k] * S23[i, q, k]), j, oy, nyg, fy, T) / hψ
+    z1 = dmin(q -> @inbounds(G1[i, j, q]), k, 0, nz, fz, T) / hη
+    z2 = dmin(q -> @inbounds(G2[i, j, q]), k, 0, nz, fz, T) / hη
+    z3 = dmin(q -> @inbounds(G3[i, j, q]), k, 0, nz, fz, T) / hη
     if !flags[1] && (i + ox == 1 || i + ox == nxg)       # sides x: the traction J σ_c1 removed
         s = (i + ox == 1 ? 1 : -1) * J[i, j, k] / (w * hξ)
-        d1 += s * S11[i, j, k]; d2 += s * S12[i, j, k]; d3 += s * S13[i, j, k]
+        x1 += s * S11[i, j, k]; x2 += s * S12[i, j, k]; x3 += s * S13[i, j, k]
     end
     if !flags[2] && (j + oy == 1 || j + oy == nyg)       # sides y: J σ_c2
         s = (j + oy == 1 ? 1 : -1) * J[i, j, k] / (w * hψ)
-        d1 += s * S12[i, j, k]; d2 += s * S22[i, j, k]; d3 += s * S23[i, j, k]
+        y1 += s * S12[i, j, k]; y2 += s * S22[i, j, k]; y3 += s * S23[i, j, k]
     end
     if !flags[3] && (k == 1 || k == nz)                 # free surface, bottom, interfaces
         g1, g2, g3 = G1[i, j, k], G2[i, j, k], G3[i, j, k]
         if k == nz
             if Bu === nothing
-                d1 -= g1 / (w * hη); d2 -= g2 / (w * hη); d3 -= g3 / (w * hη)
+                z1 -= g1 / (w * hη); z2 -= g2 / (w * hη); z3 -= g3 / (w * hη)
             else
-                d1 -= (g1 - Bu.G1[i, j, 1]) / (2w * hη); d2 -= (g2 - Bu.G2[i, j, 1]) / (2w * hη); d3 -= (g3 - Bu.G3[i, j, 1]) / (2w * hη)
+                z1 -= (g1 - Bu.G1[i, j, 1]) / (2w * hη); z2 -= (g2 - Bu.G2[i, j, 1]) / (2w * hη); z3 -= (g3 - Bu.G3[i, j, 1]) / (2w * hη)
             end
         end
         if k == 1
             if Bd === nothing
-                d1 += g1 / (w * hη); d2 += g2 / (w * hη); d3 += g3 / (w * hη)
+                z1 += g1 / (w * hη); z2 += g2 / (w * hη); z3 += g3 / (w * hη)
             else
                 n = size(Bd.V1, 3)
-                d1 -= (Bd.G1[i, j, n] - g1) / (2w * hη); d2 -= (Bd.G2[i, j, n] - g2) / (2w * hη); d3 -= (Bd.G3[i, j, n] - g3) / (2w * hη)
+                z1 -= (Bd.G1[i, j, n] - g1) / (2w * hη); z2 -= (Bd.G2[i, j, n] - g2) / (2w * hη); z3 -= (Bd.G3[i, j, n] - g3) / (2w * hη)
             end
         end
     end
+    p = part(B)
+    usexi(p) || (x1 = x2 = x3 = zero(T))
+    usepsi(p) || (y1 = y2 = y3 = zero(T))
+    useeta(p) || (z1 = z2 = z3 = zero(T))
+    P = pmlof(B)
+    if flags[4] && P !== nothing
+        γ, I = P.gx[i+ox], CartesianIndex(xslab(P, i + ox), j, k)
+        x1 = pml_stretch(P.xv1, I, γ, x1, dt); x2 = pml_stretch(P.xv2, I, γ, x2, dt); x3 = pml_stretch(P.xv3, I, γ, x3, dt)
+    end
+    if flags[5] && P !== nothing
+        γ, I = P.gy[j+oy], CartesianIndex(i, yslab(P, j + oy), k)
+        y1 = pml_stretch(P.yv1, I, γ, y1, dt); y2 = pml_stretch(P.yv2, I, γ, y2, dt); y3 = pml_stretch(P.yv3, I, γ, y3, dt)
+    end
+    if flags[6] && P !== nothing
+        γ, I = P.gz[k], CartesianIndex(i, j, k)
+        z1 = pml_stretch(P.zv1, I, γ, z1, dt); z2 = pml_stretch(P.zv2, I, γ, z2, dt); z3 = pml_stretch(P.zv3, I, γ, z3, dt)
+    end
+    d1, d2, d3 = x1 + y1 + z1, x2 + y2 + z2, x3 + y3 + z3
     r = iρJ[i, j, k]
     if flags[1] && flags[2] && flags[3]
         V1[i, j, k] += dt * r * d1; V2[i, j, k] += dt * r * d2; V3[i, j, k] += dt * r * d3
@@ -70,8 +100,9 @@ end
 
 # Stress at node (i, j, k): gradients with D₊ (half the velocity mismatch at interfaces added to Dη v), and the stress
 # update of the staggered 3D solver (generalized Zener body).
-@inline Base.@propagate_inbounds function stress3_cv!(B, Bd, Bu, vc, dt, ::Val{flags}, i, j, k) where {flags}
+@inline Base.@propagate_inbounds function stress3_cv!(B, Bd, Bu, vc, dt, ::Val{F}, i, j, k) where {F}
     (; V1, V2, V3, S11, S22, S33, S23, S13, S12, J, Jx, Jy, lam, mu, hξ, hψ, hη, ox, oy, nxg, nyg) = B
+    flags = flags3(F)
     fx, fy, fz = Val(flags[1]), Val(flags[2]), Val(flags[3])
     nx, ny, nz = size(V1)
     T = eltype(V1)
@@ -96,6 +127,23 @@ end
             z1 -= (Bd.V1[i, j, n] - V1[i, j, k]) / (2w * hη); z2 -= (Bd.V2[i, j, n] - V2[i, j, k]) / (2w * hη)
             z3 -= (Bd.V3[i, j, n] - V3[i, j, k]) / (2w * hη)
         end
+    end
+    p = part(B)
+    usexi(p) || (x1 = x2 = x3 = zero(T))
+    usepsi(p) || (y1 = y2 = y3 = zero(T))
+    useeta(p) || (z1 = z2 = z3 = zero(T))
+    P = pmlof(B)
+    if flags[4] && P !== nothing
+        γ, I = P.gx[i+ox], CartesianIndex(xslab(P, i + ox), j, k)
+        x1 = pml_stretch(P.xa1, I, γ, x1, dt); x2 = pml_stretch(P.xa2, I, γ, x2, dt); x3 = pml_stretch(P.xa3, I, γ, x3, dt)
+    end
+    if flags[5] && P !== nothing
+        γ, I = P.gy[j+oy], CartesianIndex(i, yslab(P, j + oy), k)
+        y1 = pml_stretch(P.ya1, I, γ, y1, dt); y2 = pml_stretch(P.ya2, I, γ, y2, dt); y3 = pml_stretch(P.ya3, I, γ, y3, dt)
+    end
+    if flags[6] && P !== nothing
+        γ, I = P.gz[k], CartesianIndex(i, j, k)
+        z1 = pml_stretch(P.za1, I, γ, z1, dt); z2 = pml_stretch(P.za2, I, γ, z2, dt); z3 = pml_stretch(P.za3, I, γ, z3, dt)
     end
     I = CartesianIndex(i, j, k)
     iJ = 1 / J[I]
@@ -214,7 +262,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
                                 T::Type{FT}=Float32, verbose=true, wavefield=true, jump=0.05, wave=:psv, interpolation=:sinc,
                                 free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
-    absorber in (:impedance, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :cerjan (with a sponge) or :none")
+    absorber in (:impedance, :pml, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :pml, :cerjan (with a sponge) or :none")
     srcs = sources isa AbstractVector ? sources : [sources]
     all(s -> s isa Union{MomentTensorSource,ForceSource}, srcs) || error("curvilinear grids: MomentTensorSource and ForceSource only")
     wall = time()
@@ -327,7 +375,22 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
            kmap, da)
     end
     nb = length(hostblocks)
-    blocks = Tuple(map(hostblocks) do H
+    # PML: profiles (identity until the time step is known) and memory variables (x, y layers: 2na columns, 2na rows; bottom: na)
+    pml = absorber === :pml
+    if pml
+        min(nx, ny) >= 2na + 2SBP_NB + 1 || error("curvilinear grid: the PML (na = $na nodes) needs more than $(2na + 2SBP_NB) nodes in x and y")
+        hostblocks[1].nz >= na + SBP_NB + 1 || error("curvilinear grid: the PML (na = $na nodes) needs more rows in the bottom block ($(hostblocks[1].nz))")
+    end
+    ident = ntuple(q -> FT(isodd(q)), 4)
+    blocks = Tuple(map(enumerate(hostblocks)) do (bi, H)
+        zs(n...) = KernelAbstractions.zeros(backend, FT, n...)
+        nzp = bi == 1 ? na : 0
+        player = pml ? (; pml=(; gx=dev(fill(ident, nx)), gy=dev(fill(ident, ny)), gz=dev(fill(ident, H.nz)), np=na, nxg=nx, nyg=ny,
+                                 xv1=zs(2na, nly, H.nz), xv2=zs(2na, nly, H.nz), xv3=zs(2na, nly, H.nz), xa1=zs(2na, nly, H.nz),
+                                 xa2=zs(2na, nly, H.nz), xa3=zs(2na, nly, H.nz), yv1=zs(nlx, 2na, H.nz), yv2=zs(nlx, 2na, H.nz),
+                                 yv3=zs(nlx, 2na, H.nz), ya1=zs(nlx, 2na, H.nz), ya2=zs(nlx, 2na, H.nz), ya3=zs(nlx, 2na, H.nz),
+                                 zv1=zs(nlx, nly, nzp), zv2=zs(nlx, nly, nzp), zv3=zs(nlx, nly, nzp), za1=zs(nlx, nly, nzp),
+                                 za2=zs(nlx, nly, nzp), za3=zs(nlx, nly, nzp))) : (;)
         z() = KernelAbstractions.zeros(backend, FT, nlx, nly, H.nz)
         R() = KernelAbstractions.zeros(backend, FT, NM, nlx, nly, H.nz)
         loc(A) = dev(FT.(A[xr, yr, :]))
@@ -339,24 +402,28 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         merge((; V1=z(), V2=z(), V3=z(), S11=z(), S22=z(), S33=z(), S23=z(), S13=z(), S12=z(), G1=z(), G2=z(), G3=z(), J=loc(H.J),
                Jx=loc(H.Jx), Jy=loc(H.Jy), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam), mu=loc(aniso ? H.mu55 : H.mu),
                tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1), a2=loc(H.a2),
-               a3=loc(H.a3), hξ=FT(hξ), hψ=FT(hψ), hη=FT(H.hη), ox, oy, nxg=nx, nyg=ny), mem, vti, sponge)
+               a3=loc(H.a3), hξ=FT(hξ), hψ=FT(hψ), hη=FT(H.hη), ox, oy, nxg=nx, nyg=ny), mem, vti, sponge, player)
     end)
+    lite = map(B -> merge(B, (; pml=nothing)), blocks)        # (kernels without the PML: Metal allows 4 kB of arguments)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing
     # up to 27 regions per block: low / interior / high in x, y and η, with their kernel flags (in x and y: the global
     # segments intersected with the nodes of this process, in local indices)
     m = SBP_NB
-    function seg(n, a0, b0, o)
-        S = Tuple{Int,Int,Bool}[]
-        for (lo, hi, f) in ((1, m, false), (m + 1, n - m, true), (n - m + 1, n, false))
+    # (PML: the layers of width p (> m) are the outer segments, with the general kernels; `bottom`: no layer at the top)
+    function seg(n, a0, b0, o, p=0, bottom=false)
+        S = Tuple{Int,Int,Bool,Bool}[]
+        w = max(m, p)
+        for (lo, hi, f, q) in ((1, w, false, p > 0), (w + 1, n - (bottom ? m : w), true, false), (n - (bottom ? m : w) + 1, n, false, p > 0 && !bottom))
             a, b = max(lo, a0), min(hi, b0)
-            a <= b && push!(S, (a - o - 1, b - a + 1, f))
+            a <= b && push!(S, (a - o - 1, b - a + 1, f, q))
         end
         S
     end
-    regions = map(hostblocks) do H
-        Tuple(((a[1], b[1], c[1]), (a[2], b[2], c[2]), Val((a[3], b[3], c[3]))) for a in seg(nx, ia, ib, ox), b in seg(ny, ja, jb, oy),
-              c in seg(H.nz, 1, H.nz, 0))
+    regions = map(enumerate(hostblocks)) do (bi, H)
+        p, pz = pml ? na : 0, pml && bi == 1 ? na : 0
+        Tuple(((a[1], b[1], c[1]), (a[2], b[2], c[2]), a[4] || b[4] || c[4] ? Val((a[3], b[3], c[3], a[4], b[4], c[4])) : Val((a[3], b[3], c[3])))
+              for a in seg(nx, ia, ib, ox, p), b in seg(ny, ja, jb, oy, p), c in seg(H.nz, 1, H.nz, 0, pz, true))
     end
     # (on `blks`: the blocks, or blocks of other arrays with the same mesh: the operators of the adjoint)
     function momentum!(dtT, damp, blks=blocks)
@@ -364,11 +431,11 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
             foreach_cell!(backend, traction3_cv!, (blks[b],), (0, 0, 0), (nlx, nly, hostblocks[b].nz))
         end
         for b in 1:nb
-            foreach_region!(backend, momentum3_cv!, (blks[b], b > 1 ? blks[b-1] : nothing, b < nb ? blks[b+1] : nothing, dtT, damp), regions[b])
+            foreach_region!(backend, momentum3_cv!, (blks[b], neighbour3(b > 1 ? blks[b-1] : nothing), neighbour3(b < nb ? blks[b+1] : nothing), dtT, damp), regions[b])
         end
     end
     stress!(vc, dtT, blks=blocks) = for b in 1:nb
-        foreach_region!(backend, stress3_cv!, (blks[b], b > 1 ? blks[b-1] : nothing, b < nb ? blks[b+1] : nothing, vc, dtT), regions[b])
+        foreach_region!(backend, stress3_cv!, (blks[b], neighbour3(b > 1 ? blks[b-1] : nothing), neighbour3(b < nb ? blks[b+1] : nothing), vc, dtT), regions[b])
     end
     fields(B) = (B.V1, B.V2, B.V3, B.S11, B.S22, B.S33, B.S23, B.S13, B.S12)
     exchange_v!() = foreach(B -> cv_exchange!(par, (B.V1, B.V2, B.V3)), blocks)
@@ -400,6 +467,15 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     nt === nothing && error("give the duration tmax (or nt, with dt)")
     dtT = FT(dt)
     vc = attenuation ? memory_coefficients(ts, dt, FT) : nothing
+    if pml                      # the profiles of the time step (as OpenSWPC: 6 km/s, fcut the highest source frequency)
+        fcut = maximum(s -> 1 / s.trise, srcs)
+        prof(g) = (xs = (g .- g[1]) ./ 1e3; [FT.(damping_profile(x, xs[na+1], xs[end], na, dt, fcut)) for x in xs])
+        copyto!.(getfield.(getfield.(blocks, :pml), :gx), Ref(prof(gx)))
+        copyto!.(getfield.(getfield.(blocks, :pml), :gy), Ref(prof(gy)))
+        H1 = hostblocks[1]
+        zrow = [sum(H1.Z[:, :, k] .- H1.Z[:, :, 1]) / (nx * ny * 1e3) for k in 1:H1.nz]
+        copyto!(blocks[1].pml.gz, [FT.(damping_profile(z, zrow[na+1], 1e9, na, dt, fcut)) for z in zrow])
+    end
     # locate points: block and η̂ (Lagrange interpolation of the columns, bisection)
     function locate(x, y, z)
         i0, wx = lagrange_weights(gx, x)
@@ -494,16 +570,16 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     function step!(it, record)
         n = it - 1
         itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
-        itw > 0 && nst > 0 && foreach_item!(backend, vprev3_cv!, (prev, blocks, St), nst)
+        itw > 0 && nst > 0 && foreach_item!(backend, vprev3_cv!, (prev, lite, St), nst)
         momentum!(dtT, true)
         absorber === :cerjan && foreach(B -> (B.V1 .*= B.gs; B.V2 .*= B.gs; B.V3 .*= B.gs), blocks)
-        length(forces) > 0 && run_once!(backend, force3_cv!, (blocks, FS, it, dtT))
+        length(forces) > 0 && run_once!(backend, force3_cv!, (lite, FS, it, dtT))
         KernelAbstractions.synchronize(backend)
         exchange_v!()
-        record && nst > 0 && foreach_item!(backend, record3_cv!, (rec, acc, prev, blocks, St, itw, dtT), nst)
+        record && nst > 0 && foreach_item!(backend, record3_cv!, (rec, acc, prev, lite, St, itw, dtT), nst)
         stress!(vc, dtT)
         absorber === :cerjan && foreach(B -> foreach(S -> S .*= B.gs, (B.S11, B.S22, B.S33, B.S23, B.S13, B.S12)), blocks)
-        length(moments) > 0 && run_once!(backend, moment3_cv!, (blocks, MS, it))
+        length(moments) > 0 && run_once!(backend, moment3_cv!, (lite, MS, it))
         KernelAbstractions.synchronize(backend)
         exchange_s!()
     end
@@ -523,7 +599,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     # checkpoints (one file per process): the wavefield and memory variables, the recording and the plane accumulators
     ckp = checkpoint === nothing ? nothing : par !== nothing ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")
-    fields_of(B) = Tuple(getfield(B, k) for k in keys(B) if occursin(r"^[VSR][0-9]+$", string(k)))
+    fields_of(B) = (Tuple(getfield(B, k) for k in keys(B) if occursin(r"^[VSR][0-9]+$", string(k)))..., pml_arrays(B)...)
     state = (Iterators.flatten(map(fields_of, blocks))..., rec, acc, prev,
              (planes === nothing ? () : Iterators.flatten((p.U, p.PK) for p in planes))...)
     it0 = restart ? load_state!(state, ckp, nt) + 1 : 1
@@ -538,7 +614,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         if planes !== nothing                          # netCDF planes: displacement and peaks every step
             store = snapshot_every > 0 && n % snapshot_every == 0
             for p in planes
-                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, blocks, p.pts, dtT, store, Val(3)), length(p.own))
+                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, lite, p.pts, dtT, store, Val(3)), length(p.own))
             end
             if store
                 KernelAbstractions.synchronize(backend)

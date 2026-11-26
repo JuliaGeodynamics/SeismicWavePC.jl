@@ -354,4 +354,43 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
             @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
         end
     end
+    @testset "PML: fewer reflections; misfit gradient and Born against finite differences" begin
+        # sides and bottom: a flat model against one 4 times as wide and deep with the same node spacing (h = 0.1 km)
+        P6 = SW.SBP_P[6]
+        Dz(nz) = 0.1 * (2P6 + nz - 11)
+        Lx(nx) = 0.1 * (2P6 + nx - 11) / 2
+        mkf(nx, nz) = (D = Dz(nz); mesh = curvilinear_mesh(range(-Lx(nx), Lx(nx), length=nx), [x -> 0.0]; dz=D / (nz - 1) * 1.0000001, bottom=-D);
+                       o = ones(size(mesh.x.val)); addfield(mesh, (; rho=2600 .* o, vp=4.0 .* o, vs=2.3 .* o)))
+        src = DoubleCoupleSource(3.0, 0.0, -3.0; Mw=3.0, strike=0, dip=45, rake=90, trise=0.5)
+        sts = [[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in (0, 3, 5)]; Station("d", 4.0, 0.0, -4.0)]
+        r0 = simulate(mkf(161, 81); grid=:curvilinear, tmax=0.05, sources=src, T=Float64, verbose=false)
+        kw = (; grid=:curvilinear, dt=0.95(r0.t[2] - r0.t[1]), tmax=10.0, sources=src, stations=sts, T=Float64, verbose=false)
+        ref = simulate(mkf(641, 321); kw..., absorber=:impedance)
+        err(r) = maximum(n -> norm(r.v[:, :, n] .- ref.v[:, :, n]) / norm(ref.v[:, :, n]), eachindex(sts))
+        ei, ep = err(simulate(mkf(161, 81); kw..., absorber=:impedance)), err(simulate(mkf(161, 81); kw..., absorber=:pml))
+        @test ep < 0.01 && ei > 10ep                                              # (0.7 % against 17 %)
+        # gradient and Born (2D, attenuation, an interface; perturbations in the layers)
+        mesh = curvilinear_mesh(range(-8, 8, length=61), [x -> 1.2 * exp(-x^2 / 12), x -> -4.0 + 0.6 * sin(2π * x / 10)]; dz=0.25, bottom=-10)
+        X, Z = mesh.x.val, mesh.z.val
+        low = Z .< -4.0 .+ 0.6 .* sin.(2π .* X ./ 10)
+        o = ones(size(X))
+        base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=100 .* o, Qs=50 .* o)
+        srcs = [DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0), ForceSource(6.0, 0.0, -9.0; fz=1e14, trise=1.0)]
+        sts = [[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -6:3:6]; Station("d", 7.0, 0.0, -9.0)]
+        r0 = simulate(addfield(mesh, base); tmax=0.05, sources=srcs, T=Float64, verbose=false)
+        kw = (; dt=r0.t[2] - r0.t[1], tmax=3.0, sources=srcs, T=Float64, absorber=:pml, na=10)
+        obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* 0.97))); kw..., stations=sts, verbose=false)
+        J, g, sg = misfit_gradient(addfield(mesh, base), obs; kw..., checkpoint_steps=11)
+        Jof(m) = L2Misfit()(simulate(m; kw..., stations=sts, verbose=false).v, obs.v, obs.t)[1]
+        bump(c, s) = @. exp(-((X - c[1])^2 + (Z - c[2])^2) / s)
+        for (f, δ) in ((:vs, 0.05 .* bump((7.3, -3), 1)), (:vp, 0.05 .* bump((0.5, -9.4), 1)), (:rho, 50 .* bump((7.3, -9.4), 1)), (:Qs, 5 .* bump((-7.3, -3), 1)))
+            fd = (Jof(addfield(mesh, merge(base, (; f => base[f] .+ 1e-3 .* δ)))) - Jof(addfield(mesh, merge(base, (; f => base[f] .- 1e-3 .* δ))))) / 2e-3
+            @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
+        end
+        δv = 0.05 .* bump((7.3, -3), 1)
+        _, δd = born(addfield(mesh, base), addfield(mesh, (; vs=δv)); kw..., stations=sts)
+        P = simulate(addfield(mesh, merge(base, (; vs=base.vs .+ 1e-3 .* δv))); kw..., stations=sts, verbose=false)
+        M = simulate(addfield(mesh, merge(base, (; vs=base.vs .- 1e-3 .* δv))); kw..., stations=sts, verbose=false)
+        @test maximum(abs, δd.v .- (P.v .- M.v) ./ 2e-3) < 1e-6 * maximum(abs, δd.v)
+    end
 end

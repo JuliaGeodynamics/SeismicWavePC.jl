@@ -180,72 +180,118 @@ end
 
 # ------------------------------------------------------------------ kernels (one node (i, k) of a block)
 
+"The arrays of a neighbouring block that the interface terms read (small kernel arguments: Metal allows 4 kB)."
+neighbour(B) = (; V1=B.V1, V2=B.V2, S11=B.S11, S12=B.S12, S22=B.S22, Jx=B.Jx)
+neighbour(::Nothing) = nothing
+
 @inline orzero(x, I) = x[I]
 @inline orzero(::Nothing, I) = false
 @inline cmemvar!(R, I, f, vc, dt) = memvar!(R, I, f, vc, dt)
 @inline cmemvar!(R, I, f, ::Nothing, dt) = zero(f)
 @inline cmemvar!(::Nothing, I, f, ::Nothing, dt) = zero(f)
 
+# Parts of the operators: every derivative is the sum of its ξ part (with the side SAT terms) and its η part (with the SAT
+# terms of the free surface, the bottom and the interfaces). The adjoint applies them separately (`B.part` = Val(:xi) or
+# Val(:eta); default Val(:all)): the SBP identity H A = -(H J G)ᵀ holds for each direction.
+@inline part(B::NamedTuple{K}) where {K} = :part in K ? B.part : Val(:all)
+@inline usexi(::Val{p}) where {p} = p === :all || p === :xi
+@inline usepsi(::Val{p}) where {p} = p === :all || p === :psi
+@inline useeta(::Val{p}) where {p} = p === :all || p === :eta
+# PML (absorber = :pml): the ξ parts (in the side layers) and the η parts (in the bottom layer) are stretched with the ADE of
+# the CFS-PML of OpenSWPC (`damping_profile`): γ₁ d + γ₂ m, m ← γ₃ m + γ₄ dt d. `B.pml`: the profiles γ (`gx` at the
+# global nodes in x, `gz` at the rows of the block) and the memory variables (side layers: 2np columns, as `xslab`; bottom:
+# the rows of the bottom block). Regions flag their nodes in the layers (`Val((xint, px, pz))`).
+@inline pmlof(B::NamedTuple{K}) where {K} = :pml in K ? B.pml : nothing
+@inline xslab(P, ig) = ig <= P.np ? ig : ig - P.nxg + 2P.np
+@inline Base.@propagate_inbounds function pml_stretch(m, I, γ, d, dt)
+    q = m[I]
+    m[I] = γ[3] * q + γ[4] * dt * d
+    return γ[1] * d + γ[2] * q
+end
+@inline flags(F) = F isa Tuple ? F : (F, false, false)
+"The PML memory variables of a block (checkpoints)."
+pml_arrays(B) = (P = pmlof(B); P === nothing ? () : Tuple(v for (k, v) in pairs(P) if v isa AbstractArray && !(k in (:gx, :gy, :gz))))
+
 # Momentum: ρ J ∂t v_i = Dξ(Jξ_j σ_ij) + Dη(Jη_j σ_ij), Jξ = (J, 0), Jη = (Jx, 1), with SAT terms on the boundary nodes:
 # the traction removed (free surface on top; free or absorbing at the sides and bottom), half the traction mismatch at
 # interfaces (`Bd`, `Bu`: the blocks below and above, `nothing` at the bottom and top). The impedance damping `a` is
 # implicit (trapezoidal): unconditionally stable. `damp = false` leaves it out (power iteration).
 # `Val(true)`: a node away from the sides (interior stencils in x, no side terms): the boundary rows then vectorize.
-@inline Base.@propagate_inbounds function momentum_cv!(B, Bd, Bu, dt, damp, ::Val{xint}, i, k) where {xint}
+@inline Base.@propagate_inbounds function momentum_cv!(B, Bd, Bu, dt, damp, ::Val{F}, i, k) where {F}
+    xint, px, pz = flags(F)
     (; V1, V2, S11, S22, S12, J, Jx, iρJ, a1, a2, hξ, hη, ox, nxg) = B
     nz = size(V1, 2)
     T = eltype(V1)
     w = T(SBP_W[1])
     # x: local index i, global i + ox of nxg (MPI subdomains); the boundary closures in global indices
     g1, g2 = j -> @inbounds(J[j, k] * S11[j, k]), j -> @inbounds(J[j, k] * S12[j, k])
-    d1 = (xint ? dminus_int(g1, i, T) : dminus(q -> g1(q - ox), i + ox, nxg)) / hξ + dminus(j -> @inbounds(Jx[i, j] * S11[i, j] + S12[i, j]), k, nz) / hη
-    d2 = (xint ? dminus_int(g2, i, T) : dminus(q -> g2(q - ox), i + ox, nxg)) / hξ + dminus(j -> @inbounds(Jx[i, j] * S12[i, j] + S22[i, j]), k, nz) / hη
+    x1 = (xint ? dminus_int(g1, i, T) : dminus(q -> g1(q - ox), i + ox, nxg)) / hξ
+    x2 = (xint ? dminus_int(g2, i, T) : dminus(q -> g2(q - ox), i + ox, nxg)) / hξ
     if xint
     elseif i + ox == 1
-        d1 += J[i, k] * S11[i, k] / (w * hξ); d2 += J[i, k] * S12[i, k] / (w * hξ)
+        x1 += J[i, k] * S11[i, k] / (w * hξ); x2 += J[i, k] * S12[i, k] / (w * hξ)
     elseif i + ox == nxg
-        d1 -= J[i, k] * S11[i, k] / (w * hξ); d2 -= J[i, k] * S12[i, k] / (w * hξ)
+        x1 -= J[i, k] * S11[i, k] / (w * hξ); x2 -= J[i, k] * S12[i, k] / (w * hξ)
     end
+    z1 = dminus(j -> @inbounds(Jx[i, j] * S11[i, j] + S12[i, j]), k, nz) / hη
+    z2 = dminus(j -> @inbounds(Jx[i, j] * S12[i, j] + S22[i, j]), k, nz) / hη
     if k == nz
         t1, t2 = Jx[i, k] * S11[i, k] + S12[i, k], Jx[i, k] * S12[i, k] + S22[i, k]
         if Bu === nothing
-            d1 -= t1 / (w * hη); d2 -= t2 / (w * hη)
+            z1 -= t1 / (w * hη); z2 -= t2 / (w * hη)
         else
-            d1 -= (t1 - (Bu.Jx[i, 1] * Bu.S11[i, 1] + Bu.S12[i, 1])) / (2w * hη)
-            d2 -= (t2 - (Bu.Jx[i, 1] * Bu.S12[i, 1] + Bu.S22[i, 1])) / (2w * hη)
+            z1 -= (t1 - (Bu.Jx[i, 1] * Bu.S11[i, 1] + Bu.S12[i, 1])) / (2w * hη)
+            z2 -= (t2 - (Bu.Jx[i, 1] * Bu.S12[i, 1] + Bu.S22[i, 1])) / (2w * hη)
         end
     end
     if k == 1
         t1, t2 = Jx[i, k] * S11[i, k] + S12[i, k], Jx[i, k] * S12[i, k] + S22[i, k]
         if Bd === nothing
-            d1 += t1 / (w * hη); d2 += t2 / (w * hη)
+            z1 += t1 / (w * hη); z2 += t2 / (w * hη)
         else
             n = size(Bd.V1, 2)
-            d1 -= ((Bd.Jx[i, n] * Bd.S11[i, n] + Bd.S12[i, n]) - t1) / (2w * hη)
-            d2 -= ((Bd.Jx[i, n] * Bd.S12[i, n] + Bd.S22[i, n]) - t2) / (2w * hη)
+            z1 -= ((Bd.Jx[i, n] * Bd.S11[i, n] + Bd.S12[i, n]) - t1) / (2w * hη)
+            z2 -= ((Bd.Jx[i, n] * Bd.S12[i, n] + Bd.S22[i, n]) - t2) / (2w * hη)
         end
     end
+    p = part(B)
+    usexi(p) || (x1 = x2 = zero(T))
+    useeta(p) || (z1 = z2 = zero(T))
+    P = pmlof(B)
+    if px && P !== nothing
+        γ, I = P.gx[i+ox], CartesianIndex(xslab(P, i + ox), k)
+        x1 = pml_stretch(P.xv1, I, γ, x1, dt); x2 = pml_stretch(P.xv2, I, γ, x2, dt)
+    end
+    if pz && P !== nothing
+        γ, I = P.gz[k], CartesianIndex(i, k)
+        z1 = pml_stretch(P.zv1, I, γ, z1, dt); z2 = pml_stretch(P.zv2, I, γ, z2, dt)
+    end
+    d1, d2 = x1 + z1, x2 + z2
     b1, b2 = damp ? (a1[i, k] * dt / 2, a2[i, k] * dt / 2) : (zero(T), zero(T))
     V1[i, k] = ((1 - b1) * V1[i, k] + dt * iρJ[i, k] * d1) / (1 + b1)
     V2[i, k] = ((1 - b2) * V2[i, k] + dt * iρJ[i, k] * d2) / (1 + b2)
 end
 
-# The interior of a block (no boundary closures, SAT terms or damping): the same updates without branches.
+# The interior of a block (no boundary closures, SAT terms, damping or PML): the same updates without branches.
 @inline Base.@propagate_inbounds function momentum_cv_int!(B, dt, i, k)
     (; V1, V2, S11, S22, S12, J, Jx, iρJ, hξ, hη) = B
     T = eltype(V1)
-    d1 = dminus_int(j -> @inbounds(J[j, k] * S11[j, k]), i, T) / hξ + dminus_int(j -> @inbounds(Jx[i, j] * S11[i, j] + S12[i, j]), k, T) / hη
-    d2 = dminus_int(j -> @inbounds(J[j, k] * S12[j, k]), i, T) / hξ + dminus_int(j -> @inbounds(Jx[i, j] * S12[i, j] + S22[i, j]), k, T) / hη
+    p = part(B)
+    d1 = (usexi(p) ? dminus_int(j -> @inbounds(J[j, k] * S11[j, k]), i, T) / hξ : zero(T)) +
+         (useeta(p) ? dminus_int(j -> @inbounds(Jx[i, j] * S11[i, j] + S12[i, j]), k, T) / hη : zero(T))
+    d2 = (usexi(p) ? dminus_int(j -> @inbounds(J[j, k] * S12[j, k]), i, T) / hξ : zero(T)) +
+         (useeta(p) ? dminus_int(j -> @inbounds(Jx[i, j] * S12[i, j] + S22[i, j]), k, T) / hη : zero(T))
     V1[i, k] += dt * iρJ[i, k] * d1
     V2[i, k] += dt * iρJ[i, k] * d2
 end
 @inline Base.@propagate_inbounds function stress_cv_int!(B, vc, dt, i, k)
     (; V1, V2, S11, S22, S12, J, Jx, lam, mu, hξ, hη) = B
     T = eltype(V1)
-    a = dplus_int(j -> @inbounds(V1[j, k]), i, T) / hξ
-    b = dplus_int(j -> @inbounds(V1[i, j]), k, T) / hη
-    c = dplus_int(j -> @inbounds(V2[j, k]), i, T) / hξ
-    e = dplus_int(j -> @inbounds(V2[i, j]), k, T) / hη
+    p = part(B)
+    a = usexi(p) ? dplus_int(j -> @inbounds(V1[j, k]), i, T) / hξ : zero(T)
+    b = useeta(p) ? dplus_int(j -> @inbounds(V1[i, j]), k, T) / hη : zero(T)
+    c = usexi(p) ? dplus_int(j -> @inbounds(V2[j, k]), i, T) / hξ : zero(T)
+    e = useeta(p) ? dplus_int(j -> @inbounds(V2[i, j]), k, T) / hη : zero(T)
     stress_update_cv!(B, vc, dt, i, k, a, b, c, e)
 end
 
@@ -255,7 +301,8 @@ end
 
 # Stress: the gradient ∂x = Dξ + (Jx / J) Dη, ∂z = Dη / J with D₊ (half the velocity mismatch at interfaces added to Dη v),
 # and the stress update of the staggered solver (memory variables of the generalized Zener body if `vc !== nothing`).
-@inline Base.@propagate_inbounds function stress_cv!(B, Bd, Bu, vc, dt, ::Val{xint}, i, k) where {xint}
+@inline Base.@propagate_inbounds function stress_cv!(B, Bd, Bu, vc, dt, ::Val{F}, i, k) where {F}
+    xint, px, pz = flags(F)
     (; V1, V2, hξ, hη) = B
     nx, nz = size(V1)
     T = eltype(V1)
@@ -272,6 +319,18 @@ end
     if k == 1 && Bd !== nothing
         n = size(Bd.V1, 2)
         b -= (Bd.V1[i, n] - V1[i, k]) / (2w * hη); e -= (Bd.V2[i, n] - V2[i, k]) / (2w * hη)
+    end
+    p = part(B)
+    usexi(p) || (a = c = zero(T))
+    useeta(p) || (b = e = zero(T))
+    P = pmlof(B)
+    if px && P !== nothing
+        γ, I = P.gx[i+ox], CartesianIndex(xslab(P, i + ox), k)
+        a = pml_stretch(P.xa, I, γ, a, dt); c = pml_stretch(P.xc, I, γ, c, dt)
+    end
+    if pz && P !== nothing
+        γ, I = P.gz[k], CartesianIndex(i, k)
+        b = pml_stretch(P.zb, I, γ, b, dt); e = pml_stretch(P.ze, I, γ, e, dt)
     end
     stress_update_cv!(B, vc, dt, i, k, a, b, c, e)
 end
@@ -447,8 +506,8 @@ cv_max(par, x) = par === nothing ? x : MPI.Allreduce(x, max, par.comm)
 
 2D P-SV on a deformed (terrain-following) `CartData` (see [`curvilinear_mesh`](@ref)); called by `simulate` for such a
 model. Keywords as in `simulate`, and: `dt = nothing` (from the spectral radius of the operator: 90 % of the leapfrog
-limit), `tmax` (duration) instead of `nt`, `absorber = :impedance` (or `:cerjan`: also a sponge of `na = 20` nodes, or
-`:none`: free sides and bottom), `jump = 0.05`
+limit), `tmax` (duration) instead of `nt`, `absorber = :impedance` (or `:pml`: also a PML of `na = 20` nodes at the sides
+and the bottom, `:cerjan`: a sponge of `na` nodes, or `:none`: free sides and bottom), `jump = 0.05`
 (relative jump of vp or vs that makes a grid row an interface, see `find_blocks`), `nproc` MPI processes along x (2D) or
 `(npx, npy)` (3D): start julia with `mpiexec`; the columns are not split.
 """
@@ -460,7 +519,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
                               free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
     wave === :psv || error("curvilinear grids: P-SV only (wave = :psv)")
-    absorber in (:impedance, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :cerjan (with a sponge) or :none")
+    absorber in (:impedance, :pml, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :pml, :cerjan (with a sponge) or :none")
     srcs = sources isa AbstractVector ? sources : [sources]
     all(s -> s isa Union{MomentTensorSource,ForceSource}, srcs) || error("curvilinear grids: MomentTensorSource and ForceSource only")
     wall = time()
@@ -550,8 +609,19 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         (; nz, hη, Z=Zb, J, Jx, ρ=bρ, lam, mu, taup, taus, a1, a2, vp=bvp, vs=bvs, ε=bε, δ=bδ, γ=bγ, wx, wz, s13, mu55, mu66, kmap, da)
     end
     nb = length(hostblocks)
-    blocks = Tuple(map(hostblocks) do H
+    # PML: profiles (identity until the time step is known) and memory variables (side layers: 2na columns; bottom: na rows)
+    pml = absorber === :pml
+    if pml
+        nx >= 2na + 2SBP_NB + 1 || error("curvilinear grid: the PML (na = $na nodes) needs more than $(2na + 2SBP_NB) nodes in x")
+        hostblocks[1].nz >= na + SBP_NB + 1 || error("curvilinear grid: the PML (na = $na nodes) needs more rows in the bottom block ($(hostblocks[1].nz))")
+    end
+    ident = ntuple(q -> FT(isodd(q)), 4)
+    blocks = Tuple(map(enumerate(hostblocks)) do (bi, H)
         z() = KernelAbstractions.zeros(backend, FT, nl, H.nz)
+        zs(n...) = KernelAbstractions.zeros(backend, FT, n...)
+        nzp = bi == 1 ? na : 0
+        player = pml ? (; pml=(; gx=dev(fill(ident, nx)), gz=dev(fill(ident, H.nz)), np=na, nxg=nx, xv1=zs(2na, H.nz), xv2=zs(2na, H.nz),
+                                 xa=zs(2na, H.nz), xc=zs(2na, H.nz), zv1=zs(nl, nzp), zv2=zs(nl, nzp), zb=zs(nl, nzp), ze=zs(nl, nzp))) : (;)
         loc(A) = dev(FT.(A[xr, :]))
         mem = attenuation ? (; R11=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz), R22=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz),
                                R12=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz)) : (;)
@@ -560,33 +630,43 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         sponge = absorber === :cerjan ? (; gs=loc([cerjan_factor(i, nx, na) * cerjan_factor(r0 + k, typemax(Int), na) for i in 1:nx, k in 1:H.nz])) : (;)
         merge((; V1=z(), V2=z(), S11=z(), S22=z(), S12=z(), J=loc(H.J), Jx=loc(H.Jx), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam),
                mu=loc(aniso ? H.mu55 : H.mu), tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1),
-               a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx), mem, vti, sponge)
+               a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx), mem, vti, sponge, player)
     end)
+    lite = map(B -> merge(B, (; pml=nothing)), blocks)        # (kernels without the PML: Metal allows 4 kB of arguments)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing
     # the regions of a block, each with its kernel variant: the interior (branch-free), the top and bottom rows away from
     # the sides (closures in η only: vectorize) and the side columns (closures in both directions). All regions of a block
     # in one parallel loop on the CPU (one launch per kernel and block: many small launches cost much on a loaded machine).
     # (with MPI: the global segmentation in x, intersected with the nodes of this process)
+    # PML: the columns of the side layers and the rows of the bottom layer are regions of their own (flag (xint, px, pz)).
     m = SBP_NB
-    regions = map(hostblocks) do H
+    np = pml ? na : m
+    regions = map(enumerate(hostblocks)) do (bi, H)
         nz = H.nz
+        npz = pml && bi == 1 ? na : 0
         R = Any[]
-        for (lo, hi, xint) in ((1, m, false), (m + 1, nx - m, true), (nx - m + 1, nx, false))
+        xsegs = ((1, m, false, pml), (m + 1, np, true, pml), (np + 1, nx - np, true, false), (nx - np + 1, nx - m, true, pml),
+                 (nx - m + 1, nx, false, pml))
+        zsegs = ((1, m, :edge, npz > 0), (m + 1, npz, :mid, true), (max(npz, m) + 1, nz - m, :mid, false), (nz - m + 1, nz, :edge, false))
+        for (lo, hi, xint, px) in xsegs
             a, b = max(lo, ia), min(hi, ib)
             a > b && continue
             l0, w = a - ox - 1, b - a + 1
-            xint ? push!(R, ((l0, m), (w, nz - 2m), Val(:int)), ((l0, 0), (w, m), Val(true)), ((l0, nz - m), (w, m), Val(true))) :
-                   push!(R, ((l0, 0), (w, nz), Val(false)))
+            for (k1, k2, kind, pz) in zsegs
+                k2 < k1 && continue
+                flag = !xint ? Val((false, px, pz)) : (px || pz) ? Val((true, px, pz)) : kind === :mid ? Val(:int) : Val(true)
+                push!(R, ((l0, k1 - 1), (w, k2 - k1 + 1), flag))
+            end
         end
         Tuple(R)
     end
     # (on `blks`: the blocks, or blocks of other arrays with the same mesh: the operators of the adjoint)
     momentum!(dtT, damp, blks=blocks) = for b in 1:nb
-        foreach_region!(backend, momentum_cv!, (blks[b], b > 1 ? blks[b-1] : nothing, b < nb ? blks[b+1] : nothing, dtT, damp), regions[b])
+        foreach_region!(backend, momentum_cv!, (blks[b], neighbour(b > 1 ? blks[b-1] : nothing), neighbour(b < nb ? blks[b+1] : nothing), dtT, damp), regions[b])
     end
     stress!(vc, dtT, blks=blocks) = for b in 1:nb
-        foreach_region!(backend, stress_cv!, (blks[b], b > 1 ? blks[b-1] : nothing, b < nb ? blks[b+1] : nothing, vc, dtT), regions[b])
+        foreach_region!(backend, stress_cv!, (blks[b], neighbour(b > 1 ? blks[b-1] : nothing), neighbour(b < nb ? blks[b+1] : nothing), vc, dtT), regions[b])
     end
     exchange_v!() = foreach(B -> cv_exchange!(par, (B.V1, B.V2)), blocks)
     exchange_s!() = foreach(B -> cv_exchange!(par, (B.S11, B.S22, B.S12)), blocks)
@@ -617,6 +697,14 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     nt === nothing && error("give the duration tmax (or nt, with dt)")
     dtT = FT(dt)
     vc = attenuation ? memory_coefficients(ts, dt, FT) : nothing
+    if pml                      # the profiles of the time step (as OpenSWPC: 6 km/s, fcut the highest source frequency)
+        fcut = maximum(s -> 1 / s.trise, srcs)
+        xs = (gx .- gx[1]) ./ 1e3
+        copyto!.(getfield.(getfield.(blocks, :pml), :gx), Ref([FT.(damping_profile(x, xs[na+1], xs[end], na, dt, fcut)) for x in xs]))
+        H1 = hostblocks[1]
+        zrow = [sum(H1.Z[:, k] .- H1.Z[:, 1]) / (nx * 1e3) for k in 1:H1.nz]
+        copyto!(blocks[1].pml.gz, [FT.(damping_profile(z, zrow[na+1], 1e9, na, dt, fcut)) for z in zrow])
+    end
     # locate points: block and η̂ (Lagrange interpolation of the mesh columns, bisection)
     function locate(x, z)
         i0, w = lagrange_weights(gx, x)
@@ -722,16 +810,16 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     function step!(it, record)
         n = it - 1
         itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
-        itw > 0 && nst > 0 && foreach_item!(backend, vprev_cv!, (prev, blocks, St), nst)
+        itw > 0 && nst > 0 && foreach_item!(backend, vprev_cv!, (prev, lite, St), nst)
         momentum!(dtT, true)
         absorber === :cerjan && foreach(B -> (B.V1 .*= B.gs; B.V2 .*= B.gs), blocks)
-        length(forces) > 0 && run_once!(backend, force_cv!, (blocks, FS, it, dtT))
+        length(forces) > 0 && run_once!(backend, force_cv!, (lite, FS, it, dtT))
         KernelAbstractions.synchronize(backend)
         exchange_v!()
-        record && nst > 0 && foreach_item!(backend, record_cv!, (rec, acc, prev, blocks, St, itw, dtT), nst)
+        record && nst > 0 && foreach_item!(backend, record_cv!, (rec, acc, prev, lite, St, itw, dtT), nst)
         stress!(vc, dtT)
         absorber === :cerjan && foreach(B -> (B.S11 .*= B.gs; B.S22 .*= B.gs; B.S12 .*= B.gs), blocks)
-        length(moments) > 0 && run_once!(backend, moment_cv!, (blocks, MS, it))
+        length(moments) > 0 && run_once!(backend, moment_cv!, (lite, MS, it))
         KernelAbstractions.synchronize(backend)
         exchange_s!()
     end
@@ -752,7 +840,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     # checkpoints (one file per process): the wavefield and memory variables, the recording and the plane accumulators
     ckp = checkpoint === nothing ? nothing : par !== nothing ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")
-    fields_of(B) = Tuple(getfield(B, k) for k in keys(B) if occursin(r"^[VSR][0-9]+$", string(k)))
+    fields_of(B) = (Tuple(getfield(B, k) for k in keys(B) if occursin(r"^[VSR][0-9]+$", string(k)))..., pml_arrays(B)...)
     state = (Iterators.flatten(map(fields_of, blocks))..., rec, acc, prev,
              (planes === nothing ? () : Iterators.flatten((p.U, p.PK) for p in planes))...)
     it0 = restart ? load_state!(state, ckp, nt) + 1 : 1
@@ -767,7 +855,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         if planes !== nothing                          # netCDF planes: displacement and peaks every step
             store = snapshot_every > 0 && n % snapshot_every == 0
             for p in planes
-                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, blocks, p.pts, dtT, store, Val(2)), length(p.own))
+                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, lite, p.pts, dtT, store, Val(2)), length(p.own))
             end
             if store
                 KernelAbstractions.synchronize(backend)

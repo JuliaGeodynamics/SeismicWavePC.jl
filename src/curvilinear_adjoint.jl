@@ -96,7 +96,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     comps(B, names) = map(k -> getfield(B, k), names)
     zero_(b, n...) = KernelAbstractions.zeros(backend, FT, n..., size(blocks[b].J)...)
     fill_(b, v) = (A = zero_(b); fill!(A, FT(v)); A)
-    fields(B) = (comps(B, vn)..., comps(B, sn)..., (attenuation ? comps(B, rn) : ())...)
+    fields(B) = (comps(B, vn)..., comps(B, sn)..., (attenuation ? comps(B, rn) : ())..., pml_arrays(B)...)
     # 1. forward, with checkpoints (host) every K steps; the misfit and its residual
     K = something(d.checkpoint_steps, max(1, ceil(Int, sqrt(nt))))
     ckpt = Dict{Int,Any}()
@@ -145,20 +145,77 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     Aout = Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb)       # A y
     nomem = attenuation ? NamedTuple{rn}(ntuple(_ -> nothing, nS)) : (;)
     Gblk = Tuple(merge(Base.structdiff(blocks[b], NamedTuple{(:wx, :wz, :s13, :mu66)}), NamedTuple{vn}(Win[b]), NamedTuple{sn}(Gout[b]), nomem,
-                       (; lam=zero_(b), mu=fill_(b, 0.5), tp=nothing, ts=nothing)) for b in 1:nb)
+                       (; lam=zero_(b), mu=fill_(b, 0.5), tp=nothing, ts=nothing, pml=nothing)) for b in 1:nb)
     tractions(b) = N == 3 ? (; G1=zero_(b), G2=zero_(b), G3=zero_(b)) : (;)                 # (3D: the η tractions of A)
-    Ablk = Tuple(merge(blocks[b], NamedTuple{sn}(Yin[b]), NamedTuple{vn}(Aout[b]), (; iρJ=fill_(b, 1)), tractions(b)) for b in 1:nb)
-    AblkF = Tuple(merge(Ablk[b], NamedTuple{sn}(comps(blocks[b], sn))) for b in 1:nb)       # A σ of the forward
+    Ablk = Tuple(merge(blocks[b], NamedTuple{sn}(Yin[b]), NamedTuple{vn}(Aout[b]), (; iρJ=fill_(b, 1), pml=nothing), tractions(b)) for b in 1:nb)
+    # PML: the forward memory variables (copies: `scratch`) make the operators give the stretched strains and divergences of
+    # the forward; the adjoint applies the parts of the operators of the stretched directions separately (`part`)
+    pml = pmlof(blocks[1]) !== nothing
+    memnames(P) = Tuple(k for k in keys(P) if getfield(P, k) isa AbstractArray && !(k in (:gx, :gy, :gz)))
+    scratch = pml ? Tuple(merge(blocks[b].pml, NamedTuple{memnames(blocks[b].pml)}(map(copy, pml_arrays(blocks[b])))) for b in 1:nb) : nothing
+    withpml(blk, b) = pml ? merge(blk, (; pml=scratch[b])) : blk
+    AblkF = Tuple(withpml(merge(Ablk[b], NamedTuple{sn}(comps(blocks[b], sn))), b) for b in 1:nb)       # A σ of the forward
+    GblkP = Tuple(withpml(Gblk[b], b) for b in 1:nb)                                                 # its strains
     "G w: the strains of the velocities in Win (exchanged first); shear strains in Gout halved"
-    function Gop!()
+    function Gop!(blk=Gblk)
         foreach(b -> cv_exchange!(par, Win[b]), 1:nb)
         foreach(g -> foreach(A -> fill!(A, 0), g), Gout)
-        stress!(nothing, one(FT), Gblk)
+        stress!(nothing, one(FT), blk)
     end
     function Aop!(blk)
-        blk === Ablk && foreach(b -> cv_exchange!(par, Yin[b]), 1:nb)
+        blk === AblkF || foreach(b -> cv_exchange!(par, Yin[b]), 1:nb)
         foreach(a -> foreach(A -> fill!(A, 0), a), Aout)
         momentum!(one(FT), false, blk)
+    end
+    # the stretched directions: (part, the pieces of every block: full-array ranges, slab ranges, γ₁ - 1, γ₂, γ₃, γ₄ dt) and the
+    # adjoint memory variables of the momentum (per velocity) and the stress (per stress component), in the slabs
+    dirs = pml ? (N == 2 ? (:xi, :eta) : (:xi, :psi, :eta)) : ()
+    function pieces(D, b)
+        P = blocks[b].pml
+        na = P.np
+        nz = hostblocks[b].nz
+        owned(a) = N == 2 ? (hx+1:hx+c.no) : a == 1 ? (hx+1:hx+c.nox) : (hx+1:hx+c.noy)
+        shape(g, a) = reshape(g, ntuple(q -> q == a ? length(g) : 1, N))
+        γs(G, a) = (shape(dev(FT[g[1] - 1 for g in G]), a), shape(dev(FT[g[2] for g in G]), a), shape(dev(FT[g[3] for g in G]), a),
+                    shape(dev(FT[g[4] * dtT for g in G]), a))
+        out = []
+        if D === :eta
+            b == 1 || return out
+            G = Array(P.gz)[1:na]
+            F = N == 2 ? (owned(1), 1:na) : (owned(1), owned(2), 1:na)
+            push!(out, (F, F, γs(G, N)...))
+        else
+            a = D === :xi ? 1 : 2
+            n, lo, hi, o = a == 1 ? (nx, c.ia, c.ib, ox) : (c.ny, c.ja, c.jb, oy)
+            G = Array(a == 1 ? P.gx : P.gy)
+            for r in (1:na, n-na+1:n)
+                g = max(first(r), lo):min(last(r), hi)
+                isempty(g) && continue
+                sl = (first(g) <= na ? first(g) : first(g) - n + 2na):(last(g) <= na ? last(g) : last(g) - n + 2na)
+                other = N == 2 ? (1:nz,) : a == 1 ? (owned(2), 1:nz) : (1:nz,)
+                F = a == 1 ? (g .- o, other...) : (owned(1), g .- o, 1:nz)
+                S = a == 1 ? (sl, other...) : (owned(1), sl, 1:nz)
+                push!(out, (F, S, γs(G[g], a)...))
+            end
+        end
+        return out
+    end
+    slabsize(D, b) = (P = blocks[b].pml; size(D === :xi ? P.xv1 : D === :psi ? P.yv1 : P.zv1))
+    PML = Tuple((; part=Val(D), pieces=Tuple(pieces(D, b) for b in 1:nb),
+                  mv=Tuple(ntuple(_ -> KernelAbstractions.zeros(backend, FT, slabsize(D, b)...), N) for b in 1:nb),
+                  ms=Tuple(ntuple(_ -> KernelAbstractions.zeros(backend, FT, slabsize(D, b)...), nS) for b in 1:nb)) for D in dirs)
+    Win0 = pml ? Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb) : nothing
+    Yin0 = pml ? Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb) : nothing
+    "W = (γ₁ - 1) W0 + γ₄ dt M̄, M̄ ← γ₂ W0 + γ₃ M̄ in the slabs of the direction (W = 0 elsewhere)"
+    function pml_adjoint!(W, W0, M, pcs)
+        for b in 1:nb, k in eachindex(W[b])
+            fill!(W[b][k], 0)
+            for (F, S, g1, g2, g3, g4) in pcs[b]
+                w, r, m = view(W[b][k], F...), view(W0[b][k], F...), view(M[b][k], S...)
+                @. w = g1 * r + g4 * m
+                @. m = g2 * r + g3 * m
+            end
+        end
     end
     MS, nF, nM = c.MS, length(forces), length(c.moments)
     AF, gmF = KernelAbstractions.zeros(backend, FT, length(c.ftab.i), N), KernelAbstractions.zeros(backend, FT, nF, nt)
@@ -228,8 +285,9 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                  any(k -> getfield(H, an[k])[I] != 0, 1:N))
     forcedamp = any(damped, eachindex(c.ftab.b))
     Finc = forcedamp ? Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb) : nothing
-    Fblk = forcedamp ? Tuple(merge(blocks[b], NamedTuple{vn}(Finc[b])) for b in 1:nb) : nothing
+    Fblk = forcedamp ? Tuple(merge(blocks[b], NamedTuple{vn}(Finc[b]), (; pml=nothing)) for b in 1:nb) : nothing
     store = [Tuple(ntuple(_ -> zero_(b), (3 + forcedamp)N) for b in 1:nb) for _ in 1:K]   # per step: v old, v new, A σ, (v new without forces)
+    pstore = pml ? [Tuple(map(similar, pml_arrays(blocks[b])) for b in 1:nb) for _ in 1:K] : nothing   # PML memory at each step
     for s0 in sort!(collect(keys(ckpt)); rev=true)
         s1 = min(s0 + K - 1, nt)
         for (b, B) in enumerate(blocks), (A, h) in zip(fields(B), ckpt[s0][b])
@@ -237,6 +295,12 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         end
         for it in s0:s1
             q = store[it-s0+1]
+            if pml
+                for b in 1:nb
+                    foreach(copyto!, pstore[it-s0+1][b], pml_arrays(blocks[b]))
+                    foreach(copyto!, Tuple(getfield(scratch[b], k) for k in memnames(scratch[b])), pml_arrays(blocks[b]))
+                end
+            end
             Aop!(AblkF)
             for b in 1:nb, k in 1:N
                 copyto!(q[b][k], comps(blocks[b], vn)[k]); copyto!(q[b][2N+k], Aout[b][k])
@@ -265,19 +329,33 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                 copyto!(Win[b][k], q[b][N+k])
                 L === nothing || (L[b] .+= q[b][N+k] .^ 2)
             end
-            Gop!()
+            pml && for b in 1:nb
+                foreach(copyto!, Tuple(getfield(scratch[b], k) for k in memnames(scratch[b])), pstore[it-s0+1][b])
+            end
+            Gop!(GblkP)
             foreach(stress_adjoint!, 1:nb)
             Aop!(Ablk)
             for b in 1:nb, k in 1:N
                 V = comps(Adj[b], vn)[k]
                 @. V -= dtT * Hw[b] * Aout[b][k]
             end
+            if pml                     # the stretched parts of G (stress update): Gᵀ of the slabs
+                foreach((Y0, Y) -> foreach(copyto!, Y0, Y), Yin0, Yin)
+                for Dp in PML
+                    pml_adjoint!(Yin, Yin0, Dp.ms, Dp.pieces)
+                    Aop!(Tuple(merge(Ablk[b], (; part=Dp.part)) for b in 1:nb))
+                    for b in 1:nb, k in 1:N
+                        V = comps(Adj[b], vn)[k]
+                        @. V -= dtT * Hw[b] * Aout[b][k]
+                    end
+                end
+            end
             # recording at step n: v(tₙ) = (v^{n-1/2} + v^{n+1/2}) / 2
             itw > 0 && nst > 0 && run_once!(backend, residual!, (Adj, St, Rres, itw, FT(0.5)))
             # momentum v^{n+1/2} = P v^{n-1/2} + Q dt (1/ρJ) A σⁿ (+ forces): gradient (1/ρJ, damping) and σ̄ += Aᵀ(...)
             if nF > 0
                 run_once!(backend, force_grad!, (Grad, Adj, FS, it, dtT))
-                run_once!(backend, force_sens_cv!, (AF, gmF, Adj, blocks, FS, it, dtT, Val(vn)))
+                run_once!(backend, force_sens_cv!, (AF, gmF, Adj, map(B -> merge(B, (; pml=nothing)), blocks), FS, it, dtT, Val(vn)))
             end
             c.sponge && foreach(b -> foreach(V -> V .*= blocks[b].gs, comps(Adj[b], vn)), 1:nb)
             for b in 1:nb
@@ -300,6 +378,19 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                 for k in 1:nS
                     @. S[k] -= HJ[b] * (1 + (k > N)) * Gout[b][k]
                 end
+            end
+            if pml                     # the stretched parts of A (momentum update): Aᵀ of the slabs
+                foreach((W0, W) -> foreach(copyto!, W0, W), Win0, Win)
+                for Dp in PML
+                    pml_adjoint!(Win, Win0, Dp.mv, Dp.pieces)
+                    Gop!(Tuple(merge(Gblk[b], (; part=Dp.part)) for b in 1:nb))
+                    for b in 1:nb, k in 1:nS
+                        S = comps(Adj[b], sn)[k]
+                        @. S -= HJ[b] * (1 + (k > N)) * Gout[b][k]
+                    end
+                end
+            end
+            for b in 1:nb
                 for (k, ab) in enumerate(comps(blocks[b], an))
                     V = comps(Adj[b], vn)[k]
                     @. V *= (1 - ab * dtT / 2) / (1 + ab * dtT / 2)
