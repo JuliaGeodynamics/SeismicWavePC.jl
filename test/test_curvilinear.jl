@@ -197,4 +197,30 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
             @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
         end
     end
+    @testset "misfit gradient (3D) against finite differences" begin
+        topog3(x, y) = 1.0 * exp(-(x^2 + y^2) / 10)
+        mohog3(x, y) = -4.0 + 0.5 * sin(2π * x / 10) * cos(2π * y / 12)
+        mesh = curvilinear_mesh(range(-6, 6, length=33), range(-5, 5, length=29), [topog3, mohog3]; dz=0.4, bottom=-8)
+        X, Y, Z = mesh.x.val, mesh.y.val, mesh.z.val
+        low = Z .< mohog3.(X, Y)
+        base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2))
+        srcs = [DoubleCoupleSource(-1.0, 0.5, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0),
+                ForceSource(1.5, -1.0, -2.0; fz=1e14, fx=5e13, trise=1.0)]
+        sts = [[Station("s$x$y", Float64(x) + 0.1, Float64(y) - 0.1, 0.0; surface=true) for x in -4:2:4 for y in (-3, 0, 3)]; Station("d", 0.3, 0.2, -5.0)]
+        r0 = simulate(addfield(mesh, base); tmax=0.05, sources=srcs, T=Float64, verbose=false)
+        kw = (; dt=r0.t[2] - r0.t[1], tmax=3.0, sources=srcs, T=Float64)
+        pert = merge(base, (; vs=base.vs .* (1 .- 0.04 .* exp.(-((X .- 0.5) .^ 2 .+ Y .^ 2 .+ (Z .+ 1) .^ 2) ./ 3))))
+        obs = simulate(addfield(mesh, pert); kw..., stations=sts, verbose=false)
+        J, g, _ = misfit_gradient(addfield(mesh, base), obs; kw..., checkpoint_steps=13)
+        Jof(m) = L2Misfit()(simulate(m; kw..., stations=sts, verbose=false).v, obs.v, obs.t)[1]
+        @test Jof(addfield(mesh, base)) ≈ J rtol = 1e-12
+        for (f, δ) in ((:vs, 0.02 .* base.vs .* exp.(-((X .- 2) .^ 2 .+ (Y .+ 1) .^ 2 .+ (Z .- 0.2) .^ 2) ./ 3)),   # at the surface
+                       (:vp, 0.02 .* base.vp .* exp.(-((X .+ 1) .^ 2 .+ (Y .- 1) .^ 2 .+ (Z .+ 4) .^ 2) ./ 3)),    # across the interface
+                       (:rho, 0.02 .* base.rho .* exp.(-((X .- 0.5) .^ 2 .+ Y .^ 2 .+ (Z .+ 2) .^ 2) ./ 4)),
+                       (:vs, 0.02 .* base.vs .* exp.(-((X .- 5.5) .^ 2 .+ (Y .+ 4.5) .^ 2 .+ (Z .+ 3) .^ 2) ./ 2)))  # at an absorbing corner
+            ε = 1e-3
+            fd = (Jof(addfield(mesh, merge(base, (; f => base[f] .+ ε .* δ)))) - Jof(addfield(mesh, merge(base, (; f => base[f] .- ε .* δ))))) / 2ε
+            @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
+        end
+    end
 end

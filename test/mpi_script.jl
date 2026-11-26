@@ -238,5 +238,19 @@ if runs("curvilinear")
     e = (abs(J1 / J2 - 1), maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs)))
     rank == 0 && println("MPI curvilinear gradient nproc=4: misfit, gradient $e")
     all(<(1e-10), e) || error("MPI curvilinear gradient differs on rank $rank")
+    # misfit gradient (3D)
+    mesh = curvilinear_mesh(range(-8, 8, length=41), range(-7, 7, length=37), [topo3, moho3]; dz=0.5, bottom=-12)
+    X, Y, Z = mesh.x.val, mesh.y.val, mesh.z.val
+    low = Z .< moho3.(X, Y)
+    base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2))
+    srcs = [DoubleCoupleSource(-1.0, 0.5, -7.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0)]
+    sts = [Station("s$x$y", Float64(x), Float64(y), 0.0; surface=true) for x in -6:3:6 for y in (-4, 0, 5)]
+    kw = (; dt=stable_dt(addfield(mesh, base), srcs), tmax=3.0, sources=srcs, T=Float64)
+    obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* (1 .+ 0.03 .* exp.(-(X .^ 2 .+ Y .^ 2 .+ (Z .+ 2) .^ 2) ./ 4))))); kw..., stations=sts, verbose=false)
+    J1, g1, _ = misfit_gradient(addfield(mesh, base), obs; kw...)
+    J2, g2, _ = misfit_gradient(addfield(mesh, base), obs; kw..., nproc=(2, 2))
+    e = (abs(J1 / J2 - 1), maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs)))
+    rank == 0 && println("MPI curvilinear 3D gradient nproc=(2, 2): misfit, gradient $e")
+    all(<(1e-10), e) || error("MPI curvilinear 3D gradient differs on rank $rank")
 end
 MPI.Barrier(MPI.COMM_WORLD)

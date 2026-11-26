@@ -54,7 +54,6 @@ function misfit_gradient(model::CartData, observed::Seismograms; method=:adjoint
     illumination && method === :ad && error("illumination = true needs method = :adjoint")
     if is_curvilinear(model) || get(kwargs, :grid, :auto) === :curvilinear       # curvilinear grids: the SBP adjoint
         (method === :adjoint && !illumination) || error("curvilinear grids: method = :adjoint without illumination")
-        size(model)[2] == 1 || error("misfit gradients on curvilinear grids: 2D only (for now)")
         res = simulate(model; kwargs..., grid=:curvilinear, stations=observed.stations, verbose=false,
                        driver=CurvilinearGradient(observed, misfit, K))
         mute === nothing || mute_gradient!(res[2], mute, kwargs[:sources], observed.stations)

@@ -185,7 +185,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
                                 tbeg=0.0, absorber=:impedance, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                                 density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, backend=CPU(),
                                 T::Type{FT}=Float32, verbose=true, wavefield=true, jump=0.05, wave=:psv, interpolation=:sinc,
-                                free_surface=:openswpc, nproc=1, kwargs...) where {FT}
+                                free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
     absorber in (:impedance, :none) || error("curvilinear grids absorb with impedance boundary conditions: absorber = :impedance (or :none)")
     srcs = sources isa AbstractVector ? sources : [sources]
@@ -235,6 +235,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     hostblocks = map(1:length(edges)-1) do b
         r = edges[b]:edges[b+1]
         m = map(A -> copy(A[:, :, r]), (ρ, vp, vs, qp, qs))
+        kmap = [r[k] for i in 1:nx, j in 1:ny, k in eachindex(r)]       # the model row of the material of each node
         for (q, side, src) in ((b - 1, false, 2), (b, true, length(r) - 1))
             1 <= q <= length(rows) || continue
             kk = side ? length(r) : 1
@@ -242,6 +243,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
                 below[q][c] == side && continue
                 i, j = mod1(c, nx), fld1(c, nx)
                 foreach(A -> A[i, j, kk] = A[i, j, src], m)
+                kmap[i, j, kk] = kmap[i, j, src]
             end
         end
         bρ, bvp, bvs, bqp, bqs = m
@@ -256,19 +258,24 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         mu = @. bρ * bvs^2 / visco_chi((ts,), taus, fq_ref)^2
         lam = @. bρ * bvp^2 / visco_chi((ts,), taup, fq_ref)^2 - 2mu
         a1, a2, a3 = zeros(nx, ny, nz), zeros(nx, ny, nz), zeros(nx, ny, nz)
+        # and the derivatives of the damping with respect to vp and vs (gradients): ∂a_c/∂vp, ∂a_c/∂vs
+        da = ntuple(_ -> (zeros(nx, ny, nz), zeros(nx, ny, nz)), 3)
         if absorber === :impedance                      # a = |J·| Z / (H ρ J): normal vp, tangential vs
             for i in (1, nx)
                 @. a1[i, :, :] += bvp[i, :, :] / Hξ[i]; @. a2[i, :, :] += bvs[i, :, :] / Hξ[i]; @. a3[i, :, :] += bvs[i, :, :] / Hξ[i]
+                da[1][1][i, :, :] .+= 1 / Hξ[i]; da[2][2][i, :, :] .+= 1 / Hξ[i]; da[3][2][i, :, :] .+= 1 / Hξ[i]
             end
             for j in (1, ny)
                 @. a1[:, j, :] += bvs[:, j, :] / Hψ[j]; @. a2[:, j, :] += bvp[:, j, :] / Hψ[j]; @. a3[:, j, :] += bvs[:, j, :] / Hψ[j]
+                da[1][2][:, j, :] .+= 1 / Hψ[j]; da[2][1][:, j, :] .+= 1 / Hψ[j]; da[3][2][:, j, :] .+= 1 / Hψ[j]
             end
             if b == 1
                 g = @. sqrt(Jx[:, :, 1]^2 + Jy[:, :, 1]^2 + 1) / (SBP_W[1] * hη * J[:, :, 1])
                 @. a1[:, :, 1] += g * bvs[:, :, 1]; @. a2[:, :, 1] += g * bvs[:, :, 1]; @. a3[:, :, 1] += g * bvp[:, :, 1]
+                da[1][2][:, :, 1] .+= g; da[2][2][:, :, 1] .+= g; da[3][1][:, :, 1] .+= g
             end
         end
-        (; nz, hη, Z=Zb, J, Jx, Jy, ρ=bρ, lam, mu, taup, taus, a1, a2, a3)
+        (; nz, hη, Z=Zb, J, Jx, Jy, ρ=bρ, lam, mu, taup, taus, a1, a2, a3, vp=bvp, vs=bvs, kmap, da)
     end
     nb = length(hostblocks)
     blocks = Tuple(map(hostblocks) do H
@@ -298,16 +305,17 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         Tuple(((a[1], b[1], c[1]), (a[2], b[2], c[2]), Val((a[3], b[3], c[3]))) for a in seg(nx, ia, ib, ox), b in seg(ny, ja, jb, oy),
               c in seg(H.nz, 1, H.nz, 0))
     end
-    function momentum!(dtT, damp)
+    # (on `blks`: the blocks, or blocks of other arrays with the same mesh: the operators of the adjoint)
+    function momentum!(dtT, damp, blks=blocks)
         for b in 1:nb                                  # the tractions of all blocks first (interfaces read the neighbours')
-            foreach_cell!(backend, traction3_cv!, (blocks[b],), (0, 0, 0), (nlx, nly, hostblocks[b].nz))
+            foreach_cell!(backend, traction3_cv!, (blks[b],), (0, 0, 0), (nlx, nly, hostblocks[b].nz))
         end
         for b in 1:nb
-            foreach_region!(backend, momentum3_cv!, (blocks[b], below_(b), above_(b), dtT, damp), regions[b])
+            foreach_region!(backend, momentum3_cv!, (blks[b], b > 1 ? blks[b-1] : nothing, b < nb ? blks[b+1] : nothing, dtT, damp), regions[b])
         end
     end
-    stress!(vc, dtT) = for b in 1:nb
-        foreach_region!(backend, stress3_cv!, (blocks[b], below_(b), above_(b), vc, dtT), regions[b])
+    stress!(vc, dtT, blks=blocks) = for b in 1:nb
+        foreach_region!(backend, stress3_cv!, (blks[b], b > 1 ? blks[b-1] : nothing, b < nb ? blks[b+1] : nothing, vc, dtT), regions[b])
     end
     fields(B) = (B.V1, B.V2, B.V3, B.S11, B.S22, B.S33, B.S23, B.S13, B.S12)
     exchange_v!() = foreach(B -> cv_exchange!(par, (B.V1, B.V2, B.V3)), blocks)
@@ -394,6 +402,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         k0, wz = lagrange_weights(gη, η)
         (b, i0, j0, k0, wx, wy, wz)
     end
+    st_all = st
     own = findall(s -> ia <= s[2] + 2 <= ib && ja <= s[3] + 2 <= jb, st)     # the stations of this process
     st = st[own]
     nst = length(st)
@@ -422,19 +431,33 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     verbose && @printf("SeismicWavePC: 3D on a curvilinear grid, %d × %d × %d nodes in %d block(s) (interfaces at rows %s), %d steps of %.4g s%s%s\n",
                        nx, ny, nzt, nb, isempty(rows) ? "–" : join(rows, ", "), nt, dt, attenuation ? ", attenuation" : "",
                        absorber === :impedance ? ", absorbing sides and bottom" : "")
-    for it in 1:nt
+    # one step (n = it - 1); recording if `record`
+    function step!(it, record)
         n = it - 1
-        itw = n % record_every == 0 ? n ÷ record_every + 1 : 0
+        itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
         itw > 0 && nst > 0 && foreach_item!(backend, vprev3_cv!, (prev, blocks, St), nst)
         momentum!(dtT, true)
         length(forces) > 0 && run_once!(backend, force3_cv!, (blocks, FS, it, dtT))
         KernelAbstractions.synchronize(backend)
         exchange_v!()
-        nst > 0 && foreach_item!(backend, record3_cv!, (rec, acc, prev, blocks, St, itw, dtT), nst)
+        record && nst > 0 && foreach_item!(backend, record3_cv!, (rec, acc, prev, blocks, St, itw, dtT), nst)
         stress!(vc, dtT)
         length(moments) > 0 && run_once!(backend, moment3_cv!, (blocks, MS, it))
         KernelAbstractions.synchronize(backend)
         exchange_s!()
+    end
+    function all_traces()
+        traces = zeros(nrec, 18, length(stations))
+        traces[:, :, own] .= Float64.(Array(rec))
+        par === nothing || MPI.Allreduce!(traces, +, par.comm)
+        return traces
+    end
+    driver === nothing || return drive_curvilinear3(driver, (; backend, FT, blocks, hostblocks, nb, nx, ny, nzt, nlx, nly, nox, noy,
+        hx, ox, oy, xr, yr, ia, ib, ja, jb, par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!,
+        exchange_s!, FS, forces, Hξ, Hψ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, nsrc=length(srcs), st_all))
+    for it in 1:nt
+        n = it - 1
+        step!(it, true)
         if snapshot_every > 0 && n % snapshot_every == 0
             data = velocity_field()
             if me == 0
@@ -451,9 +474,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     KernelAbstractions.synchronize(backend)
     movie === nothing || movie_paraview(movie)
     verbose && @printf("  finished in %.2f s\n", time() - wall)
-    traces = zeros(nrec, 18, length(stations))
-    traces[:, :, own] .= Float64.(Array(rec))
-    par === nothing || MPI.Allreduce!(traces, +, par.comm)
+    traces = all_traces()
     return Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), traces[:, 1:3, :], traces[:, 4:6, :],
                        traces[:, 7:12, :], traces[:, 13:18, :], collect(stations), (:x, :y, :z), (:xx, :yy, :zz, :yz, :xz, :xy),
                        wavefield ? velocity_field() : nothing)
