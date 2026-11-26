@@ -64,26 +64,27 @@ function lagrange(g, x0; n=6)                          # (any grid, e.g. boundar
     idx, [prod((x0 - g[m]) / (g[j] - g[m]) for m in idx if m != j) for j in idx]
 end
 
-"the flattening weight: 1 at the surface (η = 0), smoothly to 0 at η = -D (w = 1 everywhere without D)"
-wflat(η, D) = D === nothing ? 1.0 : (s = clamp(1 + η / D, 0.0, 1.0); s^2 * (3 - 2s))
+"the flattening weight: 1 down to η = -D0, then smoothly to 0 at η = -D (w = 1 everywhere without D)"
+wflat(η, D, D0=0.0) = D === nothing ? 1.0 : (s = clamp((η + D) / (D - D0), 0.0, 1.0); s^2 * (3 - 2s))
 
-function run_case(case; dx=500.0, T=9.0, dt=0.04dx / 1e3, order=7, family=MattssonNiemeläWinters2026, flatten=nothing, layer=nothing)
+"""
+    run_case(case; dx, T, dt, order, family, flatten, flatten_from, interfaces, layer)
+
+Blocks stacked in η: the block boundaries `interfaces` (η values, e.g. material interfaces that follow the surface) are
+grid lines, the blocks are coupled by SAT (continuity of velocity and traction, energy-neutral: half of the traction
+mismatch on the momentum, half of the velocity mismatch on the stress of each side). Each block has at least 13 points
+in η (the boundary closures); the time step follows from the finest block. The material is sampled inside each block only (no averaging across interfaces).
+"""
+function run_case(case; dx=500.0, T=9.0, dt=nothing, order=7, family=MattssonNiemeläWinters2026, flatten=nothing,
+                  flatten_from=0.0, interfaces=Float64[], layer=nothing)
     h = surface(case)
     s = source(case)
     ξ0, ξ1, η0 = s[1] - 62e3, s[1] + 62e3, -80e3
-    Nx, Nz = round(Int, (ξ1 - ξ0) / dx) + 1, round(Int, -η0 / dx) + 1
+    Nx = round(Int, (ξ1 - ξ0) / dx) + 1
     Uξ = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=ξ0, xmax=ξ1, N=Nx)
-    Uη = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=η0, xmax=0.0, N=Nz)
-    Ddξ, Ddη, Dgξ, Dgη = Uξ.minus, Uη.minus, Uξ.plus, Uη.plus        # divergence, gradient
-    gξ, gη = grid(Ddξ), grid(Ddη)
-    Hξ, Hη = diag(mass_matrix(Ddξ)), diag(mass_matrix(Ddη))
-    dξ!(out, A, D) = Threads.@threads for k in 1:Nz
-        mul!(view(out, :, k), D, view(A, :, k))
-    end
-    dη!(out, A, D) = Threads.@threads for i in 1:Nx
-        mul!(view(out, i, :), D, view(A, i, :))
-    end
-    zmap(ξ, η) = η + h(ξ) * wflat(η, flatten)
+    Ddξ, Dgξ = Uξ.minus, Uξ.plus                                        # divergence, gradient
+    gξ, Hξ = grid(Ddξ), diag(mass_matrix(Ddξ))
+    zmap(ξ, η) = η + h(ξ) * wflat(η, flatten, flatten_from)
     "η of the physical point (x, z) (bisection; z increases with η)"
     function eta(x, z)
         a, b = η0 - 50e3, 10e3
@@ -93,105 +94,167 @@ function run_case(case; dx=500.0, T=9.0, dt=0.04dx / 1e3, order=7, family=Mattss
         end
         (a + b) / 2
     end
-    # metric: x = ξ, J = z_η, Jξ = (z_η, 0), Jη = (-z_ξ, 1), with the divergence operators
-    Zm = [zmap(ξ, η) for ξ in gξ, η in gη]
-    J, Jηx = similar(Zm), similar(Zm)
-    dη!(J, Zm, Ddη)
-    dξ!(Jηx, Zm, Ddξ)
-    Jηx .*= -1
-    minimum(J) > 0 || error("the mapping folds (min J = $(minimum(J)))")
-    # material: averaged over the cell of each node (4 × 4 samples)
+    edges = [η0; sort(interfaces); 0.0]                                 # block boundaries, bottom to top
     off = (-0.375, -0.125, 0.125, 0.375)
-    ρ, lam, mu = (zeros(Nx, Nz) for _ in 1:3)
-    Threads.@threads for k in 1:Nz
-        for i in 1:Nx
-            sρ, sμ, sM = 0.0, 0.0, 0.0
-            for a in off, b in off
-                ξ = clamp(gξ[i] + a * dx, ξ0, ξ1)
-                η = clamp(gη[k] + b * dx, η0, 0.0)
-                vp_, vs_, r_ = material(case, layer, ξ, zmap(ξ, η))
-                sρ += r_
-                sμ += 1 / (r_ * vs_^2)
-                sM += 1 / (r_ * vp_^2)
+    blocks = map(1:length(edges)-1) do b
+        lo, hi = edges[b], edges[b+1]
+        Nz = max(13, round(Int, (hi - lo) / dx) + 1)
+        Uη = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=lo, xmax=hi, N=Nz)
+        gη = grid(Uη.minus)
+        dξ!(out, A, D) = Threads.@threads for k in 1:Nz
+            mul!(view(out, :, k), D, view(A, :, k))
+        end
+        dη!(out, A, D) = Threads.@threads for i in 1:Nx
+            mul!(view(out, i, :), D, view(A, i, :))
+        end
+        # metric: x = ξ, J = z_η, Jξ = (z_η, 0), Jη = (-z_ξ, 1), with the divergence operators
+        Zm = [zmap(ξ, η) for ξ in gξ, η in gη]
+        J, Jηx = similar(Zm), similar(Zm)
+        dη!(J, Zm, Uη.minus)
+        dξ!(Jηx, Zm, Ddξ)
+        Jηx .*= -1
+        minimum(J) > 0 || error("the mapping folds (min J = $(minimum(J)))")
+        # material: averaged over the cell of each node (4 × 4 samples), inside the block only
+        hη = (hi - lo) / (Nz - 1)
+        ρ, lam, mu = (zeros(Nx, Nz) for _ in 1:3)
+        Threads.@threads for k in 1:Nz
+            for i in 1:Nx
+                sρ, sμ, sM = 0.0, 0.0, 0.0
+                for a in off, c in off
+                    ξ = clamp(gξ[i] + a * dx, ξ0, ξ1)
+                    η = clamp(gη[k] + c * hη, lo + 1e-6, hi - 1e-6)
+                    vp_, vs_, r_ = material(case, layer, ξ, zmap(ξ, η))
+                    sρ += r_
+                    sμ += 1 / (r_ * vs_^2)
+                    sM += 1 / (r_ * vp_^2)
+                end
+                ρ[i, k] = sρ / 16
+                mu[i, k] = 16 / sμ
+                lam[i, k] = 16 / sM - 2mu[i, k]
             end
-            ρ[i, k] = sρ / 16
-            mu[i, k] = 16 / sμ
-            lam[i, k] = 16 / sM - 2mu[i, k]
         end
+        (; lo, hi, Nz, gη, Hη=diag(mass_matrix(Uη.minus)), Ddη=Uη.minus, Dgη=Uη.plus, dξ!, dη!, J, Jηx, ρ, lam, mu,
+           M=lam .+ 2 .* mu, ρJ=ρ .* J, W=Tuple(zeros(Nx, Nz) for _ in 1:5), F=Dict{Tuple{Int,Int},Float64}())
     end
-    ρJ = ρ .* J
-    M = lam .+ 2 .* mu
-    # fields and work arrays
-    U = Tuple(zeros(Nx, Nz) for _ in 1:5)
-    K = [Tuple(zeros(Nx, Nz) for _ in 1:5) for _ in 1:4]
-    Utmp = Tuple(zeros(Nx, Nz) for _ in 1:5)
-    W = Tuple(zeros(Nx, Nz) for _ in 1:5)
-    # the forces: band-limited deltas in (ξ, η) divided by the SBP norm (J f = F δ(ξ) δ(η))
+    nb = length(blocks)
+    # time step: 0.25 h / vp (RK4 limit ≈ 0.43 h / vp for these operators), h the finer of the spacings of a block
+    dt = something(dt, minimum(B -> 0.25 * min(dx, (B.hi - B.lo) / (B.Nz - 1)) / maximum(sqrt.(B.M ./ B.ρ)), blocks))
+    inblock(η) = clamp(searchsortedlast(edges, η), 1, nb)
+    # the forces: band-limited deltas in (ξ, η) divided by the SBP norm (J f = F δ(ξ) δ(η)); sources are far from interfaces
     n = frame(case).n
-    F = Dict{Tuple{Int,Int},Float64}()
     for (p, w) in force_nodes(case)
+        ηp = eta(p[1], p[2])
+        B = blocks[inblock(ηp)]
         iξ, wξ = sincw(gξ, p[1])
-        iη, wη = sincw(gη, eta(p[1], p[2]))
+        iη, wη = sincw(B.gη, ηp)
         for (a, i) in enumerate(iξ), (b, k) in enumerate(iη)
-            F[(i, k)] = get(F, (i, k), 0.0) + 1e10 * w * wξ[a] * wη[b] / (Hξ[i] * Hη[k])
+            B.F[(i, k)] = get(B.F, (i, k), 0.0) + 1e10 * w * wξ[a] * wη[b] / (Hξ[i] * B.Hη[k])
         end
     end
-    Fpts = collect(F)
+    Fpts = [collect(B.F) for B in blocks]
+    newstate() = [Tuple(zeros(Nx, B.Nz) for _ in 1:5) for B in blocks]
+    U, Utmp = newstate(), newstate()
+    K = [newstate() for _ in 1:4]
     function rhs!(dU, U, t)
-        v1, v2, s11, s22, s12 = U
-        dv1, dv2, ds11, ds22, ds12 = dU
-        A, B, C, E, G = W
-        # momentum: ρ J ∂t v_i = Dξ(Jξ_j σ_ij) + Dη(Jη_j σ_ij) (+ SAT, force)
-        @. A = J * s11                 # Jξ_j σ_1j
-        @. B = Jηx * s11 + s12         # Jη_j σ_1j
-        dξ!(dv1, A, Ddξ); dη!(C, B, Ddη)
-        @. dv1 = (dv1 + C) / ρJ
-        @. G = J * s12
-        @. E = Jηx * s12 + s22
-        dξ!(dv2, G, Ddξ); dη!(C, E, Ddη)
-        @. dv2 = (dv2 + C) / ρJ
-        # SAT: the traction removed at every boundary (the free surface on top; free elsewhere too, far away)
-        @views begin
-            @. dv1[:, Nz] -= B[:, Nz] / (Hη[Nz] * ρJ[:, Nz]); @. dv2[:, Nz] -= E[:, Nz] / (Hη[Nz] * ρJ[:, Nz])
-            @. dv1[:, 1] += B[:, 1] / (Hη[1] * ρJ[:, 1]);     @. dv2[:, 1] += E[:, 1] / (Hη[1] * ρJ[:, 1])
-            @. dv1[1, :] += A[1, :] / (Hξ[1] * ρJ[1, :]);     @. dv2[1, :] += G[1, :] / (Hξ[1] * ρJ[1, :])
-            @. dv1[Nx, :] -= A[Nx, :] / (Hξ[Nx] * ρJ[Nx, :]); @. dv2[Nx, :] -= G[Nx, :] / (Hξ[Nx] * ρJ[Nx, :])
-        end
         r = ricker(t)
-        for ((i, k), a) in Fpts
-            dv1[i, k] += a * r * n[1] / ρJ[i, k]
-            dv2[i, k] += a * r * n[2] / ρJ[i, k]
+        # momentum: ρ J ∂t v_i = Dξ(Jξ_j σ_ij) + Dη(Jη_j σ_ij) (+ SAT, force)
+        for (b, B) in enumerate(blocks)
+            v1, v2, s11, s22, s12 = U[b]
+            dv1, dv2 = dU[b]
+            A, Gη1, C, Gη2, G = B.W
+            J, Jηx, ρJ, Hη, Nz = B.J, B.Jηx, B.ρJ, B.Hη, B.Nz
+            @. A = J * s11                 # Jξ_j σ_1j
+            @. Gη1 = Jηx * s11 + s12       # Jη_j σ_1j (the traction across η = const, scaled)
+            B.dξ!(dv1, A, Ddξ); B.dη!(C, Gη1, B.Ddη)
+            @. dv1 = (dv1 + C) / ρJ
+            @. G = J * s12
+            @. Gη2 = Jηx * s12 + s22
+            B.dξ!(dv2, G, Ddξ); B.dη!(C, Gη2, B.Ddη)
+            @. dv2 = (dv2 + C) / ρJ
+            # SAT at the outer boundaries: the traction removed (free surface on top; free, far away, elsewhere)
+            @views begin
+                @. dv1[1, :] += A[1, :] / (Hξ[1] * ρJ[1, :]);     @. dv2[1, :] += G[1, :] / (Hξ[1] * ρJ[1, :])
+                @. dv1[Nx, :] -= A[Nx, :] / (Hξ[Nx] * ρJ[Nx, :]); @. dv2[Nx, :] -= G[Nx, :] / (Hξ[Nx] * ρJ[Nx, :])
+                if b == nb
+                    @. dv1[:, Nz] -= Gη1[:, Nz] / (Hη[Nz] * ρJ[:, Nz]); @. dv2[:, Nz] -= Gη2[:, Nz] / (Hη[Nz] * ρJ[:, Nz])
+                end
+                if b == 1
+                    @. dv1[:, 1] += Gη1[:, 1] / (Hη[1] * ρJ[:, 1]); @. dv2[:, 1] += Gη2[:, 1] / (Hη[1] * ρJ[:, 1])
+                end
+            end
+            for ((i, k), a) in Fpts[b]
+                dv1[i, k] += a * r * n[1] / ρJ[i, k]
+                dv2[i, k] += a * r * n[2] / ρJ[i, k]
+            end
         end
-        # stress: ∂x = (Jξ_x Dξ + Jη_x Dη) / J = Dξ + (Jηx / J) Dη, ∂z = Dη / J
-        dξ!(A, v1, Dgξ); dη!(B, v1, Dgη); dξ!(C, v2, Dgξ); dη!(E, v2, Dgη)
-        @. ds11 = M * (A + Jηx / J * B) + lam * E / J
-        @. ds22 = lam * (A + Jηx / J * B) + M * E / J
-        @. ds12 = mu * (B / J + C + Jηx / J * E)
+        # interfaces (L below, its top row N; R above, its bottom row 1): traction mismatch on the momentum
+        for b in 1:nb-1
+            L, R = blocks[b], blocks[b+1]
+            N = L.Nz
+            @views for (c, Gi) in ((1, 2), (2, 4))
+                ΔG = L.W[Gi][:, N] .- R.W[Gi][:, 1]
+                dU[b][c][:, N] .-= ΔG ./ (2 .* L.Hη[N] .* L.ρJ[:, N])
+                dU[b+1][c][:, 1] .-= ΔG ./ (2 .* R.Hη[1] .* R.ρJ[:, 1])
+            end
+        end
+        # the gradients Dξ v, Dη v; velocity mismatch at the interfaces added to Dη v
+        for (b, B) in enumerate(blocks)
+            v1, v2 = U[b]
+            A, Bη, C, E = B.W
+            B.dξ!(A, v1, Dgξ); B.dη!(Bη, v1, B.Dgη); B.dξ!(C, v2, Dgξ); B.dη!(E, v2, B.Dgη)
+        end
+        for b in 1:nb-1
+            L, R = blocks[b], blocks[b+1]
+            N = L.Nz
+            @views for (c, Wi) in ((1, 2), (2, 4))
+                Δv = U[b][c][:, N] .- U[b+1][c][:, 1]
+                L.W[Wi][:, N] .-= Δv ./ (2 * L.Hη[N])
+                R.W[Wi][:, 1] .-= Δv ./ (2 * R.Hη[1])
+            end
+        end
+        # stress: ∂x = Dξ + (Jηx / J) Dη, ∂z = Dη / J
+        for (b, B) in enumerate(blocks)
+            _, _, ds11, ds22, ds12 = dU[b]
+            A, Bη, C, E = B.W
+            J, Jηx, M, lam, mu = B.J, B.Jηx, B.M, B.lam, B.mu
+            @. ds11 = M * (A + Jηx / J * Bη) + lam * E / J
+            @. ds22 = lam * (A + Jηx / J * Bη) + M * E / J
+            @. ds12 = mu * (Bη / J + C + Jηx / J * E)
+        end
         dU
     end
-    # receivers: Lagrange interpolation in (ξ, η)
+    # receivers: Lagrange interpolation in (ξ, η) in their block
     rec = receivers(case)
-    RW = [(lagrange(gξ, p[1]), lagrange(gη, eta(p[1], p[2]))) for (_, _, p) in rec]
-    sample(A, ((iξ, wξ), (iη, wη))) = sum(wξ[a] * wη[b] * A[i, k] for (a, i) in enumerate(iξ), (b, k) in enumerate(iη))
+    RW = map(rec) do (_, _, p)
+        ηp = eta(p[1], p[2])
+        b = inblock(ηp)
+        b, (lagrange(gξ, p[1]), lagrange(blocks[b].gη, ηp))
+    end
+    sample(A, ((iξ, wξ), (iη, wη))) = sum(wξ[a] * wη[c] * A[i, k] for (a, i) in enumerate(iξ), (c, k) in enumerate(iη))
     nt = round(Int, T / dt)
     vrec = zeros(nt + 1, 2, length(rec))
     energy = zeros(nt + 1)
-    S = (Hξ * Hη') .* J
+    S = [(Hξ * B.Hη') .* B.J for B in blocks]
+    axpy(X, Y, a, Z) = foreach((x, y, z) -> foreach((xx, yy, zz) -> (@. xx = yy + a * zz), x, y, z), X, Y, Z)
     t0 = time()
     for it in 1:nt
         t = (it - 1) * dt
         rhs!(K[1], U, t)
-        foreach((x, u, k) -> (@. x = u + dt / 2 * k), Utmp, U, K[1]); rhs!(K[2], Utmp, t + dt / 2)
-        foreach((x, u, k) -> (@. x = u + dt / 2 * k), Utmp, U, K[2]); rhs!(K[3], Utmp, t + dt / 2)
-        foreach((x, u, k) -> (@. x = u + dt * k), Utmp, U, K[3]); rhs!(K[4], Utmp, t + dt)
-        foreach((u, a, b, c, d) -> (@. u += dt / 6 * (a + 2b + 2c + d)), U, K[1], K[2], K[3], K[4])
-        for (m, w) in enumerate(RW)
-            vrec[it+1, 1, m] = sample(U[1], w)
-            vrec[it+1, 2, m] = sample(U[2], w)
+        axpy(Utmp, U, dt / 2, K[1]); rhs!(K[2], Utmp, t + dt / 2)
+        axpy(Utmp, U, dt / 2, K[2]); rhs!(K[3], Utmp, t + dt / 2)
+        axpy(Utmp, U, dt, K[3]); rhs!(K[4], Utmp, t + dt)
+        for b in 1:nb, c in 1:5
+            @. U[b][c] += dt / 6 * (K[1][b][c] + 2K[2][b][c] + 2K[3][b][c] + K[4][b][c])
         end
-        v1, v2, s11, s22, s12 = U
-        energy[it+1] = sum(S .* (ρ ./ 2 .* (v1 .^ 2 .+ v2 .^ 2) .+
-                                 (M .* (s11 .^ 2 .+ s22 .^ 2) .- 2 .* lam .* s11 .* s22) ./ (8 .* mu .* (lam .+ mu)) .+ s12 .^ 2 ./ (2 .* mu)))
+        for (m, (b, w)) in enumerate(RW)
+            vrec[it+1, 1, m] = sample(U[b][1], w)
+            vrec[it+1, 2, m] = sample(U[b][2], w)
+        end
+        energy[it+1] = sum(enumerate(blocks)) do (b, B)
+            v1, v2, s11, s22, s12 = U[b]
+            sum(S[b] .* (B.ρ ./ 2 .* (v1 .^ 2 .+ v2 .^ 2) .+ (B.M .* (s11 .^ 2 .+ s22 .^ 2) .- 2 .* B.lam .* s11 .* s22) ./
+                                                        (8 .* B.mu .* (B.lam .+ B.mu)) .+ s12 .^ 2 ./ (2 .* B.mu)))
+        end
         isfinite(energy[it+1]) || error("blew up at t = $(it * dt)")
     end
     wall = time() - t0
@@ -206,7 +269,8 @@ function run_case(case; dx=500.0, T=9.0, dt=0.04dx / 1e3, order=7, family=Mattss
         uz = [0.0; cumsum((vrec[1:end-1, 2, m] .+ vrec[2:end, 2, m]) ./ 2 .* dt)]
         traces[(line, i)] = (at(ux .* f.t[1] .+ uz .* f.t[2]), at(ux .* f.n[1] .+ uz .* f.n[2]))
     end
-    (; traces, energy, tt, wall, Nx, Nz, nt, minJ=minimum(J), maxJ=maximum(J))
+    (; traces, energy, tt, wall, Nx, Nz=sum(B -> B.Nz, blocks), nt, minJ=minimum(B -> minimum(B.J), blocks),
+       maxJ=maximum(B -> maximum(B.J), blocks))
 end
 
 # SeismicWavePC on the same case (staircase of cells; free_surface = :openswpc or :corners), on its 0.01 s axis

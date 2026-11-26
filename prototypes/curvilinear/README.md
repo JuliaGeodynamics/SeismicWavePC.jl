@@ -77,29 +77,52 @@ plane, sheared everywhere, the deep line is worse (3.6 %, shallow 1.3 %).
 ## 4. A low-velocity layer under the surface
 
 [`experiments.jl`](experiments.jl), part 2. A layer 2 km thick (vp = 3.5, vs = 2.0 km/s, ρ = 2200 kg/m³) parallel to the
-tilted surfaces; the exact reference is the flat layered case with the interface on cell faces. 250 m grid:
+tilted surfaces; the exact reference is the flat layered case with the interface on cell faces. 250 m grid, deep /
+shallow:
 
-| case | staircase deep / shallow | `:corners` | curvilinear |
+| case | staircase | `:corners` | curvilinear, 1 block | curvilinear, 2 blocks |
+|---|---|---|---|---|
+| flat | 0.3 / 1.5 % | 0.3 / 1.5 % | 0.9 / 3.2 % | 0.1 / 0.1 % |
+| 10° | 1.2 / 13 % | 1.2 / 8.8 % | 0.8 / 1.5 % | 0.8 / 0.7 % |
+| 20° | 1.9 / 10 % | 1.9 / 9.3 % | 2.1 / 3.2 % | 1.8 / 1.0 % |
+| 30° | 1.0 / 8.5 % | 0.9 / 8.4 % | 1.2 / 2.3 % | 0.7 / 0.5 % |
+| hill (D = 10 km) | 0.8 / 9.3 % | 0.8 / 9.1 % | 0.5 / 2.9 % | 0.2 / 1.3 % |
+
+- **Heterogeneity and stability:** heterogeneity is no problem for stability; the energy proof holds for any material.
+- **One block:** a sharp interface between grid nodes limits the accuracy (section 5).
+- **Two blocks:** the interface is a grid line (blocks stacked in η, each with its own η grid and operators, ≥ 13 points).
+  The blocks are coupled by SAT, enforcing continuity of velocity and traction. The coupling is energy-neutral: half of
+  the traction mismatch goes into the momentum, half of the velocity mismatch into the stress of each side.
+- **Flattening under the hill** starts below the layer (`flatten_from`), so the interface stays a grid line.
+- **The hill reference** (staggered, 62.5 m) is itself a staircase at the interface: the 2-block result is the same at
+  250 and 125 m (1.3 %), i.e. it is limited by the reference.
+- **The time step** follows from the finest block.
+
+## 5. Order of accuracy at a sharp interface
+
+[`interface_order.jl`](interface_order.jl): a flat free surface over a layer 1937.5 m thick. The interface lies on cell
+faces of the 62.5 m reference, but between them at 125–500 m. Deep / shallow line (the shallow one is inside the layer):
+
+| | 500 m | 250 m | 125 m |
 |---|---|---|---|
-| flat | 0.3 / 1.5 % | 0.3 / 1.5 % | 0.9 / 3.3 % |
-| 10° | 1.2 / 13 % | 1.2 / 8.8 % | 0.9 / 1.5 % |
-| 20° | 1.9 / 10 % | 1.9 / 9.3 % | 2.1 / 3.2 % |
-| 30° | 1.0 / 8.5 % | 0.9 / 8.4 % | 1.2 / 2.3 % |
-| hill (D = 10 km), 250 / 125 m | 0.8 / 9.3 % | 0.8 / 9.1 % | 0.5 / 2.9 %, 0.3 / 1.8 % |
+| staggered (SeismicWavePC) | 4.7 / 17 % | 2.7 / 8.8 % | 2.6 / 7.8 % |
+| curvilinear, 1 block | 2.0 / 7.6 % | 1.0 / 2.7 % | 0.58 / 1.5 % |
+| curvilinear, 2 blocks | 0.40 / 0.24 % | 0.08 / 0.08 % | 0.08 / 0.09 % (the reference) |
 
-Heterogeneity is no problem for stability: the energy proof holds for any material. On slopes the layer is 3–6× more
-accurate than with the staircase. However:
-- **A sharp interface between grid nodes dominates the error** (first order, whatever the order of the operators; order 5
-  is even slightly better than 7 here).
-- **On a flat surface, with the interface on cell faces, the staircase is better.**
-- **The remedy** is to make material interfaces grid lines: blocks coupled by SAT interface conditions (standard
-  multi-block SBP), natural for layers that follow the topography (firn, weathered layers).
+- **The staggered code samples the material at cell centres**, so an interface moves to the nearest cell face, which can
+  be up to half a cell away. Here it is misplaced by 62.5 m on all three grids, so the error does not converge. 62.5 m is
+  1/50 of the S wavelength in the layer, and it still costs 8 % in the layer.
+- **One curvilinear block** averages the material over each node's cell (4 × 4 samples: arithmetic ρ, harmonic μ and
+  λ + 2μ). That gives first order (0.8–0.9).
+- **Two blocks** reach the reference accuracy already at 250 m.
+
+The same sub-cell averaging (effective media, Moczo et al. 2002) would also help the staggered code: average when the
+model is given finer than the grid.
 
 ## Not done
 
 - absorbing boundaries;
 - attenuation;
-- multi-block material interfaces;
 - 3D;
 - leapfrog time stepping (instead of RK4: the cost per step here is not representative);
 - gradients.
@@ -108,5 +131,6 @@ accurate than with the staircase. However:
 
     julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/compare.jl        # section 1 (~1 min)
     julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/operators.jl      # section 2 (~2 min)
-    julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/experiments.jl    # sections 3, 4 (~4 min)
+    julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/experiments.jl    # sections 3, 4 (~6 min)
+    julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/interface_order.jl  # section 5 (~4 min)
     FAMILY=Mattsson2017 ORDER=5 julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/curvi.jl hill 500 40 10000

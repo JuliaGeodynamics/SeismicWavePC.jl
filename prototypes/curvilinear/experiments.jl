@@ -35,7 +35,8 @@ for case in ("tilt0", "tilt10", "tilt20", "tilt30")
     ref = reference(case; layer)
     println(case, " (reference: the exact flat layered case)")
     for (name, tr) in (("staircase", fd_run(case, :openswpc, 250.0; layer)), (":corners", fd_run(case, :corners, 250.0; layer)),
-                       ("curvilinear", run_case(case; dx=250.0, layer, OPS...).traces))
+                       ("curvilinear", run_case(case; dx=250.0, layer, OPS...).traces),
+                       ("curvilinear, 2 blocks", run_case(case; dx=250.0, layer, interfaces=[-layer.thickness / cosd(θ(case))], OPS...).traces))
         results[(case, name)] = (errors(tr, ref, :deep), errors(tr, ref, :shallow))
         row(name, tr, ref)
     end
@@ -46,17 +47,21 @@ let case = "hill", ref = reference("hill"; layer)
     row(":corners", fd_run(case, :corners, 250.0; layer), ref)
     row("curvilinear, D = 10 km", run_case(case; dx=250.0, layer, flatten=10e3, OPS...).traces, ref)
     row("curvilinear 125 m, D = 10 km", run_case(case; dx=125.0, layer, flatten=10e3, OPS...).traces, ref)
+    row("2 blocks, D = 10 km", run_case(case; dx=250.0, layer, flatten=10e3, flatten_from=layer.thickness,
+                                        interfaces=[-layer.thickness], OPS...).traces, ref)
+    row("2 blocks 125 m, D = 10 km", run_case(case; dx=125.0, layer, flatten=10e3, flatten_from=layer.thickness,
+                                              interfaces=[-layer.thickness], OPS...).traces, ref)
 end
 
 fig = Figure(size=(1300, 500), fontsize=16)
-cols = Dict("staircase" => :darkorange, ":corners" => :dodgerblue, "curvilinear" => :forestgreen)
+cols = Dict("staircase" => :darkorange, ":corners" => :dodgerblue, "curvilinear" => :forestgreen, "curvilinear, 2 blocks" => :purple)
 for (j, line) in enumerate(("deep", "shallow"))
     ax = Axis(fig[1, j], title="low-velocity layer under the surface, $line line, 250 m grid", xticks=(1:4, ["flat", "10°", "20°", "30°"]),
               ylabel="relative L2 error (%)")
-    for (k, name) in enumerate(("staircase", ":corners", "curvilinear"))
-        x = (1:4) .+ (k - 2) * 0.27
+    for (k, name) in enumerate(("staircase", ":corners", "curvilinear", "curvilinear, 2 blocks"))
+        x = (1:4) .+ (k - 2.5) * 0.2
         e = [results[(c, name)][j] for c in ("tilt0", "tilt10", "tilt20", "tilt30")]
-        barplot!(ax, x, 100 .* first.(e), width=0.25, color=cols[name], label=name)
+        barplot!(ax, x, 100 .* first.(e), width=0.19, color=cols[name], label=name)
         scatter!(ax, x, 100 .* last.(e), color=:black, markersize=7)
     end
     ylims!(ax, 0, nothing)
