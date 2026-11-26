@@ -56,6 +56,22 @@ Base.@propagate_inbounds function force3_grad_cv!(G, A, S, it, dt)
     end
 end
 
+"SH: the residual on vy, and the force gradient (fy)."
+Base.@propagate_inbounds function residual_sh_cv!(blocks, St, R, itw, s)
+    for n in 1:length(St.b)
+        B = blocks[St.b[n]]
+        for c in 1:6, a in 1:6
+            B.V1[St.i0[n]+a-1, St.k0[n]+c-1] += s * St.wx[a, n] * St.wz[c, n] * R[itw, 1, n]
+        end
+    end
+end
+Base.@propagate_inbounds function force_grad_sh_cv!(G, A, S, it, dt)
+    for m in 1:length(S.i)
+        b, i, k, n = S.b[m], S.i[m], S.k[m], S.n[m]
+        G[b].iρJ[i, k] += dt * S.c[m] * S.s[n, it] * S.F[n, 1] * A[b].V1[i, k]
+    end
+end
+
 # Source sensitivities (per entry m of the source tables: the time integrals of the adjoint field weighted by the source
 # time function, per component; per source and step: ∂J/∂(moment rate))
 @inline node_of(S, m) = haskey(S, :j) ? CartesianIndex(S.i[m], S.j[m], S.k[m]) : CartesianIndex(S.i[m], S.k[m])
@@ -92,6 +108,9 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     sn = N == 2 ? (:S11, :S22, :S12) : (:S11, :S22, :S33, :S23, :S13, :S12)       # normal stresses first
     rn = N == 2 ? (:R11, :R22, :R12) : (:R11, :R22, :R33, :R23, :R13, :R12)
     an = N == 2 ? (:a1, :a2) : (:a1, :a2, :a3)
+    sh = haskey(blocks[1], :S1)                                      # SH: vy, σxy, σyz (2D)
+    sh && ((vn, sn, rn, an) = ((:V1,), (:S1, :S2), (:R1, :R2), (:a1,)))
+    nV, nN = length(vn), sh ? 0 : N                                   # velocity components, normal stresses
     nS = length(sn)
     comps(B, names) = map(k -> getfield(B, k), names)
     zero_(b, n...) = KernelAbstractions.zeros(backend, FT, n..., size(blocks[b].J)...)
@@ -104,7 +123,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         (it - 1) % K == 0 && (ckpt[it] = [Array.(fields(B)) for B in blocks])
         step!(it, true)
     end
-    J, adj = d.misfit(all_traces()[:, 1:N, :], d.observed.v, d.observed.t)
+    J, adj = d.misfit(all_traces()[:, 1:nV, :], d.observed.v, d.observed.t)
     # the residuals go to the nodes of this process of every station whose stencil reaches them (a station near a
     # subdomain boundary feeds both sides; the forward run reads the neighbour's nodes from the halo instead)
     sa = c.st_all
@@ -114,7 +133,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         sel = [n for (n, s) in enumerate(sa) if inx(s)]
         St = (; b=dev([sa[n][1] for n in sel]), i0=dev([sa[n][2] - ox for n in sel]), k0=dev([sa[n][3] for n in sel]),
               wx=dev(FT[wx(sa[n], a) for a in 1:6, n in sel]), wz=dev(FT[sa[n][5][a] for a in 1:6, n in sel]))
-        residual!, force_grad! = residual_cv!, force_grad_cv!
+        residual!, force_grad! = sh ? (residual_sh_cv!, force_grad_sh_cv!) : (residual_cv!, force_grad_cv!)
     else
         sel = [n for (n, s) in enumerate(sa) if inx(s) && s[3] <= c.jb && s[3] + 5 >= c.ja]
         St = (; b=dev([sa[n][1] for n in sel]), i0=dev([sa[n][2] - ox for n in sel]), j0=dev([sa[n][3] - oy for n in sel]),
@@ -131,7 +150,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                           [Hξ[i+c.ow] * c.Hψ[j+c.owy] * h for i in axes(H.kmap, 1), j in axes(H.kmap, 2), h in sbp_weights(H.nz, H.hη)]
     Hw = [dev(FT.(loc(weights(H)))) for H in hostblocks]                                    # SBP norm per node
     HJ = [Hw[b] .* blocks[b].J for b in 1:nb]
-    Adj = Tuple(NamedTuple{(vn..., sn...)}(ntuple(_ -> zero_(b), N + nS)) for b in 1:nb)
+    Adj = Tuple(NamedTuple{(vn..., sn...)}(ntuple(_ -> zero_(b), nV + nS)) for b in 1:nb)
     Rb = Tuple(attenuation ? ntuple(_ -> zero_(b, NM), nS) : () for b in 1:nb)            # adjoint memory variables
     Qm = Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb)                                      # Σₘ c2ₘ R̄ₘ (0: elastic)
     Wk = Tuple(ntuple(_ -> zero_(b), 4) for b in 1:nb)                                       # work arrays
@@ -139,14 +158,14 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     # the moduli in the VTI form (isotropic media: wx = wz = √(λ+2μ), s13 = -2μ, mu66 = μ): one adjoint for both
     Mv = Tuple(map(A -> dev(FT.(loc(A))), (H.wx, H.wz, H.s13, H.mu55, H.mu66)) for H in hostblocks)
     Grad = Tuple((; wx=zero_(b), wz=zero_(b), s13=zero_(b), mu=zero_(b), m66=zero_(b), tp=zero_(b), ts=zero_(b), iρJ=zero_(b),
-                    a=ntuple(_ -> zero_(b), N)) for b in 1:nb)
-    Win = Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb)        # inputs of G (velocities)
+                    a=ntuple(_ -> zero_(b), nV)) for b in 1:nb)
+    Win = Tuple(ntuple(_ -> zero_(b), nV) for b in 1:nb)        # inputs of G (velocities)
     Gout = Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb)      # its strains (normal; shear halved)
     Yin = Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb)       # inputs of A (stresses)
-    Aout = Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb)       # A y
+    Aout = Tuple(ntuple(_ -> zero_(b), nV) for b in 1:nb)       # A y
     nomem = attenuation ? NamedTuple{rn}(ntuple(_ -> nothing, nS)) : (;)
     Gblk = Tuple(merge(Base.structdiff(blocks[b], NamedTuple{(:wx, :wz, :s13, :mu66)}), NamedTuple{vn}(Win[b]), NamedTuple{sn}(Gout[b]), nomem,
-                       (; lam=zero_(b), mu=fill_(b, 0.5), tp=nothing, ts=nothing, pml=nothing)) for b in 1:nb)
+                       (; lam=zero_(b), mu=fill_(b, 0.5), mu66=fill_(b, 0.5), tp=nothing, ts=nothing, pml=nothing)) for b in 1:nb)
     tractions(b) = N == 3 ? (; G1=zero_(b), G2=zero_(b), G3=zero_(b)) : (;)                 # (3D: the η tractions of A)
     Ablk = Tuple(merge(blocks[b], NamedTuple{sn}(Yin[b]), NamedTuple{vn}(Aout[b]), (; iρJ=fill_(b, 1), pml=nothing), tractions(b)) for b in 1:nb)
     # PML: the forward memory variables (copies: `scratch`) make the operators give the stretched strains and divergences of
@@ -203,9 +222,9 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     end
     slabsize(D, b) = (P = blocks[b].pml; size(D === :xi ? P.xv1 : D === :psi ? P.yv1 : P.zv1))
     PML = Tuple((; part=Val(D), pieces=Tuple(pieces(D, b) for b in 1:nb),
-                  mv=Tuple(ntuple(_ -> KernelAbstractions.zeros(backend, FT, slabsize(D, b)...), N) for b in 1:nb),
+                  mv=Tuple(ntuple(_ -> KernelAbstractions.zeros(backend, FT, slabsize(D, b)...), nV) for b in 1:nb),
                   ms=Tuple(ntuple(_ -> KernelAbstractions.zeros(backend, FT, slabsize(D, b)...), nS) for b in 1:nb)) for D in dirs)
-    Win0 = pml ? Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb) : nothing
+    Win0 = pml ? Tuple(ntuple(_ -> zero_(b), nV) for b in 1:nb) : nothing
     Yin0 = pml ? Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb) : nothing
     "W = (γ₁ - 1) W0 + γ₄ dt M̄, M̄ ← γ₂ W0 + γ₃ M̄ in the slabs of the direction (W = 0 elsewhere)"
     function pml_adjoint!(W, W0, M, pcs)
@@ -219,7 +238,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         end
     end
     MS, nF, nM = c.MS, length(forces), length(c.moments)
-    AF, gmF = KernelAbstractions.zeros(backend, FT, length(c.ftab.i), N), KernelAbstractions.zeros(backend, FT, nF, nt)
+    AF, gmF = KernelAbstractions.zeros(backend, FT, length(c.ftab.i), nV), KernelAbstractions.zeros(backend, FT, nF, nt)
     AM, gmM = KernelAbstractions.zeros(backend, FT, length(c.mtab.i), nS), KernelAbstractions.zeros(backend, FT, nM, nt)
     L = d.illumination ? Tuple(zero_(b) for b in 1:nb) : nothing                              # Σₙ |v^{n+1/2}|²
     c1, c2, d1, d2 = attenuation ? vc : (nothing, nothing, nothing, zero(FT))
@@ -233,7 +252,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         pe, pP, pQ, Z = Wk[b]
         X, Xp = Xw[b], Xpw[b]
         B = blocks[b]
-        τp, τs = attenuation ? (B.tp, B.ts) : (zero(FT), zero(FT))
+        τp, τs = attenuation ? (sh ? zero(FT) : B.tp, B.ts) : (zero(FT), zero(FT))
         if attenuation
             for k in 1:nS
                 fill!(Q[k], 0)
@@ -243,6 +262,18 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                     @. Q[k] += c2[j] * R
                 end
             end
+        end
+        if sh                          # SH: σxy (C66) and σyz (C44), both shear (e: γ/2)
+            for k in 1:2
+                @. X[k] = (1 + τs * (1 + d2)) * P[k] - τs * Q[k]
+                @. Xp[k] = (1 + d2) * P[k] - Q[k]
+            end
+            @. gr.m66 += dtT * X[1] * 2e[1]
+            @. gr.mu += dtT * X[2] * 2e[2]
+            attenuation && @. gr.ts += dtT * (m66 * Xp[1] * 2e[1] + mu * Xp[2] * 2e[2])
+            @. Y[1] = m66 * X[1] / HJ[b]
+            @. Y[2] = mu * X[2] / HJ[b]
+            return nothing
         end
         w = N == 2 ? (wx, wz) : (wx, wx, wz)
         @. pe = w[1] * e[1]; @. pP = w[1] * P[1]; @. pQ = w[1] * Q[1]
@@ -283,11 +314,11 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     # forces at damped (boundary) nodes: the damping gradient needs v^{n+1/2} without the force (v new - its increment)
     damped(m) = (H = hostblocks[c.ftab.b[m]]; I = N == 2 ? CartesianIndex(c.ftab.i[m] + ox - c.ow, c.ftab.k[m]) :
                                                          CartesianIndex(c.ftab.i[m] + ox - c.ow, c.ftab.j[m] + oy - c.owy, c.ftab.k[m]);
-                 any(k -> getfield(H, an[k])[I] != 0, 1:N))
+                 any(k -> getfield(H, an[k])[I] != 0, 1:nV))
     forcedamp = any(damped, eachindex(c.ftab.b))
-    Finc = forcedamp ? Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb) : nothing
+    Finc = forcedamp ? Tuple(ntuple(_ -> zero_(b), nV) for b in 1:nb) : nothing
     Fblk = forcedamp ? Tuple(merge(blocks[b], NamedTuple{vn}(Finc[b]), (; pml=nothing)) for b in 1:nb) : nothing
-    store = [Tuple(ntuple(_ -> zero_(b), (3 + forcedamp)N) for b in 1:nb) for _ in 1:K]   # per step: v old, v new, A σ, (v new without forces)
+    store = [Tuple(ntuple(_ -> zero_(b), (3 + forcedamp)nV) for b in 1:nb) for _ in 1:K]   # per step: v old, v new, A σ, (v new without forces)
     pstore = pml ? [Tuple(map(similar, pml_arrays(blocks[b])) for b in 1:nb) for _ in 1:K] : nothing   # PML memory at each step
     for s0 in sort!(collect(keys(ckpt)); rev=true)
         s1 = min(s0 + K - 1, nt)
@@ -303,18 +334,18 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                 end
             end
             Aop!(AblkF)
-            for b in 1:nb, k in 1:N
-                copyto!(q[b][k], comps(blocks[b], vn)[k]); copyto!(q[b][2N+k], Aout[b][k])
+            for b in 1:nb, k in 1:nV
+                copyto!(q[b][k], comps(blocks[b], vn)[k]); copyto!(q[b][2nV+k], Aout[b][k])
             end
             step!(it, false)
-            for b in 1:nb, k in 1:N
-                copyto!(q[b][N+k], comps(blocks[b], vn)[k])
+            for b in 1:nb, k in 1:nV
+                copyto!(q[b][nV+k], comps(blocks[b], vn)[k])
             end
             if forcedamp
                 foreach(F -> foreach(A -> fill!(A, 0), F), Finc)
-                run_once!(backend, N == 2 ? force_cv! : force3_cv!, (Fblk, FS, it, dtT))
-                for b in 1:nb, k in 1:N
-                    q[b][3N+k] .= q[b][N+k] .- Finc[b][k]
+                run_once!(backend, sh ? force_sh_cv! : N == 2 ? force_cv! : force3_cv!, (Fblk, FS, it, dtT))
+                for b in 1:nb, k in 1:nV
+                    q[b][3nV+k] .= q[b][nV+k] .- Finc[b][k]
                 end
             end
         end
@@ -326,9 +357,9 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             nM > 0 && run_once!(backend, moment_sens_cv!, (AM, gmM, Adj, MS, it, dtT, Val(sn)))
             c.sponge && foreach(b -> foreach(S -> S .*= blocks[b].gs, comps(Adj[b], sn)), 1:nb)      # (the sponge is diagonal)
             # stress update: gradient (λ, μ, τ) and v̄ += dt Gᵀ (C₁ σ̄ - Cτ Q)
-            for b in 1:nb, k in 1:N
-                copyto!(Win[b][k], q[b][N+k])
-                L === nothing || (L[b] .+= q[b][N+k] .^ 2)
+            for b in 1:nb, k in 1:nV
+                copyto!(Win[b][k], q[b][nV+k])
+                L === nothing || (L[b] .+= q[b][nV+k] .^ 2)
             end
             pml && for b in 1:nb
                 foreach(copyto!, Tuple(getfield(scratch[b], k) for k in memnames(scratch[b])), pstore[it-s0+1][b])
@@ -336,7 +367,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             Gop!(GblkP)
             foreach(stress_adjoint!, 1:nb)
             Aop!(Ablk)
-            for b in 1:nb, k in 1:N
+            for b in 1:nb, k in 1:nV
                 V = comps(Adj[b], vn)[k]
                 @. V -= dtT * Hw[b] * Aout[b][k]
             end
@@ -345,7 +376,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                 for Dp in PML
                     pml_adjoint!(Yin, Yin0, Dp.ms, Dp.pieces)
                     Aop!(Tuple(merge(Ablk[b], (; part=Dp.part)) for b in 1:nb))
-                    for b in 1:nb, k in 1:N
+                    for b in 1:nb, k in 1:nV
                         V = comps(Adj[b], vn)[k]
                         @. V -= dtT * Hw[b] * Aout[b][k]
                     end
@@ -363,8 +394,8 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                 g, B = Grad[b], blocks[b]
                 for (k, ab) in enumerate(comps(B, an))
                     V = comps(Adj[b], vn)[k]
-                    @. g.iρJ += dtT * V * q[b][2N+k] / (1 + ab * dtT / 2)
-                    vn1 = q[b][(forcedamp ? 3N : N)+k]          # v^{n+1/2} of the momentum update: without forces,
+                    @. g.iρJ += dtT * V * q[b][2nV+k] / (1 + ab * dtT / 2)
+                    vn1 = q[b][(forcedamp ? 3nV : nV)+k]          # v^{n+1/2} of the momentum update: without forces,
                     if c.sponge                                # before the sponge factor
                         @. g.a[k] -= dtT / 2 * V * (q[b][k] + vn1 / B.gs) / (1 + ab * dtT / 2)
                     else
@@ -377,7 +408,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             for b in 1:nb
                 S = comps(Adj[b], sn)
                 for k in 1:nS
-                    @. S[k] -= HJ[b] * (1 + (k > N)) * Gout[b][k]
+                    @. S[k] -= HJ[b] * (1 + (k > nN)) * Gout[b][k]
                 end
             end
             if pml                     # the stretched parts of A (momentum update): Aᵀ of the slabs
@@ -387,7 +418,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                     Gop!(Tuple(merge(Gblk[b], (; part=Dp.part)) for b in 1:nb))
                     for b in 1:nb, k in 1:nS
                         S = comps(Adj[b], sn)[k]
-                        @. S -= HJ[b] * (1 + (k > N)) * Gout[b][k]
+                        @. S -= HJ[b] * (1 + (k > nN)) * Gout[b][k]
                     end
                 end
             end
@@ -419,7 +450,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             gm = (g.wx[Il], g.wz[Il], g.s13[Il], g.mu[Il], g.m66[Il])
             # directions (ρ, vp, vs, ε, δ, γ, τp, τs) through the moduli; the damping (vp, vs, ε, γ); 1/(ρJ)
             dir(j) = (t = vti_tangent(hf, I, ntuple(q -> Float64(q == j), 8), ts, fq_ref); sum(gm[q] * t[q] for q in 1:5))
-            da(q) = sum(k -> g.a[k][Il] * H.da[k][q][I], 1:N)
+            da(q) = sum(k -> g.a[k][Il] * H.da[k][q][I], 1:nV)
             gρ[node] += dir(1) - g.iρJ[Il] / (H.ρ[I]^2 * H.J[I])
             gvp[node] += dir(2) + da(1)
             gvs[node] += dir(3) + da(2)
@@ -442,7 +473,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     ill = L === nothing ? (;) : (; illumination=gL)
     vti = aniso ? (; epsilon=gε, delta=gδ, gamma=gγ) : (;)
     grad = CartData(model.x.val, model.y.val, model.z.val, merge((; rho=gρ .* rho_unit, vp=gvp .* 1e3, vs=gvs .* 1e3), vti, (; Qp=gqp, Qs=gqs), ill))
-    return J, grad, curvilinear_source_gradients(c, N, AF, gmF, AM, gmM)
+    return J, grad, curvilinear_source_gradients(c, sh ? 1 : N, AF, gmF, AM, gmM)
 end
 
 """
@@ -451,14 +482,18 @@ The source gradients of [`misfit_gradient`](@ref) from the sensitivities per tab
 shifted by 1 mm).
 """
 function curvilinear_source_gradients(c, N, AF, gmF, AM, gmM)
+    sh = N == 1                                         # (SH: N = 1; the dimension is then 2)
+    N = max(N, 2)
+    fcs = sh ? (2,) : N == 2 ? (1, 3) : (1, 2, 3)       # the force and moment tensor components that are injected
+    mcs = sh ? (6, 4) : N == 2 ? (1, 3, 5) : 1:6
     (; par, dt, nt, tbeg, stf, forces, moments, srcs, ftab, mtab) = c
     sum_(A) = (B = Float64.(Array(A)); par === nothing || MPI.Allreduce!(B, +, par.comm); B)
     AF, AM = Float64.(Array(AF)), Float64.(Array(AM))          # (per local entry)
     gmF, gmM = sum_(gmF), sum_(gmM)
     key(t, m) = N == 2 ? (t.b[m], t.i[m], t.k[m], t.n[m]) : (t.b[m], t.i[m], t.j[m], t.k[m], t.n[m])
     # ∂J/∂(weight of entry m) per source; the weights' derivatives with respect to x, (y,) z
-    wf = [sum(forces[ftab.n[m]].F[fc] * AF[m, q] for (q, fc) in enumerate(N == 2 ? (1, 3) : (1, 2, 3))) for m in eachindex(ftab.n)]
-    wm = [-sum(moments[mtab.n[m]].M0 * moments[mtab.n[m]].M[mc] * AM[m, q] for (q, mc) in enumerate(N == 2 ? (1, 3, 5) : 1:6))
+    wf = [sum(forces[ftab.n[m]].F[fc] * AF[m, q] for (q, fc) in enumerate(fcs)) for m in eachindex(ftab.n)]
+    wm = [-sum(moments[mtab.n[m]].M0 * moments[mtab.n[m]].M[mc] * AM[m, q] for (q, mc) in enumerate(mcs))
           for m in eachindex(mtab.n)]
     h = 1e-6
     dloc = map(1:N) do a
@@ -485,15 +520,15 @@ function curvilinear_source_gradients(c, N, AF, gmF, AM, gmM)
     entries(t, l) = findall(==(l), t.n)
     fs = map(enumerate(forces)) do (l, src)
         e = entries(ftab, l)
-        dF = sum_([sum(ftab.c[m] * AF[m, q] for m in e; init=0.0) for q in 1:N])
+        dF = sum_([sum(ftab.c[m] * AF[m, q] for m in e; init=0.0) for q in eachindex(fcs)])
         x, y, z = xyz(l, 1)
         t0, trise = timing(gmF[l, :], tf, src)
-        (; F=N == 2 ? (dF[1], 0.0, dF[2]) : Tuple(dF), x, y, z, t0, trise, stf=gmF[l, :], t=tf)
+        (; F=ntuple(j -> (q = findfirst(==(j), fcs); q === nothing ? 0.0 : dF[q]), 3), x, y, z, t0, trise, stf=gmF[l, :], t=tf)
     end
     mts = map(enumerate(moments)) do (l, src)
         e = entries(mtab, l)
-        dM = sum_([-sum(mtab.c[m] * AM[m, q] for m in e; init=0.0) for q in 1:(N == 2 ? 3 : 6)])
-        dP = N == 2 ? (dM[1], 0.0, dM[2], 0.0, dM[3], 0.0) : Tuple(dM)      # ∂J/∂(M0 M)
+        dM = sum_([-sum(mtab.c[m] * AM[m, q] for m in e; init=0.0) for q in eachindex(mcs)])
+        dP = ntuple(j -> (q = findfirst(==(j), mcs); q === nothing ? 0.0 : dM[q]), 6)      # ∂J/∂(M0 M)
         x, y, z = xyz(l, 2)
         t0, trise = timing(gmM[l, :], tm, src)
         (; M=dP, M0=sum(src.M[j] * dP[j] for j in 1:6), x, y, z, t0, trise, stf=gmM[l, :], t=tm)
@@ -527,7 +562,7 @@ function born_curvilinear(d::BornDriver, c)
         δtp = @. ifelse(isfinite(qp), -H.taup / qp * δqp, 0.0)        # tau = NM zeta / Q
         δts = @. ifelse(isfinite(qs), -H.taus / qs * δqs, 0.0)
         δ = Dict{Symbol,Array{Float64}}(:iρJ => -δρ ./ (ρ .^ 2 .* H.J))
-        if haskey(B, :wx)                  # VTI: the tangents of the stored moduli
+        if haskey(B, :wx) || haskey(B, :S1)        # VTI (and SH: mu, mu66): the tangents of the stored moduli
             hf = (; rho=H.ρ, vp=H.vp, vs=H.vs, ε=H.ε, δ=H.δ, γ=H.γ, taup=H.taup, taus=H.taus)
             dx = (δρ, δvp, δvs, δε, δδ, δγ, δtp, δts)
             T = map(I -> vti_tangent(hf, I, map(A -> A[I], dx), ts, fq_ref), CartesianIndices(H.kmap))
@@ -541,7 +576,8 @@ function born_curvilinear(d::BornDriver, c)
             δ[:lam] = @. δρ * vp^2 / χp^2 + 2ρ * vp * δvp / χp^2 - 2ρ * vp^2 / χp^3 * dχp * δtp - 2δ[:mu]
         end
         if attenuation
-            δ[:tp], δ[:ts] = δtp, δts
+            haskey(B, :tp) && (δ[:tp] = δtp)            # (SH: no P waves)
+            δ[:ts] = δts
         end
         # impedance damping: da[c] = (∂vp, ∂vs, ∂ε, ∂γ) of a_c
         for (m, d) in enumerate(H.da)

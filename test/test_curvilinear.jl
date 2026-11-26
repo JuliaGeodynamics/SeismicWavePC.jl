@@ -458,4 +458,64 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         @test norm([D[i, j] for (i, j) in I] - dfd) < 0.03norm(dfd)                       # (2 %: the error of the differences)
         @test norm([R[i, j] for (i, j) in I] - rfd) < 0.03norm(rfd)
     end
+    @testset "SH waves: against the staggered solver, gradient and Born against finite differences" begin
+        # flat half-space with attenuation and VTI (γ): seismograms at the surface and stresses at depth
+        src = DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=3.0, strike=90, dip=60, rake=0, trise=1.0)
+        stations = [[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in (2, 5, 8)]; Station("d", 4.0, 0.0, -3.0)]
+        mat, th = (; vp=4.0, vs=2.3, rho=2500.0, Q=50.0), (; epsilon=0.1, delta=0.05, gamma=0.15)
+        mesh = curvilinear_mesh(range(-20, 20, length=401), [x -> 0.0]; dz=0.1, bottom=-30)
+        o = ones(size(mesh.x.val))
+        cm = addfield(mesh, merge((; rho=mat.rho .* o, vp=mat.vp .* o, vs=mat.vs .* o, Qp=2mat.Q .* o, Qs=mat.Q .* o), map(v -> v .* o, th)))
+        dx = 0.05
+        cst = [s.surface ? Station(s.name, s.x, 0.0, -dx / 2) : s for s in stations]
+        dir = mktempdir()
+        rc = simulate(cm; grid=:curvilinear, wave=:sh, tmax=8.0, sources=src, stations=cst, T=Float64, verbose=false, snapshot_every=400,
+                      snapshot_dir=dir, snapshots=Snapshots(xz=true, quantities=(:v, :u)))
+        X, Y, Z = xyz_grid(-20+dx/2:dx:20, 0, -30+dx/2:dx:2dx)
+        air = Z .> 0
+        sm = CartData(X, Y, Z, merge((; rho=ifelse.(air, 1.0, mat.rho), vp=ifelse.(air, 0.0, mat.vp), vs=ifelse.(air, 0.0, mat.vs),
+                                        Qp=ifelse.(air, 10.0, 2mat.Q), Qs=ifelse.(air, 10.0, mat.Q)), map(v -> ifelse.(air, 0.0, v), th)))
+        rs = simulate(sm; wave=:sh, dt=0.004, nt=2000, sources=src, stations, interpolation=:sinc, T=Float64, verbose=false)
+        @test rc.components == rs.components == (:y,) && rc.tensor_components == rs.tensor_components
+        at(r, u) = [(j = clamp(searchsortedlast(r.t, τ), 1, length(r.t) - 1); u[j] + (u[j+1] - u[j]) * (τ - r.t[j]) / (r.t[j+1] - r.t[j])) for τ in 0.05:0.01:7.9]
+        for n in 1:4
+            @test norm(at(rc, rc.v[:, 1, n]) - at(rs, rs.v[:, 1, n])) < 0.02norm(at(rs, rs.v[:, 1, n]))         # (0.6 %)
+        end
+        for c in 1:2
+            @test norm(at(rc, rc.stress[:, c, 4]) - at(rs, rs.stress[:, c, 4])) < 0.02norm(at(rs, rs.stress[:, c, 4]))
+        end
+        @test "Vy" in read_snapshots(joinpath(dir, "swpc.sh.xz.v.nc")).variables
+        # gradient (topography, interface, attenuation, VTI, PML) and Born
+        topos(x) = 1.2 * exp(-x^2 / 12)
+        mohos(x) = -4.0 + 0.6 * sin(2π * x / 10)
+        mesh = curvilinear_mesh(range(-8, 8, length=61), [topos, mohos]; dz=0.25, bottom=-10)
+        X, Z = mesh.x.val, mesh.z.val
+        low = Z .< mohos.(X)
+        base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=ifelse.(low, 300.0, 60.0),
+                Qs=ifelse.(low, 150.0, 30.0), epsilon=ifelse.(low, 0.05, 0.15), delta=ifelse.(low, 0.02, 0.06), gamma=ifelse.(low, 0.03, 0.1))
+        srcs = [DoubleCoupleSource(-2.03, 0.0, -4.71; Mw=4.0, strike=90, dip=60, rake=20, trise=1.0), ForceSource(2.07, 0.0, -2.33; fy=1e14, trise=0.8)]
+        sts = [[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -6:3:6]; Station("d", 0.3, 0.0, -6.0)]
+        r0 = simulate(addfield(mesh, base); wave=:sh, tmax=0.1, sources=srcs, T=Float64, verbose=false)
+        kw = (; wave=:sh, dt=r0.t[2] - r0.t[1], tmax=3.0, sources=srcs, T=Float64, absorber=:pml, na=10)
+        obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* 0.97, Qs=base.Qs .* 1.3))); kw..., stations=sts, verbose=false)
+        J, g, sg = misfit_gradient(addfield(mesh, base), obs; kw..., checkpoint_steps=13)
+        Jof(m) = L2Misfit()(simulate(m; kw..., stations=sts, verbose=false).v, obs.v, obs.t)[1]
+        bump(c, s) = @. exp(-((X - c[1])^2 + (Z - c[2])^2) / s)
+        for (f, δ) in ((:vs, 0.08 .* bump((2, 0.2), 3)), (:rho, 50 .* bump((0.5, -2), 4)), (:gamma, 0.05 .* bump((1, -1), 4)),
+                       (:Qs, 5 .* bump((-1, -2), 4)), (:vs, 0.05 .* bump((-7.3, -5), 1)))
+            fd = (Jof(addfield(mesh, merge(base, (; f => base[f] .+ 1e-3 .* δ)))) - Jof(addfield(mesh, merge(base, (; f => base[f] .- 1e-3 .* δ))))) / 2e-3
+            @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-5
+        end
+        @test all(iszero, g.fields.vp)                                                   # (SH: no P waves)
+        Js(ss) = L2Misfit()(simulate(addfield(mesh, base); kw..., sources=ss, stations=sts, verbose=false).v, obs.v, obs.t)[1]
+        fdx(f) = (e = 1e-4; (Js(f(e)) - Js(f(-e))) / 2e)
+        ms, fs = srcs
+        @test sg[1].M[4] ≈ fdx(e -> [MomentTensorSource(ms.x, 0.0, ms.z, ms.M0, ms.M .+ (0, 0, 0, e, 0, 0); trise=ms.trise), fs]) / ms.M0 rtol = 1e-6
+        @test sg[2].F[2] ≈ fdx(e -> [ms, ForceSource(fs.x, 0.0, fs.z; fy=fs.F[2] + 1e13e, trise=fs.trise)]) / 1e13 rtol = 1e-6
+        δv = 0.08 .* bump((2, 0.2), 3)
+        _, δd = born(addfield(mesh, base), addfield(mesh, (; vs=δv)); kw..., stations=sts)
+        P = simulate(addfield(mesh, merge(base, (; vs=base.vs .+ 1e-3 .* δv))); kw..., stations=sts, verbose=false)
+        M = simulate(addfield(mesh, merge(base, (; vs=base.vs .- 1e-3 .* δv))); kw..., stations=sts, verbose=false)
+        @test maximum(abs, δd.v .- (P.v .- M.v) ./ 2e-3) < 1e-6 * maximum(abs, δd.v)
+    end
 end

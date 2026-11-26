@@ -15,10 +15,10 @@ Base.@propagate_inbounds function plane_cv!(B, U, PK, blocks, D, P, dt, store, :
     v = ntuple(_ -> zero(T), Val(N))
     if b > 0
         Bk = blocks[b]
-        Vs = N == 2 ? (Bk.V1, Bk.V2) : (Bk.V1, Bk.V2, Bk.V3)
+        Vs = N == 1 ? (Bk.V1,) : N == 2 ? (Bk.V1, Bk.V2) : (Bk.V1, Bk.V2, Bk.V3)
         for q in 1:6
             w = P.w[q, n]
-            I = N == 2 ? CartesianIndex(P.i[n], P.k0[n] + q - 1) : CartesianIndex(P.i[n], P.j[n], P.k0[n] + q - 1)
+            I = N <= 2 ? CartesianIndex(P.i[n], P.k0[n] + q - 1) : CartesianIndex(P.i[n], P.j[n], P.k0[n] + q - 1)
             v = v .+ map(A -> w * A[I], Vs)
         end
     end
@@ -97,13 +97,15 @@ The planes of `s` on a curvilinear grid (`N` = 2, 3): points, device buffers and
 grid. `c`: the setup of the simulation (hostblocks, the node coordinates `gx`, `gy` [m], the nodes `ia:ib`, `ja:jb` of this
 process and their offsets).
 """
-function setup_planes_cv(s::Snapshots, N, c)
+function setup_planes_cv(s::Snapshots, Nc, c)
+    # (Nc: the velocity components, 1 SH, 2 P-SV, 3 3D; N: the dimension)
+    N = max(Nc, 2)
     (; hostblocks, nx, ny, gx, gy, Zm, ia, ib, ja, jb, ox, oy, dev, backend, FT, dir, me, parallel, par, ow, owy) = c
     # (host arrays: the columns of the window of this process, index - (ow, owy); the points of other processes: theirs)
     N == 2 && (s.xy !== nothing || s.yz !== nothing || s.fs || s.ob) && error("2D snapshots: only xz")
     s.ob && error("curvilinear grids: no ocean bottom (solids only)")
-    solver = N == 3 ? "3d" : "psv"
-    nc = N
+    solver = Nc == 3 ? "3d" : Nc == 1 ? "sh" : "psv"
+    nc = Nc
     # decimated nodes per axis, regular heights (from the top of the mesh down, with the mean row spacing)
     dec = s.decimate
     xi, yi = collect(1:dec[1]:nx), collect(1:dec[2]:ny)
@@ -154,7 +156,7 @@ function setup_planes_cv(s::Snapshots, N, c)
         s.xz === nothing || push!(planes, (:xz, (i, l) -> column(i, 1, zl[l]), (xi, eachindex(zl)), ("x" => km(gx, xi), "z" => -zl ./ 1e3), (i, l) -> (i, 1)))
     end
     isempty(planes) && error("Snapshots without planes")
-    fields = snapshot_fields(N == 3 ? :p3d : :psv)
+    fields = snapshot_fields(Nc == 3 ? :p3d : Nc == 1 ? :sh : :psv)
     map(planes) do (name, point, (A1, A2), axes, col)
         # the points (in pieces: those of the columns of this process; a piece is a block of the plane)
         mine(a1, a2) = (cc = col(a1, a2); inx(cc[1]) && iny(cc[2]))

@@ -69,7 +69,8 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
 - **Snapshots:** ParaView files and callbacks of the whole wavefield, and netCDF planes ([`Snapshots`](@ref): the free
   surface `fs` on the topography, `xy` planes and sections resampled at regular heights; `:v`, `:u`, `:ps`, also in pieces).
 - **Checkpoints** (`checkpoint`, `checkpoint_every`, `restart`) as on the staggered grid.
-- **Not yet:** SH waves, plane waves.
+- **SH waves** in 2D (`wave = :sh`), with everything above (attenuation, VTI with γ, PML, gradients, Born, MPI, GPUs).
+- **Not yet:** plane and teleseismic waves.
 
 ![A hill, a Moho-like interface and a magma chamber on a curvilinear grid](assets/2D_curvilinear.png)
 

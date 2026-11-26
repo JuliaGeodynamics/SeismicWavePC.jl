@@ -362,6 +362,128 @@ end
     end
     stress_update_cv!(B, vc, dt, i, k, a, b, c, e)
 end
+# ------------------------------------------------------------------ SH (2D): vy (V1), σxy (S1), σyz (S2)
+# Momentum: ρ J ∂t vy = Dξ(J σxy) + Dη(Jx σxy + σyz), the SAT terms as in P-SV; stress: σxy with C66 (`mu66`), σyz with
+# C44 (`mu`), memory variables R1, R2. The parts and the PML as in P-SV (memory: xv1, xa (Dξ vy), zv1, zb (Dη vy)).
+neighbour_sh(B) = (; V1=B.V1, S1=B.S1, S2=B.S2, Jx=B.Jx)
+neighbour_sh(::Nothing) = nothing
+@inline Base.@propagate_inbounds function momentum_sh!(B, Bd, Bu, dt, damp, ::Val{F}, i, k) where {F}
+    xint, px, pz = flags(F)
+    (; V1, S1, S2, J, Jx, iρJ, a1, hξ, hη, ox, nxg) = B
+    nz = size(V1, 2)
+    T = eltype(V1)
+    w = T(SBP_W[1])
+    g = j -> @inbounds(J[j, k] * S1[j, k])
+    x1 = (xint ? dminus_int(g, i, T) : dminus(q -> g(q - ox), i + ox, nxg)) / hξ
+    if xint
+    elseif i + ox == 1
+        x1 += J[i, k] * S1[i, k] / (w * hξ)
+    elseif i + ox == nxg
+        x1 -= J[i, k] * S1[i, k] / (w * hξ)
+    end
+    z1 = dminus(j -> @inbounds(Jx[i, j] * S1[i, j] + S2[i, j]), k, nz) / hη
+    if k == nz
+        t1 = Jx[i, k] * S1[i, k] + S2[i, k]
+        z1 -= Bu === nothing ? t1 / (w * hη) : (t1 - (Bu.Jx[i, 1] * Bu.S1[i, 1] + Bu.S2[i, 1])) / (2w * hη)
+    end
+    if k == 1
+        t1 = Jx[i, k] * S1[i, k] + S2[i, k]
+        if Bd === nothing
+            z1 += t1 / (w * hη)
+        else
+            n = size(Bd.V1, 2)
+            z1 -= ((Bd.Jx[i, n] * Bd.S1[i, n] + Bd.S2[i, n]) - t1) / (2w * hη)
+        end
+    end
+    p = part(B)
+    usexi(p) || (x1 = zero(T))
+    useeta(p) || (z1 = zero(T))
+    P = pmlof(B)
+    px && P !== nothing && (x1 = pml_stretch(P.xv1, CartesianIndex(xslab(P, i + ox), k), P.gx[i+ox], x1, dt))
+    pz && P !== nothing && (z1 = pml_stretch(P.zv1, CartesianIndex(i, k), P.gz[k], z1, dt))
+    b1 = damp ? a1[i, k] * dt / 2 : zero(T)
+    V1[i, k] = ((1 - b1) * V1[i, k] + dt * iρJ[i, k] * (x1 + z1)) / (1 + b1)
+end
+@inline Base.@propagate_inbounds function momentum_sh!(B, Bd, Bu, dt, damp, ::Val{:int}, i, k)
+    (; V1, S1, S2, J, Jx, iρJ, hξ, hη) = B
+    T = eltype(V1)
+    p = part(B)
+    d = (usexi(p) ? dminus_int(j -> @inbounds(J[j, k] * S1[j, k]), i, T) / hξ : zero(T)) +
+        (useeta(p) ? dminus_int(j -> @inbounds(Jx[i, j] * S1[i, j] + S2[i, j]), k, T) / hη : zero(T))
+    V1[i, k] += dt * iρJ[i, k] * d
+end
+@inline Base.@propagate_inbounds function stress_sh!(B, Bd, Bu, vc, dt, ::Val{F}, i, k) where {F}
+    xint, px, pz = flags(F)
+    (; V1, hξ, hη, ox, nxg) = B
+    nz = size(V1, 2)
+    T = eltype(V1)
+    w = T(SBP_W[1])
+    g = j -> @inbounds(V1[j, k])
+    c = (xint ? dplus_int(g, i, T) : dplus(q -> g(q - ox), i + ox, nxg)) / hξ
+    e = dplus(j -> @inbounds(V1[i, j]), k, nz) / hη
+    k == nz && Bu !== nothing && (e -= (V1[i, k] - Bu.V1[i, 1]) / (2w * hη))
+    k == 1 && Bd !== nothing && (e -= (Bd.V1[i, size(Bd.V1, 2)] - V1[i, k]) / (2w * hη))
+    p = part(B)
+    usexi(p) || (c = zero(T))
+    useeta(p) || (e = zero(T))
+    P = pmlof(B)
+    px && P !== nothing && (c = pml_stretch(P.xa, CartesianIndex(xslab(P, i + ox), k), P.gx[i+ox], c, dt))
+    pz && P !== nothing && (e = pml_stretch(P.zb, CartesianIndex(i, k), P.gz[k], e, dt))
+    stress_update_sh!(B, vc, dt, i, k, c, e)
+end
+@inline Base.@propagate_inbounds function stress_sh!(B, Bd, Bu, vc, dt, ::Val{:int}, i, k)
+    (; V1, hξ, hη) = B
+    T = eltype(V1)
+    p = part(B)
+    c = usexi(p) ? dplus_int(j -> @inbounds(V1[j, k]), i, T) / hξ : zero(T)
+    e = useeta(p) ? dplus_int(j -> @inbounds(V1[i, j]), k, T) / hη : zero(T)
+    stress_update_sh!(B, vc, dt, i, k, c, e)
+end
+"The SH stress update from Dξ vy, Dη vy: ∂x vy = Dξ + (Jx/J) Dη, ∂z vy = Dη / J."
+@inline Base.@propagate_inbounds function stress_update_sh!(B, vc, dt, i, k, c, e)
+    (; S1, S2, J, Jx, mu, mu66) = B
+    I = CartesianIndex(i, k)
+    exy, eyz = c + Jx[I] / J[I] * e, e / J[I]
+    ts = orzero(B.ts, I)
+    ts1 = unrelaxed(ts, vc)
+    R1 = cmemvar!(memory(B, Val(:R1)), I, mu66[I] * ts * exy, vc, dt)
+    R2 = cmemvar!(memory(B, Val(:R2)), I, mu[I] * ts * eyz, vc, dt)
+    S1[I] += (mu66[I] * ts1 * exy + R1) * dt
+    S2[I] += (mu[I] * ts1 * eyz + R2) * dt
+end
+"Sources of SH: forces fy on vy, moment tensors (Mxy, Myz) on (σxy, σyz)."
+Base.@propagate_inbounds function force_sh_cv!(blocks, S, it, dt)
+    for m in 1:length(S.i)
+        B = blocks[S.b[m]]
+        i, k, n = S.i[m], S.k[m], S.n[m]
+        B.V1[i, k] += S.F[n, 1] * dt * S.c[m] * S.s[n, it] * B.iρJ[i, k]
+    end
+end
+Base.@propagate_inbounds function moment_sh_cv!(blocks, S, it)
+    for m in 1:length(S.i)
+        B = blocks[S.b[m]]
+        i, k, n = S.i[m], S.k[m], S.n[m]
+        s = S.c[m] * S.s[n, it]
+        B.S1[i, k] -= S.M[n, 1] * s
+        B.S2[i, k] -= S.M[n, 2] * s
+    end
+end
+"SH stations: vy (centred in time), uy, σyz, σxy and the strains εyz = σyz/(2C44), εxy = σxy/(2C66) (as the staggered order)."
+Base.@propagate_inbounds vprev_sh_cv!(prev, blocks, St, n) = (prev[1, n] = sample_cv(blocks[St.b[n]].V1, St, n))
+Base.@propagate_inbounds function record_sh_cv!(rec, acc, prev, blocks, St, itw, dt, n)
+    B = blocks[St.b[n]]
+    v = sample_cv(B.V1, St, n)
+    if itw > 0
+        sxy, syz = sample_cv(B.S1, St, n), sample_cv(B.S2, St, n)
+        m, m6 = sample_cv(B.mu, St, n), sample_cv(B.mu66, St, n)
+        q = ((prev[1, n] + v) / 2, acc[1, n], syz, sxy, syz / (2m), sxy / (2m6))
+        for j in 1:6
+            rec[itw, j, n] = q[j]
+        end
+    end
+    acc[1, n] += v * dt
+end
+
 "The stress update from Dξ v1, Dη v1, Dξ v2, Dη v2 (as the staggered solver: generalized Zener body if `vc !== nothing`)."
 @inline Base.@propagate_inbounds function stress_update_cv!(B, vc, dt, i, k, a, b, c, e)
     I = CartesianIndex(i, k)
@@ -533,7 +655,7 @@ cv_max(par, x) = par === nothing ? x : MPI.Allreduce(x, max, par.comm)
 """
     simulate_curvilinear(model; tmax or nt, sources, ...)
 
-2D P-SV on a deformed (terrain-following) `CartData` (see [`curvilinear_mesh`](@ref)); called by `simulate` for such a
+2D P-SV or SH (`wave`) on a deformed (terrain-following) `CartData` (see [`curvilinear_mesh`](@ref)); called by `simulate` for such a
 model. Keywords as in `simulate`, and: `dt = nothing` (from the spectral radius of the operator: 90 % of the leapfrog
 limit), `tmax` (duration) instead of `nt`, `absorber = :impedance` (or `:pml`: also a PML of `na = 20` nodes at the sides
 and the bottom, `:cerjan`: a sponge of `na` nodes, or `:none`: free sides and bottom), `jump = 0.05`
@@ -547,7 +669,8 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
                               T::Type{FT}=Float32, verbose=true, wavefield=model isa CartData, jump=0.05, wave=:psv, interpolation=:sinc,
                               free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
-    wave === :psv || error("curvilinear grids: P-SV only (wave = :psv)")
+    wave in (:psv, :sh) || error("curvilinear grids: wave = :psv or :sh")
+    sh = wave === :sh                                         # SH: vy (V1), σxy (S1), σyz (S2)
     absorber in (:impedance, :pml, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :pml, :cerjan (with a sponge) or :none")
     srcs = sources isa AbstractVector ? sources : [sources]
     all(s -> s isa Union{MomentTensorSource,ForceSource}, srcs) || error("curvilinear grids: MomentTensorSource and ForceSource only")
@@ -630,8 +753,20 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
         # impedance damping at the sides and (bottom block) the bottom: a = |J·| Z / (H ρ J) with the speeds of normal
         # incidence (VTI: horizontal qP vp √(1+2ε)), and its derivatives (vp, vs, ε, γ) per component (gradients)
         a1, a2 = zeros(nw, nz), zeros(nw, nz)
-        da = ntuple(_ -> ntuple(_ -> zeros(nw, nz), 4), 2)
-        if absorber !== :none
+        da = ntuple(_ -> ntuple(_ -> zeros(nw, nz), 4), sh ? 1 : 2)
+        if absorber !== :none && sh                    # SH: σxy at the sides (C66: vs √(1+2γ)), σyz at the bottom (vs)
+            for ig in (1, nx)
+                wa <= ig <= wb || continue
+                i, h = ig - ow, 1 / Hξ[ig]
+                @. a1[i, :] += bvs[i, :] * sqrt(1 + 2bγ[i, :]) * h
+                @. da[1][2][i, :] += sqrt(1 + 2bγ[i, :]) * h; @. da[1][4][i, :] += bvs[i, :] / sqrt(1 + 2bγ[i, :]) * h
+            end
+            if b == 1
+                q = @. sqrt(Jx[:, 1]^2 + 1) / (SBP_W[1] * hη * J[:, 1])
+                @. a1[:, 1] += q * bvs[:, 1]
+                da[1][2][:, 1] .+= q
+            end
+        elseif absorber !== :none
             for ig in (1, nx)
                 wa <= ig <= wb || continue
                 i, h = ig - ow, 1 / Hξ[ig]
@@ -660,14 +795,20 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
         z() = KernelAbstractions.zeros(backend, FT, nl, H.nz)
         zs(n...) = KernelAbstractions.zeros(backend, FT, n...)
         nzp = bi == 1 ? na : 0
-        player = pml ? (; pml=(; gx=dev(fill(ident, nx)), gz=dev(fill(ident, H.nz)), np=na, nxg=nx, xv1=zs(2na, H.nz), xv2=zs(2na, H.nz),
-                                 xa=zs(2na, H.nz), xc=zs(2na, H.nz), zv1=zs(nl, nzp), zv2=zs(nl, nzp), zb=zs(nl, nzp), ze=zs(nl, nzp))) : (;)
+        player = !pml ? (;) : sh ? (; pml=(; gx=dev(fill(ident, nx)), gz=dev(fill(ident, H.nz)), np=na, nxg=nx, xv1=zs(2na, H.nz),
+                                             xa=zs(2na, H.nz), zv1=zs(nl, nzp), zb=zs(nl, nzp))) :
+                  (; pml=(; gx=dev(fill(ident, nx)), gz=dev(fill(ident, H.nz)), np=na, nxg=nx, xv1=zs(2na, H.nz), xv2=zs(2na, H.nz),
+                            xa=zs(2na, H.nz), xc=zs(2na, H.nz), zv1=zs(nl, nzp), zv2=zs(nl, nzp), zb=zs(nl, nzp), ze=zs(nl, nzp)))
         loc(A) = dev(FT.(A[xr .- ow, :]))
         mem = attenuation ? (; R11=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz), R22=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz),
                                R12=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz)) : (;)
         vti = aniso ? (; wx=loc(H.wx), wz=loc(H.wz), s13=loc(H.s13)) : (;)
         r0 = H.kmap[1, 2] - 2                                       # (the mesh row of node k: r0 + k)
         sponge = absorber === :cerjan ? (; gs=loc([cerjan_factor(i + ow, nx, na) * cerjan_factor(r0 + k, typemax(Int), na) for i in 1:nw, k in 1:H.nz])) : (;)
+        sh && return merge((; V1=z(), S1=z(), S2=z(), J=loc(H.J), Jx=loc(H.Jx), iρJ=loc(1 ./ (H.ρ .* H.J)), mu=loc(H.mu55), mu66=loc(H.mu66),
+                            ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx),
+                           attenuation ? (; R1=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz), R2=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz)) : (;),
+                           sponge, player)
         merge((; V1=z(), V2=z(), S11=z(), S22=z(), S12=z(), J=loc(H.J), Jx=loc(H.Jx), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam),
                mu=loc(aniso ? H.mu55 : H.mu), tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1),
                a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx), mem, vti, sponge, player)
@@ -702,35 +843,38 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
         Tuple(R)
     end
     # (on `blks`: the blocks, or blocks of other arrays with the same mesh: the operators of the adjoint)
+    mom_k, str_k, nbr = sh ? (momentum_sh!, stress_sh!, neighbour_sh) : (momentum_cv!, stress_cv!, neighbour)
     momentum!(dtT, damp, blks=blocks) = for b in 1:nb
-        foreach_region!(backend, momentum_cv!, (blks[b], neighbour(b > 1 ? blks[b-1] : nothing), neighbour(b < nb ? blks[b+1] : nothing), dtT, damp), regions[b])
+        foreach_region!(backend, mom_k, (blks[b], nbr(b > 1 ? blks[b-1] : nothing), nbr(b < nb ? blks[b+1] : nothing), dtT, damp), regions[b])
     end
     stress!(vc, dtT, blks=blocks) = for b in 1:nb
-        foreach_region!(backend, stress_cv!, (blks[b], neighbour(b > 1 ? blks[b-1] : nothing), neighbour(b < nb ? blks[b+1] : nothing), vc, dtT), regions[b])
+        foreach_region!(backend, str_k, (blks[b], nbr(b > 1 ? blks[b-1] : nothing), nbr(b < nb ? blks[b+1] : nothing), vc, dtT), regions[b])
     end
-    exchange_v!() = foreach(B -> cv_exchange!(par, (B.V1, B.V2)), blocks)
-    exchange_s!() = foreach(B -> cv_exchange!(par, (B.S11, B.S22, B.S12)), blocks)
+    vel(B) = sh ? (B.V1,) : (B.V1, B.V2)                       # the velocities and stresses of a block
+    str(B) = sh ? (B.S1, B.S2) : (B.S11, B.S22, B.S12)
+    exchange_v!() = foreach(B -> cv_exchange!(par, vel(B)), blocks)
+    exchange_s!() = foreach(B -> cv_exchange!(par, str(B)), blocks)
     owned(A) = view(A, hx+1:hx+no, :)
     # the time step: power iteration for the largest eigenvalue λ of v -> M(S(v)); leapfrog is stable for dt < 2/√λ
     if dt === nothing
         rng = Random.Xoshiro(20261126 + me)                 # (seeded: the same time step in every run)
-        foreach(B -> (copyto!(B.V1, FT.(randn(rng, size(B.V1)))); copyto!(B.V2, FT.(randn(rng, size(B.V2))))), blocks)
+        foreach(B -> foreach(V -> copyto!(V, FT.(randn(rng, size(V)))), vel(B)), blocks)
         exchange_v!()
         λ = 0.0
         for _ in 1:100
-            foreach(B -> (fill!(B.S11, 0); fill!(B.S22, 0); fill!(B.S12, 0)), blocks)
+            foreach(B -> foreach(A -> fill!(A, 0), str(B)), blocks)
             stress!(nothing, one(FT))
             exchange_s!()
-            nrm0 = sqrt(cv_sum(par, value(sum(B -> sum(abs2, owned(B.V1)) + sum(abs2, owned(B.V2)), blocks))))
-            foreach(B -> (fill!(B.V1, 0); fill!(B.V2, 0)), blocks)
+            nrm0 = sqrt(cv_sum(par, value(sum(B -> sum(V -> sum(abs2, owned(V)), vel(B)), blocks))))
+            foreach(B -> foreach(V -> fill!(V, 0), vel(B)), blocks)
             momentum!(one(FT), false)
             KernelAbstractions.synchronize(backend)
             exchange_v!()
-            nrm = sqrt(cv_sum(par, value(sum(B -> sum(abs2, owned(B.V1)) + sum(abs2, owned(B.V2)), blocks))))
+            nrm = sqrt(cv_sum(par, value(sum(B -> sum(V -> sum(abs2, owned(V)), vel(B)), blocks))))
             λ = nrm / nrm0
-            foreach(B -> (B.V1 ./= FT(nrm); B.V2 ./= FT(nrm)), blocks)
+            foreach(B -> foreach(V -> V ./= FT(nrm), vel(B)), blocks)
         end
-        foreach(B -> foreach(a -> fill!(a, 0), (B.V1, B.V2, B.S11, B.S22, B.S12)), blocks)
+        foreach(B -> foreach(a -> fill!(a, 0), (vel(B)..., str(B)...)), blocks)
         dt = 0.9 * 2 / sqrt(λ)
     end
     nt = something(nt, tmax === nothing ? nothing : round(Int, tmax / dt))
@@ -792,10 +936,10 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     tables(δ) = (mine(source_table(forces, fcoef, δ)), mine(source_table(moments, mcoef, δ)))
     ft, mt = tables((0.0, 0.0))
     FS = (; b=dev(ft.b), i=dev(ft.i), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n),
-          F=dev(FT[s.F[c] for s in forces, c in (1, 3)]),
+          F=dev(FT[s.F[c] for s in forces, c in (sh ? (2,) : (1, 3))]),
           s=dev(FT[moment_rate(stf, tbeg + (it - 1) * dt, s.t0, s.trise) for s in forces, it in 1:nt]))
     MS = (; b=dev(mt.b), i=dev(mt.i), k=dev(mt.k), c=dev(FT.(mt.c)), n=dev(mt.n),
-          M=dev(FT[s.M0 * s.M[c] for s in moments, c in (1, 3, 5)]),
+          M=dev(FT[s.M0 * s.M[c] for s in moments, c in (sh ? (6, 4) : (1, 3, 5))]),        # (SH: σxy, σyz)
           s=dev(FT[moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt for s in moments, it in 1:nt]))
     # stations
     nst = length(stations)
@@ -820,15 +964,16 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     St = (; b=dev([s[1] for s in st]), i0=dev([s[2] - ox for s in st]), k0=dev([s[3] for s in st]),
           wx=dev(FT[s[4][a] for a in 1:6, s in st]), wz=dev(FT[s[5][a] for a in 1:6, s in st]))
     nrec = cld(nt, record_every)
-    rec = KernelAbstractions.zeros(backend, FT, nrec, 10, nst)
-    acc = KernelAbstractions.zeros(backend, FT, 2, nst)
-    prev = KernelAbstractions.zeros(backend, FT, 2, nst)
+    ncol = sh ? 6 : 10                                          # (v, u, stress, strain)
+    rec = KernelAbstractions.zeros(backend, FT, nrec, ncol, nst)
+    acc = KernelAbstractions.zeros(backend, FT, sh ? 1 : 2, nst)
+    prev = KernelAbstractions.zeros(backend, FT, sh ? 1 : 2, nst)
     # the wavefield on the mesh (the shared interface rows from the block below)
     # (with MPI: gathered on rank 0, `nothing` elsewhere)
     function velocity_field()
         cols = [k == 1 ? (1:H.nz) : (2:H.nz) for (k, H) in enumerate(hostblocks)]
         v1 = reduce(hcat, [Array(owned(blocks[b].V1))[:, cols[b]] for b in 1:nb])
-        v2 = reduce(hcat, [Array(owned(blocks[b].V2))[:, cols[b]] for b in 1:nb])
+        v2 = sh ? zero(v1) : reduce(hcat, [Array(owned(blocks[b].V2))[:, cols[b]] for b in 1:nb])
         zz = Zw[ia-ow:ib-ow, :]
         if par !== nothing
             parts = MPI.gather((ia, ib, v1, v2, zz), par.comm; root=0)
@@ -840,11 +985,12 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
         end
         r(A) = reshape(Float64.(A), nx, 1, nzt)
         Xg = [gx[i] / 1e3 for i in 1:nx, _ in 1:1, _ in 1:nzt]
-        return CartData(Xg, zero(Xg), r(zz), (; V=(r(v1), zero(r(v1)), r(v2))))
+        return CartData(Xg, zero(Xg), r(zz), (; V=sh ? (zero(r(v1)), r(v1), zero(r(v1))) : (r(v1), zero(r(v1)), r(v2))))
     end
     planes = snapshots === nothing ? nothing :
-             setup_planes_cv(snapshots, 2, (; hostblocks, nx, ny=1, gx, gy=nothing, Zm, ia, ib, ja=1, jb=1, oy=0, ox, dev, backend, FT, dir=snapshot_dir,
+             setup_planes_cv(snapshots, sh ? 1 : 2, (; hostblocks, nx, ny=1, gx, gy=nothing, Zm, ia, ib, ja=1, jb=1, oy=0, ox, dev, backend, FT, dir=snapshot_dir,
                                               me, parallel=par !== nothing, par, ow, owy=0))
+    sh && planes !== nothing && :ps in snapshots.quantities && error("SH snapshots have no :ps")
     Dps, divrot! = planes !== nothing && :ps in snapshots.quantities ? divrot_cv(blocks, stress!, 2, backend, FT) : (nothing, nothing)
     movie = (snapshot_every > 0 && callback === nothing && snapshots === nothing && me == 0) ?
             movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
@@ -858,28 +1004,31 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     function step!(it, record)
         n = it - 1
         itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
-        itw > 0 && nst > 0 && foreach_item!(backend, vprev_cv!, (prev, lite, St), nst)
+        itw > 0 && nst > 0 && foreach_item!(backend, sh ? vprev_sh_cv! : vprev_cv!, (prev, lite, St), nst)
         momentum!(dtT, true)
-        absorber === :cerjan && foreach(B -> (B.V1 .*= B.gs; B.V2 .*= B.gs), blocks)
-        length(forces) > 0 && run_once!(backend, force_cv!, (lite, FS, it, dtT))
+        absorber === :cerjan && foreach(B -> foreach(V -> V .*= B.gs, vel(B)), blocks)
+        length(forces) > 0 && run_once!(backend, sh ? force_sh_cv! : force_cv!, (lite, FS, it, dtT))
         KernelAbstractions.synchronize(backend)
         exchange_v!()
-        record && nst > 0 && foreach_item!(backend, record_cv!, (rec, acc, prev, lite, St, itw, dtT), nst)
+        record && nst > 0 && foreach_item!(backend, sh ? record_sh_cv! : record_cv!, (rec, acc, prev, lite, St, itw, dtT), nst)
         stress!(vc, dtT)
-        absorber === :cerjan && foreach(B -> (B.S11 .*= B.gs; B.S22 .*= B.gs; B.S12 .*= B.gs), blocks)
-        length(moments) > 0 && run_once!(backend, moment_cv!, (lite, MS, it))
+        absorber === :cerjan && foreach(B -> foreach(S -> S .*= B.gs, str(B)), blocks)
+        length(moments) > 0 && run_once!(backend, sh ? moment_sh_cv! : moment_cv!, (lite, MS, it))
         KernelAbstractions.synchronize(backend)
         exchange_s!()
     end
     "the seismograms of all stations (velocity, displacement, stress, strain) on every process (`part`: of Born numbers)"
     function all_traces(part=identity)
-        traces = zeros(nrec, 10, length(stations))
+        traces = zeros(nrec, ncol, length(stations))
         traces[:, :, own] .= part.(Array(rec))
         par === nothing || MPI.Allreduce!(traces, +, par.comm)
         return traces
     end
-    seismograms(traces, wf=nothing) = Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), traces[:, 1:2, :], traces[:, 3:4, :],
-                                                  traces[:, 5:7, :], traces[:, 8:10, :], collect(stations), (:x, :z), (:xx, :zz, :xz), wf)
+    seismograms(traces, wf=nothing) = sh ?
+        Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), traces[:, 1:1, :], traces[:, 2:2, :], traces[:, 3:4, :],
+                    traces[:, 5:6, :], collect(stations), (:y,), (:yz, :xy), wf) :
+        Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), traces[:, 1:2, :], traces[:, 3:4, :],
+                    traces[:, 5:7, :], traces[:, 8:10, :], collect(stations), (:x, :z), (:xx, :zz, :xz), wf)
     # a driver (misfit gradients) takes over
     driver === nothing || return drive_curvilinear(driver, (; backend, FT, blocks, hostblocks, nb, nx, nzt, nl, no, hx, ox, xr, ia, ib,
         par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!, exchange_s!, owned, St, nst, FS, forces,
@@ -904,12 +1053,12 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
             store = snapshot_every > 0 && n % snapshot_every == 0
             store && Dps !== nothing && divrot!()
             for p in planes
-                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, lite, store ? Dps : nothing, p.pts, dtT, store, Val(2)),
+                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, lite, store ? Dps : nothing, p.pts, dtT, store, Val(sh ? 1 : 2)),
                                                 length(p.own))
             end
             if store
                 KernelAbstractions.synchronize(backend)
-                write_planes(planes, :psv, n ÷ snapshot_every + 1, tbeg + n * dt, 1.0, par !== nothing, me)
+                write_planes(planes, sh ? :sh : :psv, n ÷ snapshot_every + 1, tbeg + n * dt, 1.0, par !== nothing, me)
             end
         end
         if snapshot_every > 0 && n % snapshot_every == 0 && (planes === nothing || callback !== nothing)
@@ -920,14 +1069,14 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
             end
         end
         if (verbose || par !== nothing) && (it % max(1, nt ÷ 10) == 0 || it == nt)
-            vmax = cv_max(par, Float64(maximum(B -> max(maximum(abs, owned(B.V1)), maximum(abs, owned(B.V2))), blocks)))
+            vmax = cv_max(par, Float64(maximum(B -> maximum(V -> maximum(abs, owned(V)), vel(B)), blocks)))
             isfinite(vmax) || error("curvilinear grid: the simulation became unstable at step $it")
             verbose && @printf("  step %6d/%d  t = %8.4f s  max|v| = %.3e m/s\n", it, nt, tbeg + it * dt, vmax)
         end
     end
     KernelAbstractions.synchronize(backend)
     movie === nothing || movie_paraview(movie)
-    planes === nothing || write_peaks(planes, snapshots.quantities, :psv, 1.0, par !== nothing, me)
+    planes === nothing || write_peaks(planes, snapshots.quantities, sh ? :sh : :psv, 1.0, par !== nothing, me)
     verbose && @printf("  finished in %.2f s\n", time() - wall)
     return seismograms(all_traces(), wavefield ? velocity_field() : nothing)
 end
