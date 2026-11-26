@@ -1,90 +1,137 @@
-# Stage-1 prototype: 2D P-SV on a terrain-following (curvilinear) grid with SBP operators and a SAT free surface, on the
-# topography cases of Nobuaki Fuji (tilted planes, hill; as examples/topography_benchmark.jl).
+# Prototype: 2D P-SV on a terrain-following (curvilinear) grid with SBP operators and a SAT free surface, on the topography
+# cases of Nobuaki Fuji (tilted planes, hills; as examples/topography_benchmark.jl), with SeismicWavePC runs as references.
 #
-# Grid: x = ξ, z = η + h(ξ) (columns sheared with the surface h(x); J = 1), collocated velocity-stress, SBP first-derivative
-# operators of SummationByPartsOperators.jl: dual-pairing upwind operators (Mattsson 2017, order 7), RK4.
-# Split form: momentum with the divergence in conservative form, stress with the gradient in non-conservative form; with
-# SBP operators the two are adjoint in the J-weighted norm, so the semi-discrete energy changes only through boundary
-# terms, and the SAT (the traction removed at every boundary) makes all boundaries traction-free: energy conserved.
+# Grid: x = ξ, z = η + h(ξ) w(η): the surface h(x) at η = 0; w = 1 (columns sheared with the surface everywhere) or, with
+# a flattening depth D, w goes smoothly from 1 at the surface to 0 at η = -D (a Cartesian grid below). Collocated
+# velocity-stress, dual-pairing upwind SBP operators of SummationByPartsOperators.jl (default: boundary-optimized closures,
+# Mattsson, Niemelä & Winters 2026, order 7; their first grid points are not equidistant):
+# H D₊ + (H D₋)ᵀ = B, D₋ for the divergence (momentum, conservative form), D₊ for the gradient (stress, non-conservative
+# form). The two are adjoint in the J-weighted SBP norm, so the semi-discrete energy changes only through boundary terms;
+# the SAT (the traction removed at every boundary) makes all boundaries traction-free: the energy is conserved. The
+# metric terms are computed with the divergence operators (discrete metric identities hold exactly). Material parameters
+# are point values at the nodes (averaged over the node's cell: ρ arithmetic, μ and λ + 2μ harmonic). RK4.
 #
-#   julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/curvi.jl <case> [dx m] [T s]
-#   (environment variables ORDER = 5 (order of the upwind operators) and SWAP = 1 (D− for the divergence))
+#   julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/curvi.jl <case> [dx m] [T s] [flattening depth m | -]
+#   (environment: FAMILY = MattssonNiemeläWinters2026 | Mattsson2017 | WilliamsDuru2024, ORDER = 7)
 using SummationByPartsOperators, LinearAlgebra, Printf
+using SeismicWavePC, GeophysicalModelGenerator
 
-const vp, vs, ρ = 6000.0, 3464.0, 2700.0
-const μ = ρ * vs^2
-const λ = ρ * vp^2 - 2μ
+const VP, VS, RHO = 6000.0, 3464.0, 2700.0                    # the half-space
 const f0 = 1.5 * 3464.0 / (16 * 500.0)
 ricker(t) = (a = π * f0 * (t - 1.5 / f0); (1 - 2a^2) * exp(-a^2))
 
-# the cases (metres), as geometryCases.jl
-θ(case) = case == "hill" ? 0.0 : parse(Float64, replace(case, "tilt" => ""))
+# the cases (metres): tilt<θ> as geometryCases.jl; hill (3 km, σ = 5 km) and steephill (3 km, σ = 2 km)
+istilt(case) = startswith(case, "tilt")
+θ(case) = istilt(case) ? parse(Float64, replace(case, "tilt" => "")) : 0.0
 frame(case) = (s = sind(θ(case)); c = cosd(θ(case)); (t=(c, s), n=(-s, c)))
 to_grid(case, a, b) = (f = frame(case); (a * f.t[1] + b * f.n[1], a * f.t[2] + b * f.n[2]))
-surface(case) = case == "hill" ? (x -> 3e3 * exp(-x^2 / (2 * 5e3^2))) : (x -> x * tand(θ(case)))
+surface(case) = case == "hill" ? (x -> 3e3 * exp(-x^2 / (2 * 5e3^2))) : case == "steephill" ? (x -> 3e3 * exp(-x^2 / (2 * 2e3^2))) :
+                (x -> x * tand(θ(case)))
 const XR = (-30e3, -20e3, -10e3, 0.0, 10e3)
-receivers(case) = case == "hill" ?
-    [(line, i, (x, line === :deep ? -10e3 : surface(case)(x) - 1e3)) for line in (:deep, :shallow) for (i, x) in enumerate(XR)] :
-    [(line, i, to_grid(case, x, line === :deep ? -10e3 : -1e3)) for line in (:deep, :shallow) for (i, x) in enumerate(XR)]
-source(case) = case == "hill" ? (-10e3, -20e3) : to_grid(case, -10e3, -20e3)
+receivers(case) = istilt(case) ?
+    [(line, i, to_grid(case, x, line === :deep ? -10e3 : -1e3)) for line in (:deep, :shallow) for (i, x) in enumerate(XR)] :
+    [(line, i, (x, line === :deep ? -10e3 : surface(case)(x) - 1e3)) for line in (:deep, :shallow) for (i, x) in enumerate(XR)]
+source(case) = istilt(case) ? to_grid(case, -10e3, -20e3) : (-10e3, -20e3)
+"the forces of the benchmark: Gaussian weights (σ = 500 m, cut at 1 km) on the nodes of the 500 m grid"
+function force_nodes(case)
+    s = source(case)
+    p = [(x, z) for x in (floor(s[1] / 500 - 3) * 500):500:(s[1] + 1500) for z in (floor(s[2] / 500 - 3) * 500):500:(s[2] + 1500)
+         if hypot(x - s[1], z - s[2]) <= 1000]
+    w = [exp(-hypot(q[1] - s[1], q[2] - s[2])^2 / (2 * 500.0^2)) for q in p]
+    zip(p, w ./ sum(w))
+end
+"(vp, vs, ρ) at (x, z): the half-space, or a layer of the given thickness under the surface (normal depth for the tilted
+planes, vertical depth for the hills)"
+function material(case, layer, x, z)
+    layer === nothing && return (VP, VS, RHO)
+    d = (surface(case)(x) - z) * (istilt(case) ? cosd(θ(case)) : 1.0)
+    d < layer.thickness ? (layer.vp, layer.vs, layer.rho) : (VP, VS, RHO)
+end
 
-"Kaiser-windowed sinc weights (r = 4, b = 6.31, as SeismicWavePC's :sinc) of the grid points around x0: a band-limited delta"
-besseli0(x) = sum((x / 2)^(2k) / factorial(big(k))^2 for k in 0:30) |> Float64
+# Kaiser-windowed sinc (band-limited delta, as SeismicWavePC's :sinc) and Lagrange weights
+besseli0(x) = Float64(sum((x / 2)^(2k) / factorial(big(k))^2 for k in 0:30))
 const I0B = besseli0(6.31)
 kaiser_sinc(x) = abs(x) >= 4 ? 0.0 : sinc(x) * besseli0(6.31 * sqrt(1 - (x / 4)^2)) / I0B
-function sincw(g, x0)
-    h = step(g)
-    c = (x0 - first(g)) / h + 1
+function sincw(g, x0)                                  # (uniform spacing around x0: sources are far from the boundaries)
+    i = clamp(searchsortedlast(g, x0), 1, length(g) - 1)
+    c = i + (x0 - g[i]) / (g[i+1] - g[i])
     idx = max(1, ceil(Int, c - 4)):min(length(g), floor(Int, c + 4))
     idx, [kaiser_sinc(c - j) for j in idx]
 end
-
-"Lagrange weights of the `n` grid points around x0 (inside the grid)"
-function lagrange(g, x0; n=6)
-    h = step(g)
-    i0 = clamp(floor(Int, (x0 - first(g)) / h) - n ÷ 2 + 2, 1, length(g) - n + 1)
+function lagrange(g, x0; n=6)                          # (any grid, e.g. boundary-optimized)
+    i0 = clamp(searchsortedlast(g, x0) - n ÷ 2 + 1, 1, length(g) - n + 1)
     idx = i0:i0+n-1
-    w = [prod((x0 - g[m]) / (g[j] - g[m]) for m in idx if m != j) for j in idx]
-    idx, w
+    idx, [prod((x0 - g[m]) / (g[j] - g[m]) for m in idx if m != j) for j in idx]
 end
 
-function run_case(case; dx=500.0, T=9.0, dt=0.04dx / 1e3, order=5)
+"the flattening weight: 1 at the surface (η = 0), smoothly to 0 at η = -D (w = 1 everywhere without D)"
+wflat(η, D) = D === nothing ? 1.0 : (s = clamp(1 + η / D, 0.0, 1.0); s^2 * (3 - 2s))
+
+function run_case(case; dx=500.0, T=9.0, dt=0.04dx / 1e3, order=7, family=MattssonNiemeläWinters2026, flatten=nothing, layer=nothing)
     h = surface(case)
     s = source(case)
-    ξ0, ξ1 = s[1] - 62e3, s[1] + 62e3
-    Nx, Nz = round(Int, (ξ1 - ξ0) / dx) + 1, round(Int, 80e3 / dx) + 1
-    Dξ = derivative_operator(MattssonNordström2004(), derivative_order=1, accuracy_order=6, xmin=ξ0, xmax=ξ1, N=Nx)
-    # dual-pairing (upwind) SBP operators (Mattsson 2017): H D+ + (H D−)ᵀ = B; divergence with D+, gradient with D−
-    Uξ = upwind_operators(Mattsson2017, derivative_order=1, accuracy_order=order, xmin=ξ0, xmax=ξ1, N=Nx)
-    Uη = upwind_operators(Mattsson2017, derivative_order=1, accuracy_order=order, xmin=-80e3, xmax=0.0, N=Nz)
-    gξ, gη = grid(Uξ.minus), grid(Uη.minus)
-    Hξ, Hη = diag(mass_matrix(Uξ.minus)), diag(mass_matrix(Uη.minus))
-    # metric of x = ξ, z = η + h(ξ): J = 1, Jξ = (1, 0), Jη = (−h', 1); h' with the same SBP operator
-    hp = Dξ * h.(collect(gξ))
-    Jηx = -hp
-    # fields and work arrays
-    v1, v2, s11, s22, s12 = (zeros(Nx, Nz) for _ in 1:5)
-    U = (v1, v2, s11, s22, s12)
-    K = [Tuple(zeros(Nx, Nz) for _ in 1:5) for _ in 1:4]
-    Utmp = Tuple(zeros(Nx, Nz) for _ in 1:5)
-    W = Tuple(zeros(Nx, Nz) for _ in 1:4)
+    ξ0, ξ1, η0 = s[1] - 62e3, s[1] + 62e3, -80e3
+    Nx, Nz = round(Int, (ξ1 - ξ0) / dx) + 1, round(Int, -η0 / dx) + 1
+    Uξ = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=ξ0, xmax=ξ1, N=Nx)
+    Uη = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=η0, xmax=0.0, N=Nz)
+    Ddξ, Ddη, Dgξ, Dgη = Uξ.minus, Uη.minus, Uξ.plus, Uη.plus        # divergence, gradient
+    gξ, gη = grid(Ddξ), grid(Ddη)
+    Hξ, Hη = diag(mass_matrix(Ddξ)), diag(mass_matrix(Ddη))
     dξ!(out, A, D) = Threads.@threads for k in 1:Nz
         mul!(view(out, :, k), D, view(A, :, k))
     end
     dη!(out, A, D) = Threads.@threads for i in 1:Nx
         mul!(view(out, i, :), D, view(A, i, :))
     end
-    Dpξ, Dpη, Dmξ, Dmη = get(ENV, "SWAP", "1") == "1" ? (Uξ.minus, Uη.minus, Uξ.plus, Uη.plus) : (Uξ.plus, Uη.plus, Uξ.minus, Uη.minus)
-    # the forces: Gaussian weights on the 500 m nodes, band-limited deltas (sinc weights / SBP norm) in (ξ, η)
+    zmap(ξ, η) = η + h(ξ) * wflat(η, flatten)
+    "η of the physical point (x, z) (bisection; z increases with η)"
+    function eta(x, z)
+        a, b = η0 - 50e3, 10e3
+        for _ in 1:80
+            m = (a + b) / 2
+            zmap(x, m) < z ? (a = m) : (b = m)
+        end
+        (a + b) / 2
+    end
+    # metric: x = ξ, J = z_η, Jξ = (z_η, 0), Jη = (-z_ξ, 1), with the divergence operators
+    Zm = [zmap(ξ, η) for ξ in gξ, η in gη]
+    J, Jηx = similar(Zm), similar(Zm)
+    dη!(J, Zm, Ddη)
+    dξ!(Jηx, Zm, Ddξ)
+    Jηx .*= -1
+    minimum(J) > 0 || error("the mapping folds (min J = $(minimum(J)))")
+    # material: averaged over the cell of each node (4 × 4 samples)
+    off = (-0.375, -0.125, 0.125, 0.375)
+    ρ, lam, mu = (zeros(Nx, Nz) for _ in 1:3)
+    Threads.@threads for k in 1:Nz
+        for i in 1:Nx
+            sρ, sμ, sM = 0.0, 0.0, 0.0
+            for a in off, b in off
+                ξ = clamp(gξ[i] + a * dx, ξ0, ξ1)
+                η = clamp(gη[k] + b * dx, η0, 0.0)
+                vp_, vs_, r_ = material(case, layer, ξ, zmap(ξ, η))
+                sρ += r_
+                sμ += 1 / (r_ * vs_^2)
+                sM += 1 / (r_ * vp_^2)
+            end
+            ρ[i, k] = sρ / 16
+            mu[i, k] = 16 / sμ
+            lam[i, k] = 16 / sM - 2mu[i, k]
+        end
+    end
+    ρJ = ρ .* J
+    M = lam .+ 2 .* mu
+    # fields and work arrays
+    U = Tuple(zeros(Nx, Nz) for _ in 1:5)
+    K = [Tuple(zeros(Nx, Nz) for _ in 1:5) for _ in 1:4]
+    Utmp = Tuple(zeros(Nx, Nz) for _ in 1:5)
+    W = Tuple(zeros(Nx, Nz) for _ in 1:5)
+    # the forces: band-limited deltas in (ξ, η) divided by the SBP norm (J f = F δ(ξ) δ(η))
     n = frame(case).n
-    nodes = [(x, z) for x in (floor(s[1] / 500 - 3) * 500):500:(s[1] + 1500) for z in (floor(s[2] / 500 - 3) * 500):500:(s[2] + 1500)
-             if hypot(x - s[1], z - s[2]) <= 1000]
-    wts = [exp(-hypot(p[1] - s[1], p[2] - s[2])^2 / (2 * 500.0^2)) for p in nodes]
-    wts ./= sum(wts)
     F = Dict{Tuple{Int,Int},Float64}()
-    for (p, w) in zip(nodes, wts)
+    for (p, w) in force_nodes(case)
         iξ, wξ = sincw(gξ, p[1])
-        iη, wη = sincw(gη, p[2] - h(p[1]))
+        iη, wη = sincw(gη, eta(p[1], p[2]))
         for (a, i) in enumerate(iξ), (b, k) in enumerate(iη)
             F[(i, k)] = get(F, (i, k), 0.0) + 1e10 * w * wξ[a] * wη[b] / (Hξ[i] * Hη[k])
         end
@@ -93,60 +140,58 @@ function run_case(case; dx=500.0, T=9.0, dt=0.04dx / 1e3, order=5)
     function rhs!(dU, U, t)
         v1, v2, s11, s22, s12 = U
         dv1, dv2, ds11, ds22, ds12 = dU
-        A, B, C, E = W
+        A, B, C, E, G = W
         # momentum: ρ J ∂t v_i = Dξ(Jξ_j σ_ij) + Dη(Jη_j σ_ij) (+ SAT, force)
-        @. A = s11                     # Jξ_j σ_1j = σ11
+        @. A = J * s11                 # Jξ_j σ_1j
         @. B = Jηx * s11 + s12         # Jη_j σ_1j
-        dξ!(dv1, A, Dpξ); dη!(C, B, Dpη)
-        @. dv1 = (dv1 + C) / ρ
-        @. A = s12
+        dξ!(dv1, A, Ddξ); dη!(C, B, Ddη)
+        @. dv1 = (dv1 + C) / ρJ
+        @. G = J * s12
         @. E = Jηx * s12 + s22
-        dξ!(dv2, A, Dpξ); dη!(C, E, Dpη)
-        @. dv2 = (dv2 + C) / ρ
-        # SAT: remove the traction at every boundary (free surface on top; free elsewhere too, far away)
+        dξ!(dv2, G, Ddξ); dη!(C, E, Ddη)
+        @. dv2 = (dv2 + C) / ρJ
+        # SAT: the traction removed at every boundary (the free surface on top; free elsewhere too, far away)
         @views begin
-            @. dv1[:, Nz] -= B[:, Nz] / (Hη[Nz] * ρ); @. dv2[:, Nz] -= E[:, Nz] / (Hη[Nz] * ρ)
-            @. dv1[:, 1] += B[:, 1] / (Hη[1] * ρ);    @. dv2[:, 1] += E[:, 1] / (Hη[1] * ρ)
-            @. dv1[1, :] += s11[1, :] / (Hξ[1] * ρ);  @. dv2[1, :] += s12[1, :] / (Hξ[1] * ρ)
-            @. dv1[Nx, :] -= s11[Nx, :] / (Hξ[Nx] * ρ); @. dv2[Nx, :] -= s12[Nx, :] / (Hξ[Nx] * ρ)
+            @. dv1[:, Nz] -= B[:, Nz] / (Hη[Nz] * ρJ[:, Nz]); @. dv2[:, Nz] -= E[:, Nz] / (Hη[Nz] * ρJ[:, Nz])
+            @. dv1[:, 1] += B[:, 1] / (Hη[1] * ρJ[:, 1]);     @. dv2[:, 1] += E[:, 1] / (Hη[1] * ρJ[:, 1])
+            @. dv1[1, :] += A[1, :] / (Hξ[1] * ρJ[1, :]);     @. dv2[1, :] += G[1, :] / (Hξ[1] * ρJ[1, :])
+            @. dv1[Nx, :] -= A[Nx, :] / (Hξ[Nx] * ρJ[Nx, :]); @. dv2[Nx, :] -= G[Nx, :] / (Hξ[Nx] * ρJ[Nx, :])
         end
         r = ricker(t)
         for ((i, k), a) in Fpts
-            dv1[i, k] += a * r * n[1] / ρ
-            dv2[i, k] += a * r * n[2] / ρ
+            dv1[i, k] += a * r * n[1] / ρJ[i, k]
+            dv2[i, k] += a * r * n[2] / ρJ[i, k]
         end
-        # stress: the gradient g_ij = ∂_j v_i = (Jξ_j Dξ v_i + Jη_j Dη v_i) / J
-        dξ!(A, v1, Dmξ); dη!(B, v1, Dmη); dξ!(C, v2, Dmξ); dη!(E, v2, Dmη)
-        @. ds11 = (λ + 2μ) * (A + Jηx * B) + λ * E
-        @. ds22 = λ * (A + Jηx * B) + (λ + 2μ) * E
-        @. ds12 = μ * (B + C + Jηx * E)
+        # stress: ∂x = (Jξ_x Dξ + Jη_x Dη) / J = Dξ + (Jηx / J) Dη, ∂z = Dη / J
+        dξ!(A, v1, Dgξ); dη!(B, v1, Dgη); dξ!(C, v2, Dgξ); dη!(E, v2, Dgη)
+        @. ds11 = M * (A + Jηx / J * B) + lam * E / J
+        @. ds22 = lam * (A + Jηx / J * B) + M * E / J
+        @. ds12 = mu * (B / J + C + Jηx / J * E)
         dU
     end
-    # receivers
+    # receivers: Lagrange interpolation in (ξ, η)
     rec = receivers(case)
-    RW = map(rec) do (line, i, p)
-        lagrange(gξ, p[1]), lagrange(gη, p[2] - h(p[1]))
-    end
+    RW = [(lagrange(gξ, p[1]), lagrange(gη, eta(p[1], p[2]))) for (_, _, p) in rec]
     sample(A, ((iξ, wξ), (iη, wη))) = sum(wξ[a] * wη[b] * A[i, k] for (a, i) in enumerate(iξ), (b, k) in enumerate(iη))
     nt = round(Int, T / dt)
     vrec = zeros(nt + 1, 2, length(rec))
     energy = zeros(nt + 1)
-    S = Hξ * Hη'
-    strain_energy(a, b, c) = ((λ + 2μ) * (a^2 + b^2) - 2λ * a * b) / (8μ * (λ + μ)) + c^2 / (2μ)
+    S = (Hξ * Hη') .* J
     t0 = time()
     for it in 1:nt
         t = (it - 1) * dt
-        # RK4
         rhs!(K[1], U, t)
         foreach((x, u, k) -> (@. x = u + dt / 2 * k), Utmp, U, K[1]); rhs!(K[2], Utmp, t + dt / 2)
         foreach((x, u, k) -> (@. x = u + dt / 2 * k), Utmp, U, K[2]); rhs!(K[3], Utmp, t + dt / 2)
         foreach((x, u, k) -> (@. x = u + dt * k), Utmp, U, K[3]); rhs!(K[4], Utmp, t + dt)
         foreach((u, a, b, c, d) -> (@. u += dt / 6 * (a + 2b + 2c + d)), U, K[1], K[2], K[3], K[4])
         for (m, w) in enumerate(RW)
-            vrec[it+1, 1, m] = sample(v1, w)
-            vrec[it+1, 2, m] = sample(v2, w)
+            vrec[it+1, 1, m] = sample(U[1], w)
+            vrec[it+1, 2, m] = sample(U[2], w)
         end
-        energy[it+1] = sum(S .* (ρ / 2 .* (v1 .^ 2 .+ v2 .^ 2) .+ strain_energy.(s11, s22, s12)))
+        v1, v2, s11, s22, s12 = U
+        energy[it+1] = sum(S .* (ρ ./ 2 .* (v1 .^ 2 .+ v2 .^ 2) .+
+                                 (M .* (s11 .^ 2 .+ s22 .^ 2) .- 2 .* lam .* s11 .* s22) ./ (8 .* mu .* (lam .+ mu)) .+ s12 .^ 2 ./ (2 .* mu)))
         isfinite(energy[it+1]) || error("blew up at t = $(it * dt)")
     end
     wall = time() - t0
@@ -155,40 +200,65 @@ function run_case(case; dx=500.0, T=9.0, dt=0.04dx / 1e3, order=5)
     f = frame(case)
     tax = 0.01:0.01:min(T, 9.0)
     at(u) = [(j = min(searchsortedlast(tt, τ), nt); u[j] + (u[j+1] - u[j]) * (τ - tt[j]) / dt) for τ in tax]
-    out = Dict{Tuple{Symbol,Int},NTuple{2,Vector{Float64}}}()
+    traces = Dict{Tuple{Symbol,Int},NTuple{2,Vector{Float64}}}()
     for (m, (line, i, _)) in enumerate(rec)
         ux = [0.0; cumsum((vrec[1:end-1, 1, m] .+ vrec[2:end, 1, m]) ./ 2 .* dt)]
         uz = [0.0; cumsum((vrec[1:end-1, 2, m] .+ vrec[2:end, 2, m]) ./ 2 .* dt)]
-        out[(line, i)] = (at(ux .* f.t[1] .+ uz .* f.t[2]), at(ux .* f.n[1] .+ uz .* f.n[2]))
+        traces[(line, i)] = (at(ux .* f.t[1] .+ uz .* f.t[2]), at(ux .* f.n[1] .+ uz .* f.n[2]))
     end
-    (; traces=out, energy, tt, wall, Nx, Nz, nt)
+    (; traces, energy, tt, wall, Nx, Nz, nt, minJ=minimum(J), maxJ=maximum(J))
 end
 
-# the references, with SeismicWavePC (examples/topography_benchmark.jl, in a module: its constants are in km): tilts, the
-# flat case on a 62.5 m grid (exact: its surface lies on cell faces); hill, free_surface = :corners on a 62.5 m grid
-module TB
-include(joinpath(@__DIR__, "..", "..", "examples", "topography_benchmark.jl"))
+# SeismicWavePC on the same case (staircase of cells; free_surface = :openswpc or :corners), on its 0.01 s axis
+const TAX = 0.01:0.01:9.0
+function fd_run(case, free_surface, dx; layer=nothing)
+    h = surface(case)
+    s0, W = (-10e3, -20e3), 60e3
+    c = istilt(case) ? [to_grid(case, a, b) for a in s0[1] .+ (-W, W), b in (s0[2] - W, 3dx)] :
+        [(a, b) for a in s0[1] .+ (-W, W), b in (s0[2] - W, 3e3 + 3dx)]
+    ax(d) = (floor(minimum(p[d] for p in c) / dx) * dx + dx / 2):dx:(ceil(maximum(p[d] for p in c) / dx) * dx)
+    X, Y, Z = xyz_grid(ax(1) ./ 1e3, 0, ax(2) ./ 1e3)
+    P = [material(case, layer, 1e3X[I], 1e3Z[I]) for I in CartesianIndices(X)]
+    air = 1e3 .* Z .> h.(1e3 .* X)
+    model = CartData(X, Y, Z, (; rho=ifelse.(air, 1.0, getindex.(P, 3)), vp=ifelse.(air, 0.0, getindex.(P, 1) ./ 1e3),
+                                 vs=ifelse.(air, 0.0, getindex.(P, 2) ./ 1e3)))
+    n = frame(case).n
+    sources = [ForceSource(p[1] / 1e3, 0.0, p[2] / 1e3; fx=1e10 * w * n[1] / f0, fz=1e10 * w * n[2] / f0, t0=0.5 / f0, trise=1 / f0)
+               for (p, w) in force_nodes(case)]
+    rec = receivers(case)
+    stations = [Station("$(line)_$i", p[1] / 1e3, 0.0, p[2] / 1e3) for (line, i, p) in rec]
+    dt = 0.04dx / 1e3
+    r = simulate(model; dt, nt=round(Int, 9.0 / dt), sources, stations, stf=:ricker, interpolation=:sinc, free_surface,
+                 T=Float64, verbose=false)
+    t, f = r.t .+ dt, frame(case)
+    at(u) = [τ >= t[end] ? u[end] : (j = searchsortedlast(t, τ); j == 0 ? 0.0 : u[j] + (u[j+1] - u[j]) * (τ - t[j]) / dt) for τ in TAX]
+    Dict((line, i) => (at(r.u[:, 1, k] .* f.t[1] .+ r.u[:, 2, k] .* f.t[2]), at(r.u[:, 1, k] .* f.n[1] .+ r.u[:, 2, k] .* f.n[2]))
+         for (k, (line, i, _)) in enumerate(rec))
 end
-const REFS = Dict{String,Any}()
-reference(case) = get!(REFS, case == "hill" ? "hill" : "flat") do
-    case == "hill" ? TB.run("hill", :corners, 0.0625) : TB.run("tilt0", :openswpc, 0.0625)
+
+"the references: tilts, the flat case on a 62.5 m grid (exact: surface and layer on cell faces); hills, :corners at 62.5 m"
+const REFS = Dict{Any,Any}()
+reference(case; layer=nothing) = get!(REFS, (istilt(case) ? "flat" : case, layer)) do
+    istilt(case) ? fd_run("tilt0", :openswpc, 62.5; layer) : fd_run(case, :corners, 62.5; layer)
 end
 err(a, r) = sqrt(sum(abs2, a[1] .- r[1]) + sum(abs2, a[2] .- r[2])) / sqrt(sum(abs2, r[1]) + sum(abs2, r[2]))
+errors(tr, ref, line) = (e = [err(tr[(line, i)], ref[(line, i)]) for i in 1:5]; (sum(e) / 5, maximum(e)))
 
 if abspath(PROGRAM_FILE) == @__FILE__
     case = ARGS[1]
     dx = length(ARGS) > 1 ? parse(Float64, ARGS[2]) : 500.0
     T = length(ARGS) > 2 ? parse(Float64, ARGS[3]) : 9.0
-    r = run_case(case; dx, T, order=parse(Int, get(ENV, "ORDER", "5")))
+    flatten = length(ARGS) > 3 && ARGS[4] != "-" ? parse(Float64, ARGS[4]) : nothing
+    family = getfield(SummationByPartsOperators, Symbol(get(ENV, "FAMILY", "MattssonNiemeläWinters2026")))
+    r = run_case(case; dx, T, flatten, family, order=parse(Int, get(ENV, "ORDER", "7")))
     E = r.energy
-    k = findfirst(>(6.0), r.tt)                                  # after the source (ricker ends ~4.6 s)
-    @printf("%-7s dx = %4.0f m: %d × %d points, %d steps, %.1f s; energy after the source: %.3e -> %.3e (rel. change %.2e)\n",
-            case, dx, r.Nx, r.Nz, r.nt, r.wall, E[k], E[end], E[end] / E[k] - 1)
+    k = findfirst(>(6.0), r.tt)                                  # after the source
+    @printf("%-9s dx = %4.0f m: %d × %d points, %d steps, %.1f s, J %.2f–%.2f; energy after the source: rel. change %.2e\n",
+            case, dx, r.Nx, r.Nz, r.nt, r.wall, r.minJ, r.maxJ, E[end] / E[k] - 1)
     if T >= 9.0
         ref = reference(case)
         for line in (:deep, :shallow)
-            e = [err(r.traces[(line, i)], ref[(line, i)]) for i in 1:5]
-            @printf("  %-8s mean %5.1f %%  max %5.1f %%\n", line, 100sum(e) / 5, 100maximum(e))
+            @printf("  %-8s mean %5.1f %%  max %5.1f %%\n", line, (100 .* errors(r.traces, ref, line))...)
         end
     end
 end

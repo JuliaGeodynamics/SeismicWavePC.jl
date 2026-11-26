@@ -60,43 +60,40 @@ end
 const TAX = 0.01:0.01:duration
 err(a, r) = sqrt(sum(abs2, a[1] .- r[1]) + sum(abs2, a[2] .- r[2])) / sqrt(sum(abs2, r[1]) + sum(abs2, r[2]))
 
-# the comparison (skipped when the file is included, e.g. by prototypes/curvilinear)
-if abspath(PROGRAM_FILE) == @__FILE__
-    cases = ["tilt0", "tilt10", "tilt20", "tilt30", "hill"]
-    variants = (:openswpc, :corners)
-    flat = run("tilt0", :openswpc, 0.0625)
-    ref = Dict(c => (c == "hill" ? run("hill", :corners, 0.0625) : flat) for c in cases)
-    res = Dict((c, v) => run(c, v, 0.5) for c in cases, v in variants)
-    E = Dict((c, v, line) => [err(res[(c, v)][(line, i)], ref[c][(line, i)]) for i in 1:5] for c in cases, v in variants, line in (:deep, :shallow))
-    println("relative L2 error of (u_t, u_n) on the 500 m grid, mean (max) over the 5 receivers of a line")
-    for c in cases, line in (:deep, :shallow)
-        @printf("%-7s %-8s %s\n", c, line, join((@sprintf("%-10s %5.1f %% (%4.1f)", v, 100sum(E[(c, v, line)]) / 5, 100maximum(E[(c, v, line)])) for v in variants), "   "))
-    end
-
-    fig = Figure(size=(1300, 900), fontsize=16)
-    colors = (openswpc=:darkorange, corners=:dodgerblue)
-    labels = ["flat", "10°", "20°", "30°", "hill"]
-    for (j, line) in enumerate((:deep, :shallow))
-        ax = Axis(fig[1, j], title="$line line (500 m grid)", xticks=(1:5, labels), ylabel="relative L2 error (%)")
-        for (k, v) in enumerate(variants)
-            x = (1:5) .+ (k - 1.5) * 0.3
-            barplot!(ax, x, [100sum(E[(c, v, line)]) / 5 for c in cases], width=0.28, color=colors[v], label=string(v))
-            scatter!(ax, x, [100maximum(E[(c, v, line)]) for c in cases], color=:black, markersize=7)
-        end
-        ylims!(ax, 0, nothing)
-        j == 1 && axislegend(ax, position=:lt)
-    end
-    for (j, (comp, name)) in enumerate(((2, "u_n"), (1, "u_t")))
-        ax = Axis(fig[2, j], title="tilt20, shallow line: $name (black: exact)", xlabel="time (s)",
-                  yticks=(-10 .* (0:4), ["x' = $(Int(x)) km" for x in xr]))
-        scale = maximum(i -> maximum(abs, ref["tilt20"][(:shallow, i)][comp]), 1:5) / 4
-        for i in 1:5
-            lines!(ax, TAX, ref["tilt20"][(:shallow, i)][comp] ./ scale .- 10(i - 1), color=:black, linewidth=2.5)
-            for v in variants
-                lines!(ax, TAX, res[("tilt20", v)][(:shallow, i)][comp] ./ scale .- 10(i - 1), color=colors[v], linewidth=1.3)
-            end
-        end
-    end
-    save("topography_benchmark.png", fig)
-    println("saved topography_benchmark.png")
+cases = ["tilt0", "tilt10", "tilt20", "tilt30", "hill"]
+variants = (:openswpc, :corners)
+flat = run("tilt0", :openswpc, 0.0625)
+ref = Dict(c => (c == "hill" ? run("hill", :corners, 0.0625) : flat) for c in cases)
+res = Dict((c, v) => run(c, v, 0.5) for c in cases, v in variants)
+E = Dict((c, v, line) => [err(res[(c, v)][(line, i)], ref[c][(line, i)]) for i in 1:5] for c in cases, v in variants, line in (:deep, :shallow))
+println("relative L2 error of (u_t, u_n) on the 500 m grid, mean (max) over the 5 receivers of a line")
+for c in cases, line in (:deep, :shallow)
+    @printf("%-7s %-8s %s\n", c, line, join((@sprintf("%-10s %5.1f %% (%4.1f)", v, 100sum(E[(c, v, line)]) / 5, 100maximum(E[(c, v, line)])) for v in variants), "   "))
 end
+
+fig = Figure(size=(1300, 900), fontsize=16)
+colors = (openswpc=:darkorange, corners=:dodgerblue)
+labels = ["flat", "10°", "20°", "30°", "hill"]
+for (j, line) in enumerate((:deep, :shallow))
+    ax = Axis(fig[1, j], title="$line line (500 m grid)", xticks=(1:5, labels), ylabel="relative L2 error (%)")
+    for (k, v) in enumerate(variants)
+        x = (1:5) .+ (k - 1.5) * 0.3
+        barplot!(ax, x, [100sum(E[(c, v, line)]) / 5 for c in cases], width=0.28, color=colors[v], label=string(v))
+        scatter!(ax, x, [100maximum(E[(c, v, line)]) for c in cases], color=:black, markersize=7)
+    end
+    ylims!(ax, 0, nothing)
+    j == 1 && axislegend(ax, position=:lt)
+end
+for (j, (comp, name)) in enumerate(((2, "u_n"), (1, "u_t")))
+    ax = Axis(fig[2, j], title="tilt20, shallow line: $name (black: exact)", xlabel="time (s)",
+              yticks=(-10 .* (0:4), ["x' = $(Int(x)) km" for x in xr]))
+    scale = maximum(i -> maximum(abs, ref["tilt20"][(:shallow, i)][comp]), 1:5) / 4
+    for i in 1:5
+        lines!(ax, TAX, ref["tilt20"][(:shallow, i)][comp] ./ scale .- 10(i - 1), color=:black, linewidth=2.5)
+        for v in variants
+            lines!(ax, TAX, res[("tilt20", v)][(:shallow, i)][comp] ./ scale .- 10(i - 1), color=colors[v], linewidth=1.3)
+        end
+    end
+end
+save("topography_benchmark.png", fig)
+println("saved topography_benchmark.png")

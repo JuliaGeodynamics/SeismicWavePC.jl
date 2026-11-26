@@ -8,10 +8,9 @@ include(joinpath(@__DIR__, "curvi.jl"))
 cases = ["tilt0", "tilt10", "tilt20", "tilt30", "hill"]
 labels = ["flat", "10°", "20°", "30°", "hill"]
 runs = Dict(c => run_case(c) for c in cases)
-fdruns = Dict((c, v) => TB.run(c, v, 0.5) for c in cases, v in (:openswpc, :corners))
-stats(e) = (sum(e) / 5, maximum(e))
-cv(c, line) = stats([err(runs[c].traces[(Symbol(line), i)], reference(c)[(Symbol(line), i)]) for i in 1:5])
-fd(c, line, v) = stats([err(fdruns[(c, v)][(Symbol(line), i)], reference(c)[(Symbol(line), i)]) for i in 1:5])
+fdruns = Dict((c, v) => fd_run(c, v, 500.0) for c in cases, v in (:openswpc, :corners))
+cv(c, line) = errors(runs[c].traces, reference(c), Symbol(line))
+fd(c, line, v) = errors(fdruns[(c, v)], reference(c), Symbol(line))
 
 fig = Figure(size=(1300, 900), fontsize=16)
 cols = (staircase=:darkorange, corners=:dodgerblue, curvilinear=:forestgreen)
