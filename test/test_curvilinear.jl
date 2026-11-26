@@ -185,7 +185,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         kw = (; dt=r0.t[2] - r0.t[1], tmax=4.0, sources=srcs, T=Float64)
         pert = merge(base, (; vs=base.vs .* (1 .- 0.04 .* exp.(-((X .- 0.5) .^ 2 .+ (Z .+ 1) .^ 2) ./ 3)), Qs=base.Qs .* 1.3))
         obs = simulate(addfield(mesh, pert); kw..., stations=sts, verbose=false)
-        J, g, _ = misfit_gradient(addfield(mesh, base), obs; kw..., checkpoint_steps=17)
+        J, g, sg = misfit_gradient(addfield(mesh, base), obs; kw..., checkpoint_steps=17)
         @test keys(g.fields) == (:rho, :vp, :vs, :Qp, :Qs)
         Jof(m) = L2Misfit()(simulate(m; kw..., stations=sts, verbose=false).v, obs.v, obs.t)[1]
         @test Jof(addfield(mesh, base)) ≈ J rtol = 1e-12
@@ -198,6 +198,17 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
             fd = (Jof(addfield(mesh, merge(base, (; f => base[f] .+ ε .* δ)))) - Jof(addfield(mesh, merge(base, (; f => base[f] .- ε .* δ))))) / 2ε
             @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
         end
+        # source gradients: location, moment tensor, force, timing
+        ms, fs = srcs
+        Js(ss) = L2Misfit()(simulate(addfield(mesh, base); kw..., sources=ss, stations=sts, verbose=false).v, obs.v, obs.t)[1]
+        fdx(f) = (e = 1e-4; (Js(f(e)) - Js(f(-e))) / 2e)
+        MT(; x=ms.x, z=ms.z, M=ms.M, t0=ms.t0) = MomentTensorSource(x, 0.0, z, ms.M0, M; t0, trise=ms.trise)
+        @test sg[1].x ≈ fdx(e -> [MT(x=ms.x + e), fs]) rtol = 1e-5
+        @test sg[1].z ≈ fdx(e -> [MT(z=ms.z + e), fs]) rtol = 1e-5
+        @test sg[1].M[5] ≈ fdx(e -> [MT(M=ms.M .+ (0, 0, 0, 0, e, 0)), fs]) / ms.M0 rtol = 1e-6
+        @test sg[1].t0 ≈ fdx(e -> [MT(t0=e), fs]) rtol = 1e-5
+        @test sg[2].z ≈ fdx(e -> [ms, ForceSource(fs.x, 0.0, fs.z + e; fz=fs.F[3], trise=fs.trise)]) rtol = 1e-5
+        @test sg[2].F[3] ≈ fdx(e -> [ms, ForceSource(fs.x, 0.0, fs.z; fz=fs.F[3] + 1e13e, trise=fs.trise)]) / 1e13 rtol = 1e-6
     end
     @testset "misfit gradient (3D) against finite differences" begin
         topog3(x, y) = 1.0 * exp(-(x^2 + y^2) / 10)

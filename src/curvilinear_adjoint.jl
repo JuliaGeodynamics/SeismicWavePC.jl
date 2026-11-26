@@ -55,6 +55,31 @@ Base.@propagate_inbounds function force3_grad_cv!(G, A, S, it, dt)
     end
 end
 
+# Source sensitivities (per entry m of the source tables: the time integrals of the adjoint field weighted by the source
+# time function, per component; per source and step: ∂J/∂(moment rate))
+@inline node_of(S, m) = haskey(S, :j) ? CartesianIndex(S.i[m], S.j[m], S.k[m]) : CartesianIndex(S.i[m], S.k[m])
+Base.@propagate_inbounds function force_sens_cv!(AF, gm, Adj, blocks, S, it, dt, ::Val{vn}) where {vn}
+    for m in 1:length(S.i)
+        b, n, I = S.b[m], S.n[m], node_of(S, m)
+        w = dt * blocks[b].iρJ[I]
+        v = map(k -> getfield(Adj[b], k)[I], vn)
+        for c in eachindex(vn)
+            AF[m, c] += w * S.s[n, it] * v[c]
+            gm[n, it] += w * S.c[m] * S.F[n, c] * v[c]
+        end
+    end
+end
+Base.@propagate_inbounds function moment_sens_cv!(AM, gm, Adj, S, it, dt, ::Val{sn}) where {sn}
+    for m in 1:length(S.i)
+        b, n, I = S.b[m], S.n[m], node_of(S, m)
+        σ = map(k -> getfield(Adj[b], k)[I], sn)
+        for c in eachindex(sn)
+            AM[m, c] += S.s[n, it] * σ[c]
+            gm[n, it] -= dt * S.c[m] * S.M[n, c] * σ[c]
+        end
+    end
+end
+
 drive_curvilinear(d::CurvilinearGradient, c) = curvilinear_gradient(d, c, 2)
 drive_curvilinear3(d::CurvilinearGradient, c) = curvilinear_gradient(d, c, 3)
 
@@ -130,6 +155,9 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         foreach(a -> foreach(A -> fill!(A, 0), a), Aout)
         momentum!(one(FT), false, blk)
     end
+    MS, nF, nM = c.MS, length(forces), length(c.moments)
+    AF, gmF = KernelAbstractions.zeros(backend, FT, length(c.ftab.i), N), KernelAbstractions.zeros(backend, FT, nF, nt)
+    AM, gmM = KernelAbstractions.zeros(backend, FT, length(c.mtab.i), nS), KernelAbstractions.zeros(backend, FT, nM, nt)
     c1, c2, d1, d2 = attenuation ? vc : (nothing, nothing, nothing, zero(FT))
     # the transposed stress update σ^{n+1} = σⁿ + dt (C₁ e + Σₘ d1ₘ Rₘ^{n+1}), Rₘ^{n+1} = c1ₘ Rₘⁿ - c2ₘ dt Cτ e with the
     # strains e = G v^{n+1/2} in Gout and σ̄ = P: adjoint memory variables, the gradient (λ, μ, τp, τs) and Y = (C₁ P - Cτ Q) / HJ.
@@ -194,6 +222,8 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             n = it - 1
             itw = n % record_every == 0 ? n ÷ record_every + 1 : 0
             q = store[it-s0+1]
+            # moment tensors (stress glut, after the stress update)
+            nM > 0 && run_once!(backend, moment_sens_cv!, (AM, gmM, Adj, MS, it, dtT, Val(sn)))
             # stress update: gradient (λ, μ, τ) and v̄ += dt Gᵀ (C₁ σ̄ - Cτ Q)
             for b in 1:nb, k in 1:N
                 copyto!(Win[b][k], q[b][N+k])
@@ -208,7 +238,10 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             # recording at step n: v(tₙ) = (v^{n-1/2} + v^{n+1/2}) / 2
             itw > 0 && nst > 0 && run_once!(backend, residual!, (Adj, St, Rres, itw, FT(0.5)))
             # momentum v^{n+1/2} = P v^{n-1/2} + Q dt (1/ρJ) A σⁿ (+ forces): gradient (1/ρJ, damping) and σ̄ += Aᵀ(...)
-            length(forces) > 0 && run_once!(backend, force_grad!, (Grad, Adj, FS, it, dtT))
+            if nF > 0
+                run_once!(backend, force_grad!, (Grad, Adj, FS, it, dtT))
+                run_once!(backend, force_sens_cv!, (AF, gmF, Adj, blocks, FS, it, dtT, Val(vn)))
+            end
             for b in 1:nb
                 g, B = Grad[b], blocks[b]
                 for (k, ab) in enumerate(comps(B, an))
@@ -262,7 +295,66 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     par === nothing || foreach(A -> MPI.Allreduce!(A, +, par.comm), (gρ, gvp, gvs, gqp, gqs))
     rho_unit = density_unit === :g_cm3 ? 1e3 : 1.0
     grad = CartData(model.x.val, model.y.val, model.z.val, (; rho=gρ .* rho_unit, vp=gvp .* 1e3, vs=gvs .* 1e3, Qp=gqp, Qs=gqs))
-    return J, grad, Any[nothing for _ in 1:c.nsrc]              # (no source gradients on curvilinear grids yet)
+    return J, grad, curvilinear_source_gradients(c, N, AF, gmF, AM, gmM)
+end
+
+"""
+The source gradients of [`misfit_gradient`](@ref) from the sensitivities per table entry (`AF`, `AM`) and per step (`gmF`,
+`gmM`: ∂J/∂ moment rate). Location: from the derivatives of the interpolation weights (central differences of the tables,
+shifted by 1 mm).
+"""
+function curvilinear_source_gradients(c, N, AF, gmF, AM, gmM)
+    (; par, dt, nt, tbeg, stf, forces, moments, srcs, ftab, mtab) = c
+    sum_(A) = (B = Float64.(Array(A)); par === nothing || MPI.Allreduce!(B, +, par.comm); B)
+    AF, AM = Float64.(Array(AF)), Float64.(Array(AM))          # (per local entry)
+    gmF, gmM = sum_(gmF), sum_(gmM)
+    key(t, m) = N == 2 ? (t.b[m], t.i[m], t.k[m], t.n[m]) : (t.b[m], t.i[m], t.j[m], t.k[m], t.n[m])
+    # ∂J/∂(weight of entry m) per source; the weights' derivatives with respect to x, (y,) z
+    wf = [sum(forces[ftab.n[m]].F[fc] * AF[m, q] for (q, fc) in enumerate(N == 2 ? (1, 3) : (1, 2, 3))) for m in eachindex(ftab.n)]
+    wm = [-sum(moments[mtab.n[m]].M0 * moments[mtab.n[m]].M[mc] * AM[m, q] for (q, mc) in enumerate(N == 2 ? (1, 3, 5) : 1:6))
+          for m in eachindex(mtab.n)]
+    h = 1e-6
+    dloc = map(1:N) do a
+        δ(s) = ntuple(b -> b == a ? s * h : 0.0, N)
+        (fp, mp), (fm, mm) = c.tables(δ(1)), c.tables(δ(-1))
+        dw(t, tp, tm, w, ns) = (G = zeros(ns);
+            cp = Dict(key(tp, m) => tp.c[m] for m in eachindex(tp.c)); cm = Dict(key(tm, m) => tm.c[m] for m in eachindex(tm.c));
+            for m in eachindex(t.c)
+                G[t.n[m]] += w[m] * (get(cp, key(t, m), 0.0) - get(cm, key(t, m), 0.0)) / 2h
+            end; G)      # shortcut: nodes entering the support at the shifted position are left out (weights ~0 there)
+        (sum_(dw(ftab, fp, fm, wf, length(forces))), sum_(dw(mtab, mp, mm, wm, length(moments))))
+    end
+    xyz(l, q) = N == 2 ? (dloc[1][q][l], 0.0, dloc[2][q][l]) : (dloc[1][q][l], dloc[2][q][l], dloc[3][q][l])
+    # ∂J/∂t0, ∂J/∂trise from the gradient with respect to the moment rate (central differences of the source time function)
+    function timing(gm, times, src)
+        mr(t, t0, tr) = moment_rate(stf, t, t0, tr)
+        e = 1e-6 * src.trise
+        dt0 = sum(gm[n] * (mr(times[n], src.t0 + e, src.trise) - mr(times[n], src.t0 - e, src.trise)) / 2e for n in 1:nt)
+        dtr = sum(gm[n] * (mr(times[n], src.t0, src.trise + e) - mr(times[n], src.t0, src.trise - e)) / 2e for n in 1:nt)
+        return dt0, dtr
+    end
+    tf = [tbeg + (n - 1) * dt for n in 1:nt]                     # times of the force injections
+    tm = [tbeg + (n - 0.5) * dt for n in 1:nt]                   # and of the moment tensors
+    entries(t, l) = findall(==(l), t.n)
+    fs = map(enumerate(forces)) do (l, src)
+        e = entries(ftab, l)
+        dF = sum_([sum(ftab.c[m] * AF[m, q] for m in e; init=0.0) for q in 1:N])
+        x, y, z = xyz(l, 1)
+        t0, trise = timing(gmF[l, :], tf, src)
+        (; F=N == 2 ? (dF[1], 0.0, dF[2]) : Tuple(dF), x, y, z, t0, trise, stf=gmF[l, :], t=tf)
+    end
+    mts = map(enumerate(moments)) do (l, src)
+        e = entries(mtab, l)
+        dM = sum_([-sum(mtab.c[m] * AM[m, q] for m in e; init=0.0) for q in 1:(N == 2 ? 3 : 6)])
+        dP = N == 2 ? (dM[1], 0.0, dM[2], 0.0, dM[3], 0.0) : Tuple(dM)      # ∂J/∂(M0 M)
+        x, y, z = xyz(l, 2)
+        t0, trise = timing(gmM[l, :], tm, src)
+        (; M=dP, M0=sum(src.M[j] * dP[j] for j in 1:6), x, y, z, t0, trise, stf=gmM[l, :], t=tm)
+    end
+    return map(srcs) do src
+        i = src isa MomentTensorSource ? findfirst(x -> x === src, moments) : findfirst(x -> x === src, forces)
+        src isa MomentTensorSource ? mts[i] : fs[i]
+    end
 end
 
 # ------------------------------------------------------------------ Born modelling (2D and 3D)

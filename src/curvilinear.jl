@@ -599,13 +599,15 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         error("the point ($(x / 1e3), $(z / 1e3)) km is outside the model")
     end
     # sources: the nodes they reach in their block
-    function source_table(list, coef)
+    # (`δ`: shifted by δ [km]: the derivatives of the weights for the gradient with respect to the location)
+    function source_table(list, coef, δ=(0.0, 0.0))
         tab = (b=Int[], i=Int[], k=Int[], c=Float64[], n=Int[])
         for (n, s) in enumerate(list)
-            b, η = locate(1e3s.x, 1e3s.z)
+            x, z = s.x + δ[1], s.z + δ[2]
+            b, η = locate(1e3x, 1e3z)
             H = hostblocks[b]
             gη, hη = sbp_grid(0.0, 1.0, H.nz)
-            iξ, wξ = delta_weights(gx, Hξ, hξ, 1e3s.x)
+            iξ, wξ = delta_weights(gx, Hξ, hξ, 1e3x)
             iη, wη = delta_weights(gη, sbp_weights(H.nz, hη), hη, η)
             for (a, i) in enumerate(iξ), (c, k) in enumerate(iη)
                 push!(tab.b, b); push!(tab.i, i); push!(tab.k, k); push!(tab.c, wξ[a] * wη[c] * coef(H, i, k)); push!(tab.n, n)
@@ -617,8 +619,9 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     moments = filter(s -> s isa MomentTensorSource, srcs)
     # the nodes of this process, in local indices
     mine(t) = (q = findall(i -> ia <= i <= ib, t.i); (b=t.b[q], i=t.i[q] .- ox, k=t.k[q], c=t.c[q], n=t.n[q]))
-    ft = mine(source_table(forces, (H, i, k) -> 1.0))
-    mt = mine(source_table(moments, (H, i, k) -> 1 / H.J[i, k]))
+    fcoef, mcoef = (H, i, k) -> 1.0, (H, i, k) -> 1 / H.J[i, k]
+    tables(δ) = (mine(source_table(forces, fcoef, δ)), mine(source_table(moments, mcoef, δ)))
+    ft, mt = tables((0.0, 0.0))
     FS = (; b=dev(ft.b), i=dev(ft.i), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n),
           F=dev(FT[s.F[c] for s in forces, c in (1, 3)]),
           s=dev(FT[moment_rate(stf, tbeg + (it - 1) * dt, s.t0, s.trise) for s in forces, it in 1:nt]))
@@ -701,7 +704,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     driver === nothing || return drive_curvilinear(driver, (; backend, FT, blocks, hostblocks, nb, nx, nzt, nl, no, hx, ox, xr, ia, ib,
         par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!, exchange_s!, owned, St, nst, FS, forces,
         Hξ, hξ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, vc, own_stations=own, nsrc=length(srcs), st_all,
-        seismograms, ts, fq_ref, loc=A -> A[xr, :]))
+        seismograms, ts, fq_ref, loc=A -> A[xr, :], ftab=ft, mtab=mt, MS, moments, srcs, stf, tables))
     for it in 1:nt
         n = it - 1
         step!(it, true)

@@ -57,9 +57,10 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
 - **MPI and GPUs** as on the staggered grid: `nproc` processes along x (2D) or `(npx, npy)` (3D); the columns are not
   split. Results are identical to a run on one process.
 - **Gradients and Born modelling:** [`misfit_gradient`](@ref) (2D and 3D, attenuation, MPI, GPUs) uses the exact
-  discrete adjoint (`checkpoint_steps` as on the staggered grid); the gradient is per model node. [`born`](@ref) works as on the staggered
+  discrete adjoint (`checkpoint_steps` as on the staggered grid); the gradient is per model node. Source gradients
+  (location, moment tensor, force, timing, source time function) as on the staggered grid. [`born`](@ref) works as on the staggered
   grid (also with attenuation, on GPUs and with MPI).
-- **Not yet:** SH waves, plane waves, anisotropy, source gradients.
+- **Not yet:** SH waves, plane waves, anisotropy.
 
 ![A hill, a Moho-like interface and a magma chamber on a curvilinear grid](assets/2D_curvilinear.png)
 

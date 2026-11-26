@@ -367,14 +367,15 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         end
         error("the point ($(x / 1e3), $(y / 1e3), $(z / 1e3)) km is outside the model")
     end
-    function source_table(list, coef)
+    function source_table(list, coef, δ=(0.0, 0.0, 0.0))
         tab = (b=Int[], i=Int[], j=Int[], k=Int[], c=Float64[], n=Int[])
         for (n, s) in enumerate(list)
-            b, η = locate(1e3s.x, 1e3s.y, 1e3s.z)
+            x, y, z = s.x + δ[1], s.y + δ[2], s.z + δ[3]
+            b, η = locate(1e3x, 1e3y, 1e3z)
             H = hostblocks[b]
             gη, hη = sbp_grid(0.0, 1.0, H.nz)
-            iξ, wξ = delta_weights(gx, Hξ, hξ, 1e3s.x)
-            iψ, wψ = delta_weights(gy, Hψ, hψ, 1e3s.y)
+            iξ, wξ = delta_weights(gx, Hξ, hξ, 1e3x)
+            iψ, wψ = delta_weights(gy, Hψ, hψ, 1e3y)
             iη, wη = delta_weights(gη, sbp_weights(H.nz, hη), hη, η)
             for (a, i) in enumerate(iξ), (c, j) in enumerate(iψ), (d, k) in enumerate(iη)
                 push!(tab.b, b); push!(tab.i, i); push!(tab.j, j); push!(tab.k, k); push!(tab.n, n)
@@ -387,8 +388,9 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     moments = filter(s -> s isa MomentTensorSource, srcs)
     mine(t) = (q = findall(n -> ia <= t.i[n] <= ib && ja <= t.j[n] <= jb, eachindex(t.i));
                (b=t.b[q], i=t.i[q] .- ox, j=t.j[q] .- oy, k=t.k[q], c=t.c[q], n=t.n[q]))
-    ft = mine(source_table(forces, (H, i, j, k) -> 1.0))
-    mt = mine(source_table(moments, (H, i, j, k) -> 1 / H.J[i, j, k]))
+    fcoef, mcoef = (H, i, j, k) -> 1.0, (H, i, j, k) -> 1 / H.J[i, j, k]
+    tables(δ) = (mine(source_table(forces, fcoef, δ)), mine(source_table(moments, mcoef, δ)))
+    ft, mt = tables((0.0, 0.0, 0.0))
     FS = (; b=dev(ft.b), i=dev(ft.i), j=dev(ft.j), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n), F=dev(FT[s.F[c] for s in forces, c in 1:3]),
           s=dev(FT[moment_rate(stf, tbeg + (it - 1) * dt, s.t0, s.trise) for s in forces, it in 1:nt]))
     MS = (; b=dev(mt.b), i=dev(mt.i), j=dev(mt.j), k=dev(mt.k), c=dev(FT.(mt.c)), n=dev(mt.n), M=dev(FT[s.M0 * s.M[c] for s in moments, c in 1:6]),
@@ -458,7 +460,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     driver === nothing || return drive_curvilinear3(driver, (; backend, FT, blocks, hostblocks, nb, nx, ny, nzt, nlx, nly, nox, noy,
         hx, ox, oy, xr, yr, ia, ib, ja, jb, par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!,
         exchange_s!, FS, forces, Hξ, Hψ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, nsrc=length(srcs), st_all,
-        seismograms, ts, fq_ref, vc, loc=A -> A[xr, yr, :]))
+        seismograms, ts, fq_ref, vc, loc=A -> A[xr, yr, :], ftab=ft, mtab=mt, MS, moments, srcs, stf, tables))
     for it in 1:nt
         n = it - 1
         step!(it, true)
