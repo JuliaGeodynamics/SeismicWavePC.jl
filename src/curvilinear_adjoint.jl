@@ -126,8 +126,9 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     nst = length(sel)
     Rres = dev(FT.(adj[:, :, sel]))
     # 2. the adjoint fields, operator blocks and gradient accumulators
-    weights(H) = N == 2 ? [Hξ[i] * h for i in 1:nx, h in sbp_weights(H.nz, H.hη)] :
-                          [Hξ[i] * c.Hψ[j] * h for i in 1:nx, j in 1:ny, h in sbp_weights(H.nz, H.hη)]
+    # (host arrays: the columns of the window of this process, index - (ow, owy))
+    weights(H) = N == 2 ? [Hξ[i+c.ow] * h for i in axes(H.kmap, 1), h in sbp_weights(H.nz, H.hη)] :
+                          [Hξ[i+c.ow] * c.Hψ[j+c.owy] * h for i in axes(H.kmap, 1), j in axes(H.kmap, 2), h in sbp_weights(H.nz, H.hη)]
     Hw = [dev(FT.(loc(weights(H)))) for H in hostblocks]                                    # SBP norm per node
     HJ = [Hw[b] .* blocks[b].J for b in 1:nb]
     Adj = Tuple(NamedTuple{(vn..., sn...)}(ntuple(_ -> zero_(b), N + nS)) for b in 1:nb)
@@ -280,8 +281,8 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     end
     # 3. backward, segment by segment
     # forces at damped (boundary) nodes: the damping gradient needs v^{n+1/2} without the force (v new - its increment)
-    damped(m) = (H = hostblocks[c.ftab.b[m]]; I = N == 2 ? CartesianIndex(c.ftab.i[m] + ox, c.ftab.k[m]) :
-                                                         CartesianIndex(c.ftab.i[m] + ox, c.ftab.j[m] + oy, c.ftab.k[m]);
+    damped(m) = (H = hostblocks[c.ftab.b[m]]; I = N == 2 ? CartesianIndex(c.ftab.i[m] + ox - c.ow, c.ftab.k[m]) :
+                                                         CartesianIndex(c.ftab.i[m] + ox - c.ow, c.ftab.j[m] + oy - c.owy, c.ftab.k[m]);
                  any(k -> getfield(H, an[k])[I] != 0, 1:N))
     forcedamp = any(damped, eachindex(c.ftab.b))
     Finc = forcedamp ? Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb) : nothing
@@ -408,12 +409,13 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         g = map(x -> x isa Tuple ? map(A -> Float64.(Array(A)), x) : Float64.(Array(x)), Grad[b])     # (loop-local)
         hf = (; rho=H.ρ, vp=H.vp, vs=H.vs, ε=H.ε, δ=H.δ, γ=H.γ, taup=H.taup, taus=H.taus)
         own = N == 2 ? CartesianIndices((hx+1:hx+c.no, 1:H.nz)) : CartesianIndices((hx+1:hx+c.nox, hx+1:hx+c.noy, 1:H.nz))
-        off = N == 2 ? CartesianIndex(ox, 0) : CartesianIndex(ox, oy, 0)
+        off = N == 2 ? CartesianIndex(ox, 0) : CartesianIndex(ox, oy, 0)                     # local -> global
+        offw = N == 2 ? CartesianIndex(ox - c.ow, 0) : CartesianIndex(ox - c.ow, oy - c.owy, 0)   # local -> window
         Lh = L === nothing ? nothing : Float64.(Array(L[b]))
         r0 = H.kmap[CartesianIndex(ntuple(_ -> 1, N - 1)..., 2)] - 2           # the mesh row of the block's node k: r0 + k
         for Il in own
-            I = Il + off
-            node = N == 2 ? CartesianIndex(I[1], 1, H.kmap[I]) : CartesianIndex(I[1], I[2], H.kmap[I])
+            Ig, I = Il + off, Il + offw
+            node = N == 2 ? CartesianIndex(Ig[1], 1, H.kmap[I]) : CartesianIndex(Ig[1], Ig[2], H.kmap[I])
             gm = (g.wx[Il], g.wz[Il], g.s13[Il], g.mu[Il], g.m66[Il])
             # directions (ρ, vp, vs, ε, δ, γ, τp, τs) through the moduli; the damping (vp, vs, ε, γ); 1/(ρJ)
             dir(j) = (t = vti_tangent(hf, I, ntuple(q -> Float64(q == j), 8), ts, fq_ref); sum(gm[q] * t[q] for q in 1:5))
@@ -514,7 +516,7 @@ function born_curvilinear(d::BornDriver, c)
     f, δf = model.fields, d.δm.fields
     rho_unit = density_unit === :g_cm3 ? 1e3 : 1.0
     for (B, H) in zip(blocks, hostblocks)
-        node(I) = ndims(H.kmap) == 2 ? CartesianIndex(I[1], 1, H.kmap[I]) : CartesianIndex(I[1], I[2], H.kmap[I])
+        node(I) = ndims(H.kmap) == 2 ? CartesianIndex(I[1] + c.ow, 1, H.kmap[I]) : CartesianIndex(I[1] + c.ow, I[2] + c.owy, H.kmap[I])
         at(k, s, z) = haskey(δf, k) ? [s * Float64(δf[k][node(I)]) for I in CartesianIndices(H.kmap)] : fill(z, size(H.kmap))
         δρ, δvp, δvs = at(:rho, rho_unit, 0.0), at(:vp, 1e3, 0.0), at(:vs, 1e3, 0.0)
         δε, δδ, δγ = at(:epsilon, 1.0, 0.0), at(:delta, 1.0, 0.0), at(:gamma, 1.0, 0.0)

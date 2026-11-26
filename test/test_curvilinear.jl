@@ -410,4 +410,29 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
             @test maximum(abs, born(m, addfield(b, (; vs=0.1 .* o)); kw...)[2].v) > 0
         end
     end
+    @testset "DistributedModel (columns built per process), also from GMG" begin
+        topod(x) = 1.2 * exp(-x^2 / 12)
+        mohod(x) = -4.0 + 0.6 * sin(2π * x / 10)
+        mesh = curvilinear_mesh(range(-8, 8, length=49), [topod, mohod]; dz=0.33, bottom=-10)
+        X, Z = mesh.x.val, mesh.z.val
+        low = Z .< mohod.(X)
+        m = addfield(mesh, (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=100 .* one.(X), Qs=50 .* one.(X)))
+        kw = (; tmax=2.0, sources=[DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0)],
+              stations=[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -6:3:6], verbose=false, absorber=:pml, na=8)
+        dm = DistributedModel((ix, iy) -> merge(map(A -> A[ix, iy, :], m.fields), (; Z=Z[ix, iy, :])), X[:, 1, 1], [0.0], size(m)[3])
+        @test sprint(show, dm) == "DistributedModel of 49×1×$(size(m)[3]) nodes (curvilinear)"
+        r1, r2 = simulate(m; kw...), simulate(dm; kw..., wavefield=true)
+        @test r1.v == r2.v && r1.wavefield.fields.V[3] == r2.wavefield.fields.V[3]
+        if isdefined(GeophysicalModelGenerator, :curvilinear_grid)          # pieces from GMG (a fixed number of cells per layer)
+            xs = sbp_nodes(-8, 8, 49)
+            nz1 = count(<=(mohod(0.0) + 1e-9), Z[25, 1, :]) - 1                  # cells below the Moho
+            gmgdm = DistributedModel(xs, [0.0], size(m)[3]) do ix, iy
+                g = curvilinear_grid(xs[ix], 0, (topod, mohod, -10.0), (size(m)[3] - 1 - nz1, nz1); spacing=:sbp)
+                lw = g.z.val .< mohod.(g.x.val)
+                addfield(g, (; rho=ifelse.(lw, 2900.0, 2600.0), vp=ifelse.(lw, 6.5, 5.5), vs=ifelse.(lw, 3.75, 3.2), Qp=100 .* one.(lw), Qs=50 .* one.(lw)))
+            end
+            @test simulate(gmgdm; kw...).v ≈ r1.v rtol = 1e-10
+        end
+        @test_throws "have size" simulate(DistributedModel((ix, iy) -> (; Z=Z[ix, iy, 1:end-1], rho=m.fields.rho[ix, iy, 1:end-1]), X[:, 1, 1], [0.0], size(m)[3]); kw...)
+    end
 end

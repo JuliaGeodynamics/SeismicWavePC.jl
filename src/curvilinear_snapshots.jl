@@ -33,7 +33,8 @@ grid. `c`: the setup of the simulation (hostblocks, the node coordinates `gx`, `
 process and their offsets).
 """
 function setup_planes_cv(s::Snapshots, N, c)
-    (; hostblocks, nx, ny, gx, gy, Zm, ia, ib, ja, jb, ox, oy, dev, backend, FT, dir, me, parallel) = c
+    (; hostblocks, nx, ny, gx, gy, Zm, ia, ib, ja, jb, ox, oy, dev, backend, FT, dir, me, parallel, par, ow, owy) = c
+    # (host arrays: the columns of the window of this process, index - (ow, owy); the points of other processes: theirs)
     :ps in s.quantities && error("curvilinear grids: snapshot quantities :v and :u (not yet :ps)")
     N == 2 && (s.xy !== nothing || s.yz !== nothing || s.fs || s.ob) && error("2D snapshots: only xz")
     s.ob && error("curvilinear grids: no ocean bottom (solids only)")
@@ -42,13 +43,13 @@ function setup_planes_cv(s::Snapshots, N, c)
     # decimated nodes per axis, regular heights (from the top of the mesh down, with the mean row spacing)
     dec = s.decimate
     xi, yi = collect(1:dec[1]:nx), collect(1:dec[2]:ny)
-    ztop, zbot = maximum(Zm), minimum(Zm)
+    ztop, zbot = cv_max(par, maximum(Zm)), -cv_max(par, -minimum(Zm))
     dz = (ztop - zbot) / (size(Zm, ndims(Zm)) - 1) * dec[3]
     zl = collect(range(ztop, zbot; step=-dz))                                 # [m], z up
     "(block, k0, weights in η) of height z [m] in column (i, j) of the mesh, or nothing above / below it"
     function column(i, j, z)
         for (b, H) in enumerate(hostblocks)
-            col = N == 2 ? H.Z[i, :] : H.Z[i, j, :]
+            col = N == 2 ? H.Z[i-ow, :] : H.Z[i-ow, j-owy, :]
             (col[1] - 1e-6 <= z <= col[end] + 1e-6) || continue
             gη, _ = sbp_grid(0.0, 1.0, H.nz)
             zof(η) = let (q0, wq) = lagrange_weights(gη, η)
@@ -104,7 +105,8 @@ function setup_planes_cv(s::Snapshots, N, c)
         end
         pairs = vec([(a1, a2) for a1 in I1, a2 in I2])
         own = [n for (n, (a1, a2)) in enumerate(pairs) if mine(a1, a2)]
-        pts = [point(a1, a2) for (a1, a2) in pairs]
+        isown = falses(length(pairs)); isown[own] .= true
+        pts = [isown[n] ? point(a1, a2) : nothing for (n, (a1, a2)) in enumerate(pairs)]
         cols = [col(a1, a2) for (a1, a2) in pairs]
         m = max(length(own), 1)
         P = (; b=dev(Int32[pts[n] === nothing ? 0 : pts[n][1] for n in own]), i=dev(Int32[cols[n][1] - ox for n in own]),
@@ -112,12 +114,16 @@ function setup_planes_cv(s::Snapshots, N, c)
              w=dev(FT[pts[n] === nothing ? 0.0 : pts[n][3][q] for q in 1:6, n in own]))
         shape = (length(I1), length(I2))
         # the medium at the points (NaN above the topography)
-        med(f) = [p === nothing ? NaN : (H = hostblocks[p[1]]; A = getfield(H, f);
-                                          sum(p[3][q] * (N == 2 ? A[cc[1], p[2]+q-1] : A[cc[1], cc[2], p[2]+q-1]) for q in 1:6))
-                  for (p, cc) in zip(pts, cols)]
+        function med(f)                  # (of the points of this process; collected by rank 0 unless in pieces)
+            v = [!isown[n] ? 0.0 : p === nothing ? NaN : (H = hostblocks[p[1]]; A = getfield(H, f);
+                     sum(p[3][q] * (N == 2 ? A[cc[1]-ow, p[2]+q-1] : A[cc[1]-ow, cc[2]-owy, p[2]+q-1]) for q in 1:6))
+                 for (n, (p, cc)) in enumerate(zip(pts, cols))]
+            s.pieces || par === nothing || MPI.Allreduce!(v, +, par.comm)
+            return v
+        end
+        medium = (rho=med(:ρ), lambda=med(:lam), mu=med(:mu))
         files = Dict{Symbol,String}()
         if s.pieces ? !isempty(pairs) : me == 0
-            medium = (rho=med(:ρ), lambda=med(:lam), mu=med(:mu))
             ax = s.pieces ? (axes[1][1] => axes[1][2][indexin(I1, A1)], axes[2][1] => axes[2][2][indexin(I2, A2)]) : axes
             for q in s.quantities
                 vars, unit, _ = fields[q]

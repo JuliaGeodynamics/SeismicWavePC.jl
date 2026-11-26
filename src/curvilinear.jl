@@ -160,22 +160,50 @@ same two rows, the mesh decides (the shape of the vertical spacing changes at th
 if it does not, the interface is the upper row (GMG: a node exactly on a surface is not below it). Returns the rows, and
 for each whether each column's node has the material below the interface (true) or above it.
 """
-function find_blocks(Z, vp, vs; jump=0.05)
+function find_blocks(Z, vp, vs; jump=0.05, own=axes(vp, 1), red=nothing)
     rel(a, b) = abs(a - b) / max(abs(a), abs(b))
     nx, nz = size(vp)
     # a jump: larger than `jump` and than 3 times the changes between the neighbouring rows (not a steep gradient)
     ch(A, i, k) = 1 <= k <= nz - 1 ? rel(A[i, k], A[i, k+1]) : 0.0
     isjump(A, i, k) = ch(A, i, k) > jump && ch(A, i, k) > 3max(ch(A, i, k - 1), ch(A, i, k + 1))
     J = [isjump(vp, i, k) || isjump(vs, i, k) for i in 1:nx, k in 1:nz-1]
-    cand = [r for r in 2:nz-1 if all(i -> J[i, r-1] || J[i, r], 1:nx)]
-    shape(k) = (d = Z[:, k+1] .- Z[:, k]; d ./ sum(d))
-    kink(k) = 2 <= k <= nz - 1 ? maximum(abs, shape(k) .- shape(k - 1)) * nx : 0.0
+    # (with MPI: the decisions over the columns `own` of all processes, `red` reduces over them: and, sum, max, count)
+    and(v) = red === nothing ? v : red.and(v)
+    sm(x) = red === nothing ? x : red.sum(x)
+    mx(x) = red === nothing ? x : red.max(x)
+    ncols = red === nothing ? length(own) : red.sum(length(own))
+    allrows = and([all(i -> J[i, r-1] || J[i, r], own) for r in 2:nz-1])
+    cand = [r for (q, r) in enumerate(2:nz-1) if allrows[q]]
+    shape(k) = (d = Z[own, k+1] .- Z[own, k]; d ./ sm(sum(d)))
+    kink(k) = 2 <= k <= nz - 1 ? mx(maximum(abs, shape(k) .- shape(k - 1); init=0.0)) * ncols : 0.0
     rows = Int[]
     for r in cand
         (r in rows || r - 1 in rows) && continue
-        push!(rows, r + 1 in cand && all(i -> J[i, r], 1:nx) ? (kink(r) > 3kink(r + 1) ? r : r + 1) : r)
+        push!(rows, r + 1 in cand && and([all(i -> J[i, r], own)])[1] ? (kink(r) > 3kink(r + 1) ? r : r + 1) : r)
     end
     return rows, [[J[i, r] for i in 1:nx] for r in rows]
+end
+"The reductions over the processes of `find_blocks` (nothing: one process)."
+block_reducer(par) = par === nothing ? nothing : (; and=v -> MPI.Allreduce(Int.(v), min, par.comm) .== 1,
+                                                    sum=x -> MPI.Allreduce(x, +, par.comm), max=x -> MPI.Allreduce(x, max, par.comm))
+
+"""
+The columns `ix` (, `iy`) of a curvilinear model: heights [km] and the fields, as arrays (columns..., nz) (2D: (nx, nz)).
+`CartData`: cut out; [`DistributedModel`](@ref): built by its function.
+"""
+function model_columns(model::CartData, ix, iy, N)
+    cut(A) = N == 2 ? A[ix, 1, :] : A[ix, iy, :]
+    return cut(model.z.val), map(cut, model.fields)
+end
+function model_columns(model::DistributedModel, ix, iy, N)
+    b = model.f(ix, N == 2 ? (1:1) : iy)
+    fields = b isa CartData ? b.fields : b
+    Z = b isa CartData ? b.z.val : haskey(fields, :Z) ? fields.Z : error("DistributedModel: give the heights `Z` of the columns")
+    sz = (length(ix), N == 2 ? 1 : length(iy), model.nzc)
+    size(Z) == sz || error("DistributedModel: the columns ($ix, $iy) have size $(size(Z)), expected $sz")
+    cut(A) = (size(A) == sz || error("DistributedModel: a field of the columns ($ix, $iy) has size $(size(A)), expected $sz");
+              N == 2 ? Float64.(A[:, 1, :]) : Float64.(A))
+    return cut(Z), map(cut, fields)
 end
 
 # ------------------------------------------------------------------ kernels (one node (i, k) of a block)
@@ -456,6 +484,7 @@ end
 # ------------------------------------------------------------------ MPI: subdomains in x (and y in 3D); columns stay whole
 
 const CV_HALO = 4                       # the reach of the interior stencils
+const CV_WINDOW = 8                     # host columns beyond the nodes of a process (≥ CV_HALO + the stencil half-width)
 "The nodes of part `c` (1-based) of `p` of `n` nodes."
 part_range(n, p, c) = fld((c - 1) * n, p)+1:fld(c * n, p)
 
@@ -511,11 +540,11 @@ and the bottom, `:cerjan`: a sponge of `na` nodes, or `:none`: free sides and bo
 (relative jump of vp or vs that makes a grid row an interface, see `find_blocks`), `nproc` MPI processes along x (2D) or
 `(npx, npy)` (3D): start julia with `mpiexec`; the columns are not split.
 """
-function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=nothing, sources, stations=Station[], stf=:kupper,
+function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothing, nt=nothing, tmax=nothing, sources, stations=Station[], stf=:kupper,
                               tbeg=0.0, absorber=:impedance, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                               density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, snapshots=nothing, checkpoint=nothing, checkpoint_every=0,
                               restart=false, backend=CPU(),
-                              T::Type{FT}=Float32, verbose=true, wavefield=true, jump=0.05, wave=:psv, interpolation=:sinc,
+                              T::Type{FT}=Float32, verbose=true, wavefield=model isa CartData, jump=0.05, wave=:psv, interpolation=:sinc,
                               free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
     wave === :psv || error("curvilinear grids: P-SV only (wave = :psv)")
@@ -524,16 +553,19 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     all(s -> s isa Union{MomentTensorSource,ForceSource}, srcs) || error("curvilinear grids: MomentTensorSource and ForceSource only")
     wall = time()
     dev(A) = (B = KernelAbstractions.allocate(backend, eltype(A), size(A)); copyto!(B, A); B)
-    # the mesh (SI) and the material
-    X, Z = model.x.val, model.z.val
-    nx, nzt = size(X, 1), size(X, 3)
-    all(k -> view(X, :, 1, k) == view(X, :, 1, 1), 1:nzt) || error("curvilinear grid: the columns of the mesh must be vertical")
-    gξ = 1e3 .* X[:, 1, 1]
+    # the columns of the mesh (SBP nodes)
+    if model isa CartData
+        X = model.x.val
+        nx, nzt = size(X, 1), size(X, 3)
+        all(k -> view(X, :, 1, k) == view(X, :, 1, 1), 1:nzt) || error("curvilinear grid: the columns of the mesh must be vertical")
+        gξ = 1e3 .* X[:, 1, 1]
+    else
+        nx, nzt = length(model.x), model.nzc
+        gξ = 1e3 .* model.x
+    end
     gx, hξ = sbp_grid(gξ[1], gξ[end], nx)
     maximum(abs, gx .- gξ) < 1e-6 * (gξ[end] - gξ[1]) ||
         error("curvilinear grid: x must be the nodes of the SBP grid (make the mesh with curvilinear_mesh, or with GMG's curvilinear_grid(sbp_nodes(...), ...; spacing = :sbp))")
-    Zm = 1e3 .* Z[:, 1, :]
-    all(>(0), diff(Zm; dims=2)) || error("curvilinear grid: z must increase with the row index (and rows must not touch)")
     # MPI: this process holds the nodes ia:ib in x and CV_HALO halo nodes on either side (local = global - ox)
     par = cv_mpi(nproc, 1)
     me = par === nothing ? 0 : par.me
@@ -543,21 +575,27 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     ox = ia - hx - 1
     xr = clamp.(ia-hx:ib+hx, 1, nx)                   # the local nodes (beyond the domain ends: copies, not used)
     nl, no = length(xr), ib - ia + 1
-    f = model.fields
+    # the mesh and the material of the columns wa:wb (host arrays, index - ow): the nodes of this process and CV_WINDOW more
+    # on either side (the metric of the halo nodes, sources and stations near the subdomain)
+    wa, wb = max(1, ia - CV_WINDOW), min(nx, ib + CV_WINDOW)
+    ow, nw = wa - 1, wb - wa + 1
+    Zw, f = model_columns(model, wa:wb, 1:1, 2)
+    Zm = 1e3 .* Zw
+    all(>(0), diff(Zm; dims=2)) || error("curvilinear grid: z must increase with the row index (and rows must not touch)")
     haskey(f, :rho) && haskey(f, :vp) && haskey(f, :vs) || error("the model needs fields rho, vp and vs")
-    ρ = f.rho[:, 1, :] .* (density_unit === :g_cm3 ? 1e3 : 1.0)
-    vp, vs = 1e3 .* f.vp[:, 1, :], 1e3 .* f.vs[:, 1, :]
+    ρ = f.rho .* (density_unit === :g_cm3 ? 1e3 : 1.0)
+    vp, vs = 1e3 .* f.vp, 1e3 .* f.vs
     minimum(vs) > 0 || error("curvilinear grids: solids only (vs > 0 everywhere)")
-    qp = haskey(f, :Qp) ? Float64.(f.Qp[:, 1, :]) : fill(Inf, nx, nzt)
-    qs = haskey(f, :Qs) ? Float64.(f.Qs[:, 1, :]) : fill(Inf, nx, nzt)
-    attenuation = any(isfinite, qp) || any(isfinite, qs)
+    qp = haskey(f, :Qp) ? Float64.(f.Qp) : fill(Inf, nw, nzt)
+    qs = haskey(f, :Qs) ? Float64.(f.Qs) : fill(Inf, nw, nzt)
+    attenuation = model isa CartData ? any(k -> haskey(model.fields, k) && any(isfinite, model.fields[k]), (:Qp, :Qs)) : model.attenuation
     aniso = has_anisotropy(model)                               # VTI: Thomsen ε, δ, γ
-    thomsen(k) = haskey(f, k) ? Float64.(f[k][:, 1, :]) : zeros(nx, nzt)
+    thomsen(k) = haskey(f, k) ? Float64.(f[k]) : zeros(nw, nzt)
     ε, δ, γ = thomsen(:epsilon), thomsen(:delta), thomsen(:gamma)
     ts = relaxation_times(fq_min, fq_max)
     zeta = constq_zeta(fq_min, fq_max, ts)
     # blocks: split at the interfaces; at an interface row each block takes the material of its side
-    rows, below = find_blocks(Zm, vp, vs; jump)
+    rows, below = find_blocks(Zm, vp, vs; jump, own=ia-ow:ib-ow, red=block_reducer(par))
     edges = [1; rows; nzt]
     any(b -> edges[b+1] - edges[b] + 1 < SBP_NMIN, 1:length(edges)-1) &&
         error("curvilinear grid: every block (between interfaces) needs at least $SBP_NMIN rows; interfaces at rows $rows")
@@ -565,11 +603,11 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     hostblocks = map(1:length(edges)-1) do b
         r = edges[b]:edges[b+1]
         m = map(A -> copy(A[:, r]), (ρ, vp, vs, qp, qs, ε, δ, γ))
-        kmap = [r[k] for i in 1:nx, k in eachindex(r)]       # the model row of the material of each node (gradients)
+        kmap = [r[k] for i in 1:nw, k in eachindex(r)]       # the model row of the material of each node (gradients)
         for (j, side, src) in ((b - 1, false, 2), (b, true, length(r) - 1))
             1 <= j <= length(rows) || continue
             kk = side ? length(r) : 1
-            for i in 1:nx
+            for i in 1:nw
                 below[j][i] == side && continue
                 foreach(A -> A[i, kk] = A[i, src], m)
                 kmap[i, kk] = kmap[i, src]
@@ -579,8 +617,9 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         nz = length(r)
         _, hη = sbp_grid(0.0, 1.0, nz)
         Zb = Zm[:, r]
-        J = [dminus(j -> Zb[i, j], k, nz) / hη for i in 1:nx, k in 1:nz]
-        Jx = [-dminus(j -> Zb[j, k], i, nx) / hξ for i in 1:nx, k in 1:nz]
+        J = [dminus(j -> Zb[i, j], k, nz) / hη for i in 1:nw, k in 1:nz]
+        # (global stencils: at the outer nodes of the window wrong (clamped), not used)
+        Jx = [-dminus(j -> Zb[clamp(j - ow, 1, nw), k], i + ow, nx) / hξ for i in 1:nw, k in 1:nz]
         minimum(J) > 0 || error("curvilinear grid: the mesh folds in block $b")
         taup, taus = NM * zeta ./ bqp, NM * zeta ./ bqs
         mu = @. bρ * bvs^2 / visco_chi((ts,), taus, fq_ref)^2
@@ -590,11 +629,12 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         wx, wz, s13, mu55, mu66 = ntuple(q -> getindex.(V, q), 5)
         # impedance damping at the sides and (bottom block) the bottom: a = |J·| Z / (H ρ J) with the speeds of normal
         # incidence (VTI: horizontal qP vp √(1+2ε)), and its derivatives (vp, vs, ε, γ) per component (gradients)
-        a1, a2 = zeros(nx, nz), zeros(nx, nz)
-        da = ntuple(_ -> ntuple(_ -> zeros(nx, nz), 4), 2)
+        a1, a2 = zeros(nw, nz), zeros(nw, nz)
+        da = ntuple(_ -> ntuple(_ -> zeros(nw, nz), 4), 2)
         if absorber !== :none
-            for i in (1, nx)
-                h = 1 / Hξ[i]
+            for ig in (1, nx)
+                wa <= ig <= wb || continue
+                i, h = ig - ow, 1 / Hξ[ig]
                 @. a1[i, :] += bvp[i, :] * sqrt(1 + 2bε[i, :]) * h; @. a2[i, :] += bvs[i, :] * h
                 @. da[1][1][i, :] += sqrt(1 + 2bε[i, :]) * h; @. da[1][3][i, :] += bvp[i, :] / sqrt(1 + 2bε[i, :]) * h
                 da[2][2][i, :] .+= h
@@ -622,12 +662,12 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         nzp = bi == 1 ? na : 0
         player = pml ? (; pml=(; gx=dev(fill(ident, nx)), gz=dev(fill(ident, H.nz)), np=na, nxg=nx, xv1=zs(2na, H.nz), xv2=zs(2na, H.nz),
                                  xa=zs(2na, H.nz), xc=zs(2na, H.nz), zv1=zs(nl, nzp), zv2=zs(nl, nzp), zb=zs(nl, nzp), ze=zs(nl, nzp))) : (;)
-        loc(A) = dev(FT.(A[xr, :]))
+        loc(A) = dev(FT.(A[xr .- ow, :]))
         mem = attenuation ? (; R11=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz), R22=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz),
                                R12=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz)) : (;)
         vti = aniso ? (; wx=loc(H.wx), wz=loc(H.wz), s13=loc(H.s13)) : (;)
         r0 = H.kmap[1, 2] - 2                                       # (the mesh row of node k: r0 + k)
-        sponge = absorber === :cerjan ? (; gs=loc([cerjan_factor(i, nx, na) * cerjan_factor(r0 + k, typemax(Int), na) for i in 1:nx, k in 1:H.nz])) : (;)
+        sponge = absorber === :cerjan ? (; gs=loc([cerjan_factor(i + ow, nx, na) * cerjan_factor(r0 + k, typemax(Int), na) for i in 1:nw, k in 1:H.nz])) : (;)
         merge((; V1=z(), V2=z(), S11=z(), S22=z(), S12=z(), J=loc(H.J), Jx=loc(H.Jx), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam),
                mu=loc(aniso ? H.mu55 : H.mu), tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1),
                a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx), mem, vti, sponge, player)
@@ -702,14 +742,16 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         xs = (gx .- gx[1]) ./ 1e3
         copyto!.(getfield.(getfield.(blocks, :pml), :gx), Ref([FT.(damping_profile(x, xs[na+1], xs[end], na, dt, fcut)) for x in xs]))
         H1 = hostblocks[1]
-        zrow = [sum(H1.Z[:, k] .- H1.Z[:, 1]) / (nx * 1e3) for k in 1:H1.nz]
+        # (the heights of the rows of the first column: the same on every process, exactly)
+        zrow = cv_sum(par, ia == 1 ? (H1.Z[1, :] .- H1.Z[1, 1]) ./ 1e3 : zeros(H1.nz))
         copyto!(blocks[1].pml.gz, [FT.(damping_profile(z, zrow[na+1], 1e9, na, dt, fcut)) for z in zrow])
     end
     # locate points: block and η̂ (Lagrange interpolation of the mesh columns, bisection)
     function locate(x, z)
         i0, w = lagrange_weights(gx, x)
+        (wa <= i0 && i0 + 5 <= wb) || error("the point ($(x / 1e3), $(z / 1e3)) km is outside the columns of process $me")
         for (b, H) in enumerate(hostblocks)
-            col = [sum(w[a] * H.Z[i0+a-1, k] for a in 1:6) for k in 1:H.nz]
+            col = [sum(w[a] * H.Z[i0+a-1-ow, k] for a in 1:6) for k in 1:H.nz]
             (col[1] - 1e-9 <= z <= col[end] + 1e-9) || continue
             gη, _ = sbp_grid(0.0, 1.0, H.nz)
             zof(η) = let (j0, wj) = lagrange_weights(gη, η)
@@ -730,10 +772,11 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         tab = (b=Int[], i=Int[], k=Int[], c=Float64[], n=Int[])
         for (n, s) in enumerate(list)
             x, z = s.x + δ[1], s.z + δ[2]
+            iξ, wξ = delta_weights(gx, Hξ, hξ, 1e3x)
+            any(i -> ia <= i <= ib, iξ) || continue             # (no node of this process)
             b, η = locate(1e3x, 1e3z)
             H = hostblocks[b]
             gη, hη = sbp_grid(0.0, 1.0, H.nz)
-            iξ, wξ = delta_weights(gx, Hξ, hξ, 1e3x)
             iη, wη = delta_weights(gη, sbp_weights(H.nz, hη), hη, η)
             for (a, i) in enumerate(iξ), (c, k) in enumerate(iη)
                 push!(tab.b, b); push!(tab.i, i); push!(tab.k, k); push!(tab.c, wξ[a] * wη[c] * coef(H, i, k)); push!(tab.n, n)
@@ -745,7 +788,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     moments = filter(s -> s isa MomentTensorSource, srcs)
     # the nodes of this process, in local indices
     mine(t) = (q = findall(i -> ia <= i <= ib, t.i); (b=t.b[q], i=t.i[q] .- ox, k=t.k[q], c=t.c[q], n=t.n[q]))
-    fcoef, mcoef = (H, i, k) -> 1.0, (H, i, k) -> 1 / H.J[i, k]
+    fcoef, mcoef = (H, i, k) -> 1.0, (H, i, k) -> 1 / H.J[i-ow, k]
     tables(δ) = (mine(source_table(forces, fcoef, δ)), mine(source_table(moments, mcoef, δ)))
     ft, mt = tables((0.0, 0.0))
     FS = (; b=dev(ft.b), i=dev(ft.i), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n),
@@ -757,14 +800,16 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     # stations
     nst = length(stations)
     st = map(stations) do s
+        i0, wx = lagrange_weights(gx, 1e3s.x)
         if s.surface
             b = nb
             η = 1.0
-        else
+        elseif i0 + 5 >= ia && i0 <= ib                         # (other stations: not recorded on this process)
             b, η = locate(1e3s.x, 1e3s.z)
+        else
+            b, η = nb, 1.0
         end
         gη, _ = sbp_grid(0.0, 1.0, hostblocks[b].nz)
-        i0, wx = lagrange_weights(gx, 1e3s.x)
         k0, wz = lagrange_weights(gη, η)
         (b, i0, k0, wx, wz)
     end
@@ -784,20 +829,22 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         cols = [k == 1 ? (1:H.nz) : (2:H.nz) for (k, H) in enumerate(hostblocks)]
         v1 = reduce(hcat, [Array(owned(blocks[b].V1))[:, cols[b]] for b in 1:nb])
         v2 = reduce(hcat, [Array(owned(blocks[b].V2))[:, cols[b]] for b in 1:nb])
+        zz = Zw[ia-ow:ib-ow, :]
         if par !== nothing
-            parts = MPI.gather((ia, ib, v1, v2), par.comm; root=0)
+            parts = MPI.gather((ia, ib, v1, v2, zz), par.comm; root=0)
             me == 0 || return nothing
-            v1, v2 = zeros(nx, nzt), zeros(nx, nzt)
-            for (a, b, p1, p2) in parts
-                v1[a:b, :] .= p1; v2[a:b, :] .= p2
+            v1, v2, zz = zeros(nx, nzt), zeros(nx, nzt), zeros(nx, nzt)
+            for (a, b, p1, p2, pz) in parts
+                v1[a:b, :] .= p1; v2[a:b, :] .= p2; zz[a:b, :] .= pz
             end
         end
         r(A) = reshape(Float64.(A), nx, 1, nzt)
-        return CartData(model.x.val, model.y.val, model.z.val, (; V=(r(v1), zero(r(v1)), r(v2))))
+        Xg = [gx[i] / 1e3 for i in 1:nx, _ in 1:1, _ in 1:nzt]
+        return CartData(Xg, zero(Xg), r(zz), (; V=(r(v1), zero(r(v1)), r(v2))))
     end
     planes = snapshots === nothing ? nothing :
              setup_planes_cv(snapshots, 2, (; hostblocks, nx, ny=1, gx, gy=nothing, Zm, ia, ib, ja=1, jb=1, oy=0, ox, dev, backend, FT, dir=snapshot_dir,
-                                              me, parallel=par !== nothing))
+                                              me, parallel=par !== nothing, par, ow, owy=0))
     movie = (snapshot_every > 0 && callback === nothing && snapshots === nothing && me == 0) ?
             movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     verbose &= me == 0
@@ -836,7 +883,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     driver === nothing || return drive_curvilinear(driver, (; backend, FT, blocks, hostblocks, nb, nx, nzt, nl, no, hx, ox, xr, ia, ib,
         par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!, exchange_s!, owned, St, nst, FS, forces,
         Hξ, hξ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, vc, own_stations=own, sponge=absorber === :cerjan, nsrc=length(srcs), st_all,
-        seismograms, ts, fq_ref, loc=A -> A[xr, :], ftab=ft, mtab=mt, MS, moments, srcs, stf, tables))
+        seismograms, ts, fq_ref, loc=A -> A[xr .- ow, :], ftab=ft, mtab=mt, MS, moments, srcs, stf, tables, ow, owy=0))
     # checkpoints (one file per process): the wavefield and memory variables, the recording and the plane accumulators
     ckp = checkpoint === nothing ? nothing : par !== nothing ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")

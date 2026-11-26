@@ -164,6 +164,21 @@ then grows with its subdomain, not with the model. Moment tensor and force sourc
 stations, snapshots, checkpoints, GPUs and stretched grids work as usual; plane and teleseismic waves, sources between grid
 points, misfit gradients and Born modelling need a `CartData`. The wavefield at the end is not collected (`wavefield = true` does).
 
+A curvilinear model is built per process in the same way, column by column: `DistributedModel(f, x, y, nz)` with the SBP
+nodes `x`, `y` of the columns and `nz` nodes per column; `f(ix, iy)` returns the deformed grid of these columns with its
+material, for example from GMG with a fixed number of cells per layer (so that all pieces have the same rows):
+
+```julia
+xs, ys = sbp_nodes(-100, 100, 2001), sbp_nodes(-80, 80, 1601)
+model = DistributedModel(xs, ys, 1 + 60 + 140) do ix, iy
+    g = curvilinear_grid(xs[ix], ys[iy], (topo, moho, -60.0), (60, 140); spacing=:sbp)
+    low = g.z.val .< moho.(g.x.val, g.y.val)
+    addfield(g, (; rho=ifelse.(low, 3300.0, 2700.0), vp=ifelse.(low, 8.0, 6.0), vs=ifelse.(low, 4.5, 3.5)))
+end
+result = simulate(model; nproc=(4, 4), tmax, sources, stations, absorber=:pml)
+```
+Every process then holds the mesh and the material of its own columns only (and a few more around them).
+
 ## Geographic coordinates
 
 Models built from geographic data with a GMG `ProjectionPoint` keep their projection: sources and stations can be given in

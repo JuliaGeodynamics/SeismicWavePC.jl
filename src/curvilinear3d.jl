@@ -255,11 +255,11 @@ end
 3D on a deformed (terrain-following) `CartData` (vertical columns; see [`curvilinear_mesh`](@ref)); called by `simulate`.
 Keywords as [`SeismicWavePC.simulate_curvilinear`](@ref).
 """
-function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=nothing, sources, stations=Station[], stf=:kupper,
+function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=nothing, nt=nothing, tmax=nothing, sources, stations=Station[], stf=:kupper,
                                 tbeg=0.0, absorber=:impedance, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                                 density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, snapshots=nothing, checkpoint=nothing, checkpoint_every=0,
                               restart=false, backend=CPU(),
-                                T::Type{FT}=Float32, verbose=true, wavefield=true, jump=0.05, wave=:psv, interpolation=:sinc,
+                                T::Type{FT}=Float32, verbose=true, wavefield=model isa CartData, jump=0.05, wave=:psv, interpolation=:sinc,
                                 free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
     absorber in (:impedance, :pml, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :pml, :cerjan (with a sponge) or :none")
@@ -267,19 +267,22 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     all(s -> s isa Union{MomentTensorSource,ForceSource}, srcs) || error("curvilinear grids: MomentTensorSource and ForceSource only")
     wall = time()
     dev(A) = (B = KernelAbstractions.allocate(backend, eltype(A), size(A)); copyto!(B, A); B)
-    X, Y, Z = model.x.val, model.y.val, model.z.val
-    nx, ny, nzt = size(X)
-    all(k -> view(X, :, :, k) == view(X, :, :, 1), 1:nzt) && all(k -> view(Y, :, :, k) == view(Y, :, :, 1), 1:nzt) ||
-        error("curvilinear grid: the columns of the mesh must be vertical")
-    all(j -> view(X, :, j, 1) == view(X, :, 1, 1), 1:ny) && all(i -> view(Y, i, :, 1) == view(Y, 1, :, 1), 1:nx) ||
-        error("curvilinear grid: x must not depend on y and y not on x")
-    gξ, gψ = 1e3 .* X[:, 1, 1], 1e3 .* Y[1, :, 1]
+    if model isa CartData
+        X, Y = model.x.val, model.y.val
+        nx, ny, nzt = size(X)
+        all(k -> view(X, :, :, k) == view(X, :, :, 1), 1:nzt) && all(k -> view(Y, :, :, k) == view(Y, :, :, 1), 1:nzt) ||
+            error("curvilinear grid: the columns of the mesh must be vertical")
+        all(j -> view(X, :, j, 1) == view(X, :, 1, 1), 1:ny) && all(i -> view(Y, i, :, 1) == view(Y, 1, :, 1), 1:nx) ||
+            error("curvilinear grid: x must not depend on y and y not on x")
+        gξ, gψ = 1e3 .* X[:, 1, 1], 1e3 .* Y[1, :, 1]
+    else
+        nx, ny, nzt = length(model.x), length(model.y), model.nzc
+        gξ, gψ = 1e3 .* model.x, 1e3 .* model.y
+    end
     gx, hξ = sbp_grid(gξ[1], gξ[end], nx)
     gy, hψ = sbp_grid(gψ[1], gψ[end], ny)
     (maximum(abs, gx .- gξ) < 1e-6 * (gξ[end] - gξ[1]) && maximum(abs, gy .- gψ) < 1e-6 * (gψ[end] - gψ[1])) ||
         error("curvilinear grid: x and y must be the nodes of the SBP grid (make the mesh with curvilinear_mesh, or with GMG's curvilinear_grid(sbp_nodes(...), sbp_nodes(...), ...; spacing = :sbp))")
-    Zm = 1e3 .* Z
-    all(>(0), diff(Zm; dims=3)) || error("curvilinear grid: z must increase with the row index (and rows must not touch)")
     # MPI: this process holds the nodes ia:ib in x, ja:jb in y, and CV_HALO halo nodes around them (local = global - offset)
     par = cv_mpi(nproc, 2)
     me = par === nothing ? 0 : par.me
@@ -290,22 +293,29 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     ox, oy = ia - hx - 1, ja - hx - 1
     xr, yr = clamp.(ia-hx:ib+hx, 1, nx), clamp.(ja-hx:jb+hx, 1, ny)
     nlx, nly, nox, noy = length(xr), length(yr), ib - ia + 1, jb - ja + 1
-    f = model.fields
+    # the mesh and the material of the columns wa:wb × va:vb (host arrays, index - (ow, owy)): the nodes of this process and
+    # CV_WINDOW more around them
+    wa, wb, va, vb = max(1, ia - CV_WINDOW), min(nx, ib + CV_WINDOW), max(1, ja - CV_WINDOW), min(ny, jb + CV_WINDOW)
+    ow, owy, nwx, nwy = wa - 1, va - 1, wb - wa + 1, vb - va + 1
+    Zw, f = model_columns(model, wa:wb, va:vb, 3)
+    Zm = 1e3 .* Zw
+    all(>(0), diff(Zm; dims=3)) || error("curvilinear grid: z must increase with the row index (and rows must not touch)")
     haskey(f, :rho) && haskey(f, :vp) && haskey(f, :vs) || error("the model needs fields rho, vp and vs")
     ρ = f.rho .* (density_unit === :g_cm3 ? 1e3 : 1.0)
     vp, vs = 1e3 .* f.vp, 1e3 .* f.vs
     minimum(vs) > 0 || error("curvilinear grids: solids only (vs > 0 everywhere)")
-    qp = haskey(f, :Qp) ? Float64.(f.Qp) : fill(Inf, size(X))
-    qs = haskey(f, :Qs) ? Float64.(f.Qs) : fill(Inf, size(X))
-    attenuation = any(isfinite, qp) || any(isfinite, qs)
+    qp = haskey(f, :Qp) ? Float64.(f.Qp) : fill(Inf, size(Zw))
+    qs = haskey(f, :Qs) ? Float64.(f.Qs) : fill(Inf, size(Zw))
+    attenuation = model isa CartData ? any(k -> haskey(model.fields, k) && any(isfinite, model.fields[k]), (:Qp, :Qs)) : model.attenuation
     aniso = has_anisotropy(model)                               # VTI: Thomsen ε, δ, γ
-    thomsen(k) = haskey(f, k) ? Float64.(f[k]) : zeros(size(X))
+    thomsen(k) = haskey(f, k) ? Float64.(f[k]) : zeros(size(Zw))
     ε, δ, γ = thomsen(:epsilon), thomsen(:delta), thomsen(:gamma)
     ts = relaxation_times(fq_min, fq_max)
     zeta = constq_zeta(fq_min, fq_max, ts)
-    # blocks: from the columns (flattened)
-    flat(A) = reshape(A, nx * ny, nzt)
-    rows, below = find_blocks(flat(Zm), flat(vp), flat(vs); jump)
+    # blocks: from the columns (flattened; the decisions over the owned columns of all processes)
+    flat(A) = reshape(A, nwx * nwy, nzt)
+    ownc = vec([i + (j - 1) * nwx for i in ia-ow:ib-ow, j in ja-owy:jb-owy])
+    rows, below = find_blocks(flat(Zm), flat(vp), flat(vs); jump, own=ownc, red=block_reducer(par))
     edges = [1; rows; nzt]
     any(b -> edges[b+1] - edges[b] + 1 < SBP_NMIN, 1:length(edges)-1) &&
         error("curvilinear grid: every block (between interfaces) needs at least $SBP_NMIN rows; interfaces at rows $rows")
@@ -313,13 +323,13 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     hostblocks = map(1:length(edges)-1) do b
         r = edges[b]:edges[b+1]
         m = map(A -> copy(A[:, :, r]), (ρ, vp, vs, qp, qs, ε, δ, γ))
-        kmap = [r[k] for i in 1:nx, j in 1:ny, k in eachindex(r)]       # the model row of the material of each node
+        kmap = [r[k] for i in 1:nwx, j in 1:nwy, k in eachindex(r)]       # the model row of the material of each node
         for (q, side, src) in ((b - 1, false, 2), (b, true, length(r) - 1))
             1 <= q <= length(rows) || continue
             kk = side ? length(r) : 1
-            for c in 1:nx*ny
+            for c in 1:nwx*nwy
                 below[q][c] == side && continue
-                i, j = mod1(c, nx), fld1(c, nx)
+                i, j = mod1(c, nwx), fld1(c, nwx)
                 foreach(A -> A[i, j, kk] = A[i, j, src], m)
                 kmap[i, j, kk] = kmap[i, j, src]
             end
@@ -328,19 +338,20 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         nz = length(r)
         _, hη = sbp_grid(0.0, 1.0, nz)
         Zb = Zm[:, :, r]
-        J = [dminus(q -> Zb[i, j, q], k, nz) / hη for i in 1:nx, j in 1:ny, k in 1:nz]
-        Jx = [-dminus(q -> Zb[q, j, k], i, nx) / hξ for i in 1:nx, j in 1:ny, k in 1:nz]
-        Jy = [-dminus(q -> Zb[i, q, k], j, ny) / hψ for i in 1:nx, j in 1:ny, k in 1:nz]
+        J = [dminus(q -> Zb[i, j, q], k, nz) / hη for i in 1:nwx, j in 1:nwy, k in 1:nz]
+        # (global stencils: at the outer nodes of the window wrong (clamped), not used)
+        Jx = [-dminus(q -> Zb[clamp(q - ow, 1, nwx), j, k], i + ow, nx) / hξ for i in 1:nwx, j in 1:nwy, k in 1:nz]
+        Jy = [-dminus(q -> Zb[i, clamp(q - owy, 1, nwy), k], j + owy, ny) / hψ for i in 1:nwx, j in 1:nwy, k in 1:nz]
         minimum(J) > 0 || error("curvilinear grid: the mesh folds in block $b")
         taup, taus = NM * zeta ./ bqp, NM * zeta ./ bqs
         mu = @. bρ * bvs^2 / visco_chi((ts,), taus, fq_ref)^2
         lam = @. bρ * bvp^2 / visco_chi((ts,), taup, fq_ref)^2 - 2mu
         V = vti_moduli.(bρ, bvp, bvs, bε, bδ, bγ, visco_chi.((ts,), taup, fq_ref), visco_chi.((ts,), taus, fq_ref))
         wx, wz, s13, mu55, mu66 = ntuple(q -> getindex.(V, q), 5)
-        a1, a2, a3 = zeros(nx, ny, nz), zeros(nx, ny, nz), zeros(nx, ny, nz)
+        a1, a2, a3 = zeros(nwx, nwy, nz), zeros(nwx, nwy, nz), zeros(nwx, nwy, nz)
         # a = |J·| Z / (H ρ J) with the speeds of normal incidence: normal qP (sides: vp √(1+2ε)), tangential S (σxy: C66,
         # vs √(1+2γ)); and the derivatives (gradients): da[c] = (∂vp, ∂vs, ∂ε, ∂γ) of a_c
-        da = ntuple(_ -> ntuple(_ -> zeros(nx, ny, nz), 4), 3)
+        da = ntuple(_ -> ntuple(_ -> zeros(nwx, nwy, nz), 4), 3)
         if absorber !== :none
             # add h × (speed) to a_c and its derivatives: kind :p (horizontal qP), :sh (C66), :s (vs), :pv (vertical qP)
             function add!(c, s, h, kind)
@@ -358,11 +369,13 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
                 end
             end
             for i in (1, nx)
-                s = (i:i, :, :)
+                wa <= i <= wb || continue
+                s = (i-ow:i-ow, :, :)
                 add!(1, s, 1 / Hξ[i], :p); add!(2, s, 1 / Hξ[i], :sh); add!(3, s, 1 / Hξ[i], :s)
             end
             for j in (1, ny)
-                s = (:, j:j, :)
+                va <= j <= vb || continue
+                s = (:, j-owy:j-owy, :)
                 add!(1, s, 1 / Hψ[j], :sh); add!(2, s, 1 / Hψ[j], :p); add!(3, s, 1 / Hψ[j], :s)
             end
             if b == 1
@@ -393,12 +406,12 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
                                  za2=zs(nlx, nly, nzp), za3=zs(nlx, nly, nzp))) : (;)
         z() = KernelAbstractions.zeros(backend, FT, nlx, nly, H.nz)
         R() = KernelAbstractions.zeros(backend, FT, NM, nlx, nly, H.nz)
-        loc(A) = dev(FT.(A[xr, yr, :]))
+        loc(A) = dev(FT.(A[xr .- ow, yr .- owy, :]))
         mem = attenuation ? (; R11=R(), R22=R(), R33=R(), R23=R(), R13=R(), R12=R()) : (;)
         vti = aniso ? (; wx=loc(H.wx), wz=loc(H.wz), s13=loc(H.s13), mu66=loc(H.mu66)) : (;)
         r0 = H.kmap[1, 1, 2] - 2                                    # (the mesh row of node k: r0 + k)
-        sponge = absorber === :cerjan ? (; gs=loc([cerjan_factor(i, nx, na) * cerjan_factor(j, ny, na) * cerjan_factor(r0 + k, typemax(Int), na)
-                                                   for i in 1:nx, j in 1:ny, k in 1:H.nz])) : (;)
+        sponge = absorber === :cerjan ? (; gs=loc([cerjan_factor(i + ow, nx, na) * cerjan_factor(j + owy, ny, na) * cerjan_factor(r0 + k, typemax(Int), na)
+                                                   for i in 1:nwx, j in 1:nwy, k in 1:H.nz])) : (;)
         merge((; V1=z(), V2=z(), V3=z(), S11=z(), S22=z(), S33=z(), S23=z(), S13=z(), S12=z(), G1=z(), G2=z(), G3=z(), J=loc(H.J),
                Jx=loc(H.Jx), Jy=loc(H.Jy), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam), mu=loc(aniso ? H.mu55 : H.mu),
                tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1), a2=loc(H.a2),
@@ -473,15 +486,18 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         copyto!.(getfield.(getfield.(blocks, :pml), :gx), Ref(prof(gx)))
         copyto!.(getfield.(getfield.(blocks, :pml), :gy), Ref(prof(gy)))
         H1 = hostblocks[1]
-        zrow = [sum(H1.Z[:, :, k] .- H1.Z[:, :, 1]) / (nx * ny * 1e3) for k in 1:H1.nz]
+        # (the heights of the rows of the first column: the same on every process, exactly)
+        zrow = cv_sum(par, ia == 1 && ja == 1 ? (H1.Z[1, 1, :] .- H1.Z[1, 1, 1]) ./ 1e3 : zeros(H1.nz))
         copyto!(blocks[1].pml.gz, [FT.(damping_profile(z, zrow[na+1], 1e9, na, dt, fcut)) for z in zrow])
     end
     # locate points: block and η̂ (Lagrange interpolation of the columns, bisection)
     function locate(x, y, z)
         i0, wx = lagrange_weights(gx, x)
         j0, wy = lagrange_weights(gy, y)
+        (wa <= i0 && i0 + 5 <= wb && va <= j0 && j0 + 5 <= vb) ||
+            error("the point ($(x / 1e3), $(y / 1e3), $(z / 1e3)) km is outside the columns of process $me")
         for (b, H) in enumerate(hostblocks)
-            col = [sum(wx[a] * wy[c] * H.Z[i0+a-1, j0+c-1, k] for a in 1:6, c in 1:6) for k in 1:H.nz]
+            col = [sum(wx[a] * wy[c] * H.Z[i0+a-1-ow, j0+c-1-owy, k] for a in 1:6, c in 1:6) for k in 1:H.nz]
             (col[1] - 1e-9 <= z <= col[end] + 1e-9) || continue
             gη, _ = sbp_grid(0.0, 1.0, H.nz)
             zof(η) = let (q0, wq) = lagrange_weights(gη, η)
@@ -500,11 +516,12 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         tab = (b=Int[], i=Int[], j=Int[], k=Int[], c=Float64[], n=Int[])
         for (n, s) in enumerate(list)
             x, y, z = s.x + δ[1], s.y + δ[2], s.z + δ[3]
+            iξ, wξ = delta_weights(gx, Hξ, hξ, 1e3x)
+            iψ, wψ = delta_weights(gy, Hψ, hψ, 1e3y)
+            (any(i -> ia <= i <= ib, iξ) && any(j -> ja <= j <= jb, iψ)) || continue     # (no node of this process)
             b, η = locate(1e3x, 1e3y, 1e3z)
             H = hostblocks[b]
             gη, hη = sbp_grid(0.0, 1.0, H.nz)
-            iξ, wξ = delta_weights(gx, Hξ, hξ, 1e3x)
-            iψ, wψ = delta_weights(gy, Hψ, hψ, 1e3y)
             iη, wη = delta_weights(gη, sbp_weights(H.nz, hη), hη, η)
             for (a, i) in enumerate(iξ), (c, j) in enumerate(iψ), (d, k) in enumerate(iη)
                 push!(tab.b, b); push!(tab.i, i); push!(tab.j, j); push!(tab.k, k); push!(tab.n, n)
@@ -517,7 +534,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     moments = filter(s -> s isa MomentTensorSource, srcs)
     mine(t) = (q = findall(n -> ia <= t.i[n] <= ib && ja <= t.j[n] <= jb, eachindex(t.i));
                (b=t.b[q], i=t.i[q] .- ox, j=t.j[q] .- oy, k=t.k[q], c=t.c[q], n=t.n[q]))
-    fcoef, mcoef = (H, i, j, k) -> 1.0, (H, i, j, k) -> 1 / H.J[i, j, k]
+    fcoef, mcoef = (H, i, j, k) -> 1.0, (H, i, j, k) -> 1 / H.J[i-ow, j-owy, k]
     tables(δ) = (mine(source_table(forces, fcoef, δ)), mine(source_table(moments, mcoef, δ)))
     ft, mt = tables((0.0, 0.0, 0.0))
     FS = (; b=dev(ft.b), i=dev(ft.i), j=dev(ft.j), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n), F=dev(FT[s.F[c] for s in forces, c in 1:3]),
@@ -526,10 +543,11 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
           s=dev(FT[moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt for s in moments, it in 1:nt]))
     nst = length(stations)
     st = map(stations) do s
-        b, η = s.surface ? (nb, 1.0) : locate(1e3s.x, 1e3s.y, 1e3s.z)
-        gη, _ = sbp_grid(0.0, 1.0, hostblocks[b].nz)
         i0, wx = lagrange_weights(gx, 1e3s.x)
         j0, wy = lagrange_weights(gy, 1e3s.y)
+        near = i0 + 5 >= ia && i0 <= ib && j0 + 5 >= ja && j0 <= jb          # (other stations: not recorded on this process)
+        b, η = s.surface || !near ? (nb, 1.0) : locate(1e3s.x, 1e3s.y, 1e3s.z)
+        gη, _ = sbp_grid(0.0, 1.0, hostblocks[b].nz)
         k0, wz = lagrange_weights(gη, η)
         (b, i0, j0, k0, wx, wy, wz)
     end
@@ -547,19 +565,22 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         keep(b) = b == 1 ? (1:hostblocks[b].nz) : (2:hostblocks[b].nz)
         r(c) = Float64.(cat((Array(owned(getfield(blocks[b], c)))[:, :, keep(b)] for b in 1:nb)...; dims=3))
         V = (r(:V1), r(:V2), r(:V3))
+        zz = Zw[ia-ow:ib-ow, ja-owy:jb-owy, :]
         if par !== nothing
-            parts = MPI.gather((ia, ib, ja, jb, V), par.comm; root=0)
+            parts = MPI.gather((ia, ib, ja, jb, V, zz), par.comm; root=0)
             me == 0 || return nothing
-            V = ntuple(_ -> zeros(nx, ny, nzt), 3)
-            for (a, b, c, d, p) in parts, q in 1:3
-                V[q][a:b, c:d, :] .= p[q]
+            V, zz = ntuple(_ -> zeros(nx, ny, nzt), 3), zeros(nx, ny, nzt)
+            for (a, b, c, d, p, pz) in parts
+                foreach(q -> V[q][a:b, c:d, :] .= p[q], 1:3)
+                zz[a:b, c:d, :] .= pz
             end
         end
-        return CartData(model.x.val, model.y.val, model.z.val, (; V))
+        Xg, Yg = [gx[i] / 1e3 for i in 1:nx, _ in 1:ny, _ in 1:nzt], [gy[j] / 1e3 for _ in 1:nx, j in 1:ny, _ in 1:nzt]
+        return CartData(Xg, Yg, zz, (; V))
     end
     planes = snapshots === nothing ? nothing :
              setup_planes_cv(snapshots, 3, (; hostblocks, nx, ny=ny, gx, gy=gy, Zm, ia, ib, ja=ja, jb, oy, ox, dev, backend, FT, dir=snapshot_dir,
-                                              me, parallel=par !== nothing))
+                                              me, parallel=par !== nothing, par, ow, owy))
     movie = (snapshot_every > 0 && callback === nothing && snapshots === nothing && me == 0) ?
             movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     verbose &= me == 0
@@ -595,7 +616,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     driver === nothing || return drive_curvilinear3(driver, (; backend, FT, blocks, hostblocks, nb, nx, ny, nzt, nlx, nly, nox, noy,
         hx, ox, oy, xr, yr, ia, ib, ja, jb, par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!,
         exchange_s!, FS, forces, Hξ, Hψ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, nsrc=length(srcs), st_all, sponge=absorber === :cerjan,
-        seismograms, ts, fq_ref, vc, loc=A -> A[xr, yr, :], ftab=ft, mtab=mt, MS, moments, srcs, stf, tables))
+        seismograms, ts, fq_ref, vc, loc=A -> A[xr .- ow, yr .- owy, :], ftab=ft, mtab=mt, MS, moments, srcs, stf, tables, ow, owy))
     # checkpoints (one file per process): the wavefield and memory variables, the recording and the plane accumulators
     ckp = checkpoint === nothing ? nothing : par !== nothing ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")

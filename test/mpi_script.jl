@@ -206,6 +206,13 @@ if runs("curvilinear")
     eV = rank == 0 ? maximum(i -> maximum(abs, s1.wavefield.fields.V[i] .- s2.wavefield.fields.V[i]), 1:3) / maximum(abs, s1.wavefield.fields.V[3]) : 0.0
     rank == 0 && println("MPI curvilinear 2D nproc=4: seismograms $e, wavefield $eV")
     (e < 1e-10 && eV < 1e-10) || error("MPI curvilinear 2D result differs on rank $rank")
+    # the same model built per process (DistributedModel: the columns of each process), with a PML
+    pieces(m) = (ix, iy) -> merge(map(A -> A[ix, iy, :], m.fields), (; Z=m.z.val[ix, iy, :]))
+    dmodel(m) = DistributedModel(pieces(m), m.x.val[:, 1, 1], m.y.val[1, :, 1], size(m)[3])
+    s1, s2 = simulate(m; kw..., absorber=:pml, na=10, nproc=4), simulate(dmodel(m); kw..., absorber=:pml, na=10, nproc=4)
+    e = maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v)
+    rank == 0 && println("MPI curvilinear 2D DistributedModel nproc=4: seismograms $e")
+    e == 0 || error("MPI curvilinear 2D DistributedModel differs on rank $rank")
     # 3D
     topo3(x, y) = 1.0 * exp(-(x^2 + y^2) / 18)
     moho3(x, y) = -5.0 + 0.6 * sin(2π * x / 16) * cos(2π * y / 20)
@@ -224,6 +231,10 @@ if runs("curvilinear")
     eV = rank == 0 ? maximum(i -> maximum(abs, s1.wavefield.fields.V[i] .- s2.wavefield.fields.V[i]), 1:3) / maximum(abs, s1.wavefield.fields.V[3]) : 0.0
     rank == 0 && println("MPI curvilinear 3D nproc=(2, 2): seismograms $e, wavefield $eV")
     (e < 1e-10 && eV < 1e-10) || error("MPI curvilinear 3D result differs on rank $rank")
+    s1, s2 = simulate(m; kw..., absorber=:pml, na=8, nproc=(2, 2)), simulate(dmodel(m); kw..., absorber=:pml, na=8, nproc=(2, 2))
+    e = maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v)
+    rank == 0 && println("MPI curvilinear 3D DistributedModel nproc=(2, 2): seismograms $e")
+    e == 0 || error("MPI curvilinear 3D DistributedModel differs on rank $rank")
     # snapshot planes (netCDF): collected by rank 0 and in pieces, against the serial files
     using NCDatasets
     snapdirs = MPI.bcast(rank == 0 ? (mktempdir(), mktempdir(), mktempdir()) : nothing, 0, MPI.COMM_WORLD)

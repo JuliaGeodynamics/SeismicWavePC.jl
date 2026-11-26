@@ -71,6 +71,14 @@ result = simulate(model; nproc=(2, 2), dt, nt, sources, stations)
 Sources are `MomentTensorSource`s and `ForceSource`s at their cells (`interpolation = :cell`); plane and teleseismic waves,
 `interpolation = :sinc`, [`misfit_gradient`](@ref) and [`born`](@ref) need a `CartData`. The wavefield at the end is not
 collected, unless `simulate` is called with `wavefield = true`.
+
+    DistributedModel(f, x, y, nz::Integer; attenuation=true, anisotropy=false)
+
+The same for a curvilinear grid (see [`curvilinear_mesh`](@ref)): `x`, `y` are the nodes [km] of the columns (the SBP nodes,
+e.g. `sbp_nodes(a, b, n)` of GMG), `nz` the number of nodes in every column, and `f(ix, iy)` returns the deformed
+`CartData` of the columns `x[ix]`, `y[iy]` (size `(length(ix), length(iy), nz)`, e.g. made with GMG's `curvilinear_grid`
+and a fixed number of cells per layer) with the fields `rho`, `vp`, `vs` (optionally `Qp`, `Qs`, `epsilon`, `delta`,
+`gamma`), or a `NamedTuple` with these and the heights `Z` [km]. Every process asks for its columns and a few more.
 """
 struct DistributedModel{F}
     f::F
@@ -79,14 +87,18 @@ struct DistributedModel{F}
     z::Vector{Float64}
     attenuation::Bool
     anisotropy::Bool
+    nzc::Int                            # nodes per column of a curvilinear model (0: a regular grid with the cells `z`)
 end
 DistributedModel(f, x, y, z; attenuation=true, anisotropy=false) =
-    DistributedModel(f, vec(collect(Float64, x)), vec(collect(Float64, y)), vec(collect(Float64, z)), attenuation, anisotropy)
-Base.size(m::DistributedModel) = (length(m.x), length(m.y), length(m.z))
+    DistributedModel(f, vec(collect(Float64, x)), vec(collect(Float64, y)), vec(collect(Float64, z)), attenuation, anisotropy, 0)
+DistributedModel(f, x, y, nz::Integer; attenuation=true, anisotropy=false) =
+    DistributedModel(f, vec(collect(Float64, x)), vec(collect(Float64, y)), Float64[], attenuation, anisotropy, Int(nz))
+is_curvilinear(m::DistributedModel) = m.nzc > 0
+Base.size(m::DistributedModel) = (length(m.x), length(m.y), is_curvilinear(m) ? m.nzc : length(m.z))
 model_axes(m::DistributedModel) = (; x=m.x, y=m.y, z=m.z)
 
 function Base.show(io::IO, m::DistributedModel)
-    print(io, "DistributedModel of ", join(size(m), "×"), " cells", m.attenuation ? "" : ", no attenuation", m.anisotropy ? ", VTI" : "")
+    print(io, "DistributedModel of ", join(size(m), "×"), is_curvilinear(m) ? " nodes (curvilinear)" : " cells", m.attenuation ? "" : ", no attenuation", m.anisotropy ? ", VTI" : "")
 end
 
 """
