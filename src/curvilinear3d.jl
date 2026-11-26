@@ -263,8 +263,13 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
                                 free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
     absorber in (:impedance, :pml, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :pml, :cerjan (with a sponge) or :none")
+    absorber === :pml && na < SBP_NB && error("curvilinear grids: the PML needs na >= $SBP_NB nodes (the boundary closures), got na = $na")
     srcs = sources isa AbstractVector ? sources : [sources]
-    all(s -> s isa Union{MomentTensorSource,ForceSource}, srcs) || error("curvilinear grids: MomentTensorSource and ForceSource only")
+    all(s -> s isa Union{MomentTensorSource,ForceSource,TeleseismicWave}, srcs) ||
+        error("curvilinear grids: MomentTensorSource, ForceSource and TeleseismicWave (PlaneWave: use TeleseismicWave)")
+    tws = filter(s -> s isa TeleseismicWave, srcs)
+    length(tws) <= 1 || error("curvilinear grids: one TeleseismicWave at a time")
+    allsrcs, srcs = srcs, filter(s -> !(s isa TeleseismicWave), srcs)  # (point sources)
     wall = time()
     dev(A) = (B = KernelAbstractions.allocate(backend, eltype(A), size(A)); copyto!(B, A); B)
     if model isa CartData
@@ -481,7 +486,7 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
     dtT = FT(dt)
     vc = attenuation ? memory_coefficients(ts, dt, FT) : nothing
     if pml                      # the profiles of the time step (as OpenSWPC: 6 km/s, fcut the highest source frequency)
-        fcut = maximum(s -> 1 / s.trise, srcs)
+        fcut = maximum(s -> 1 / s.trise, allsrcs)
         prof(g) = (xs = (g .- g[1]) ./ 1e3; [FT.(damping_profile(x, xs[na+1], xs[end], na, dt, fcut)) for x in xs])
         copyto!.(getfield.(getfield.(blocks, :pml), :gx), Ref(prof(gx)))
         copyto!.(getfield.(getfield.(blocks, :pml), :gy), Ref(prof(gy)))
@@ -530,6 +535,12 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
         end
         return tab
     end
+    # teleseismic wave: total-field / scattered-field corrections at the nodes near the box boundary
+    column(ig, jg) = (cz = model_columns(model, ig:ig, jg:jg, 3); (vec(1e3 .* cz[1]),
+                      [(Float64(cz[2].rho[1, 1, q]) * (density_unit === :g_cm3 ? 1e3 : 1.0), 1e3cz[2].vp[1, 1, q], 1e3cz[2].vs[1, 1, q]) for q in axes(cz[1], 3)]))
+    TW, ntw = isempty(tws) ? (nothing, 0) :
+              teleseismic_cv(tws[1], 3, false, (; hostblocks, gx, nx, ia, ib, ow, ox, gy, ny, ja, jb, owy, oy, dev, FT, dt, nt, tbeg, stf, aniso,
+                                                 blocks, na, pml, column, rows, loc=A -> A[xr .- ow, yr .- owy, :]))[1:2]
     forces = filter(s -> s isa ForceSource, srcs)
     moments = filter(s -> s isa MomentTensorSource, srcs)
     mine(t) = (q = findall(n -> ia <= t.i[n] <= ib && ja <= t.j[n] <= jb, eachindex(t.i));
@@ -594,12 +605,14 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
         itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
         itw > 0 && nst > 0 && foreach_item!(backend, vprev3_cv!, (prev, lite, St), nst)
         momentum!(dtT, true)
+        ntw > 0 && foreach_item!(backend, tf_momentum3!, (lite, TW, FT(tbeg + n * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> (B.V1 .*= B.gs; B.V2 .*= B.gs; B.V3 .*= B.gs), blocks)
         length(forces) > 0 && run_once!(backend, force3_cv!, (lite, FS, it, dtT))
         KernelAbstractions.synchronize(backend)
         exchange_v!()
         record && nst > 0 && foreach_item!(backend, record3_cv!, (rec, acc, prev, lite, St, itw, dtT), nst)
         stress!(vc, dtT)
+        ntw > 0 && foreach_item!(backend, tf_stress3!, (lite, TW, vc, FT(tbeg + (n + 0.5) * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(S -> S .*= B.gs, (B.S11, B.S22, B.S33, B.S23, B.S13, B.S12)), blocks)
         length(moments) > 0 && run_once!(backend, moment3_cv!, (lite, MS, it))
         KernelAbstractions.synchronize(backend)
@@ -616,8 +629,9 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
                                                   (:xx, :yy, :zz, :yz, :xz, :xy), wf)
     driver === nothing || return drive_curvilinear3(driver, (; backend, FT, blocks, hostblocks, nb, nx, ny, nzt, nlx, nly, nox, noy,
         hx, ox, oy, xr, yr, ia, ib, ja, jb, par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!,
-        exchange_s!, FS, forces, Hξ, Hψ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, nsrc=length(srcs), st_all, sponge=absorber === :cerjan,
-        seismograms, ts, fq_ref, vc, loc=A -> A[xr .- ow, yr .- owy, :], ftab=ft, mtab=mt, MS, moments, srcs, stf, tables, ow, owy))
+        exchange_s!, FS, forces, Hξ, Hψ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, nsrc=length(allsrcs), st_all, sponge=absorber === :cerjan,
+        seismograms, ts, fq_ref, vc, loc=A -> A[xr .- ow, yr .- owy, :], ftab=ft, mtab=mt, MS, moments, srcs=allsrcs, stf, tables, ow, owy,
+        TW, ntw, tfkind=Val(:p3d)))
     # checkpoints (one file per process): the wavefield and memory variables, the recording and the plane accumulators
     ckp = checkpoint === nothing ? nothing : par !== nothing ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")

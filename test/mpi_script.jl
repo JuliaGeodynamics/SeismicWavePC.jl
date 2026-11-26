@@ -197,7 +197,7 @@ if runs("curvilinear")
     sts = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -9:3:9]
     push!(sts, Station("d", 0.1, 0.0, -6.0))
     # the stable time step of the serial run, the same on all ranks (fixed for both runs)
-    stable_dt(m, srcs) = MPI.bcast((r = simulate(m; tmax=0.05, sources=srcs, T=Float64, verbose=false); r.t[2] - r.t[1]), MPI.COMM_WORLD; root=0)
+    stable_dt(m, srcs) = MPI.bcast((r = simulate(m; grid=:curvilinear, tmax=0.05, sources=srcs, T=Float64, verbose=false); r.t[2] - r.t[1]), MPI.COMM_WORLD; root=0)
     growing(v) = !all(isfinite, v) || maximum(abs, v[3end÷4:end, :, :]) > maximum(abs, v)
     kw = (; dt=stable_dt(m, srcs), tmax=6.0, sources=srcs, stations=sts, T=Float64, verbose=false)
     s1, s2 = simulate(m; kw...), simulate(m; kw..., nproc=4)
@@ -262,6 +262,22 @@ if runs("curvilinear")
         println("MPI curvilinear snapshots: $(length(readdir(snapdirs[1]))) files, collected and in $(length(readdir(snapdirs[3]))) pieces, identical to the serial run")
     end
     MPI.Barrier(MPI.COMM_WORLD)
+    # teleseismic wave (TF/SF box across the subdomains): seismograms and gradient
+    meshl = curvilinear_mesh(range(-14, 14, length=141), [x -> 0.0, x -> -3.0]; dz=0.2, bottom=-16)
+    Xl, Zl = meshl.x.val, meshl.z.val
+    lowl = Zl .< -3.0
+    bodyl = @. exp(-((Xl - 1)^2 + (Zl + 4)^2) / 1)
+    ml = addfield(meshl, (; rho=ifelse.(lowl, 2800.0, 2400.0), vp=ifelse.(lowl, 6.0, 4.0) .* (1 .- 0.05 .* bodyl), vs=ifelse.(lowl, 3.4, 2.3)))
+    wt = TeleseismicWave(:p; angle=20.0, box=(-6.0, 6.0, -9.0), backazimuth=270.0, t0=0.3, trise=1.0)
+    stsl = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -5:2:5]
+    kwt = (; grid=:curvilinear, dt=stable_dt(ml, [wt]), tmax=5.0, sources=wt, T=Float64, absorber=:pml, na=10)
+    s1, s2 = simulate(ml; kwt..., stations=stsl, verbose=false), simulate(ml; kwt..., stations=stsl, verbose=false, nproc=4)
+    obs = simulate(addfield(meshl, merge(ml.fields, (; vs=ml.fields.vs .* (1 .- 0.03 .* bodyl)))); kwt..., stations=stsl, verbose=false)
+    J1, g1, _ = misfit_gradient(ml, obs; kwt...)
+    J2, g2, _ = misfit_gradient(ml, obs; kwt..., nproc=4)
+    e = (maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v), abs(J1 / J2 - 1), maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs)))
+    rank == 0 && println("MPI curvilinear teleseismic nproc=4: seismograms, misfit, gradient $e")
+    all(<(1e-10), e) || error("MPI curvilinear teleseismic differs on rank $rank")
     # misfit gradient (2D, attenuation)
     mesh = curvilinear_mesh(range(-12, 12, length=97), [topo, moho]; dz=0.4, bottom=-15)
     X, Z = mesh.x.val, mesh.z.val

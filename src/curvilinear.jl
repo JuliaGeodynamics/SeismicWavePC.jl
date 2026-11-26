@@ -179,7 +179,9 @@ function find_blocks(Z, vp, vs; jump=0.05, own=axes(vp, 1), red=nothing)
     rows = Int[]
     for r in cand
         (r in rows || r - 1 in rows) && continue
-        push!(rows, r + 1 in cand && and([all(i -> J[i, r], own)])[1] ? (kink(r) > 3kink(r + 1) ? r : r + 1) : r)
+        both = r + 1 in cand && and([all(i -> J[i, r], own)])[1]          # (the jump is between rows r and r + 1 everywhere)
+        # (kinks at the level of rounding, e.g. of a flat mesh, are none: then the upper row, as GMG)
+        push!(rows, !both ? r : kink(r) > 1e-9 && kink(r) > 3kink(r + 1) ? r : r + 1)
     end
     return rows, [[J[i, r] for i in 1:nx] for r in rows]
 end
@@ -672,8 +674,13 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     wave in (:psv, :sh) || error("curvilinear grids: wave = :psv or :sh")
     sh = wave === :sh                                         # SH: vy (V1), σxy (S1), σyz (S2)
     absorber in (:impedance, :pml, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :pml, :cerjan (with a sponge) or :none")
+    absorber === :pml && na < SBP_NB && error("curvilinear grids: the PML needs na >= $SBP_NB nodes (the boundary closures), got na = $na")
     srcs = sources isa AbstractVector ? sources : [sources]
-    all(s -> s isa Union{MomentTensorSource,ForceSource}, srcs) || error("curvilinear grids: MomentTensorSource and ForceSource only")
+    all(s -> s isa Union{MomentTensorSource,ForceSource,TeleseismicWave}, srcs) ||
+        error("curvilinear grids: MomentTensorSource, ForceSource and TeleseismicWave (PlaneWave: use TeleseismicWave)")
+    tws = filter(s -> s isa TeleseismicWave, srcs)
+    length(tws) <= 1 || error("curvilinear grids: one TeleseismicWave at a time")
+    allsrcs, srcs = srcs, filter(s -> !(s isa TeleseismicWave), srcs)  # (point sources)
     wall = time()
     dev(A) = (B = KernelAbstractions.allocate(backend, eltype(A), size(A)); copyto!(B, A); B)
     # the columns of the mesh (SBP nodes)
@@ -882,7 +889,7 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     dtT = FT(dt)
     vc = attenuation ? memory_coefficients(ts, dt, FT) : nothing
     if pml                      # the profiles of the time step (as OpenSWPC: 6 km/s, fcut the highest source frequency)
-        fcut = maximum(s -> 1 / s.trise, srcs)
+        fcut = maximum(s -> 1 / s.trise, allsrcs)
         xs = (gx .- gx[1]) ./ 1e3
         copyto!.(getfield.(getfield.(blocks, :pml), :gx), Ref([FT.(damping_profile(x, xs[na+1], xs[end], na, dt, fcut)) for x in xs]))
         H1 = hostblocks[1]
@@ -928,6 +935,12 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
         end
         return tab
     end
+    # teleseismic wave: total-field / scattered-field corrections at the nodes near the box boundary
+    column(ig, jg) = (cz = model_columns(model, ig:ig, 1:1, 2); (vec(1e3 .* cz[1]),
+                      [(Float64(cz[2].rho[1, q]) * (density_unit === :g_cm3 ? 1e3 : 1.0), 1e3cz[2].vp[1, q], 1e3cz[2].vs[1, q]) for q in axes(cz[1], 2)]))
+    TW, ntw = isempty(tws) ? (nothing, 0) :
+              teleseismic_cv(tws[1], 2, sh, (; hostblocks, gx, nx, ia, ib, ow, ox, dev, FT, dt, nt, tbeg, stf, blocks, na, pml, column, aniso,
+                                              rows, loc=A -> A[xr .- ow, :]))[1:2]
     forces = filter(s -> s isa ForceSource, srcs)
     moments = filter(s -> s isa MomentTensorSource, srcs)
     # the nodes of this process, in local indices
@@ -1006,12 +1019,14 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
         itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
         itw > 0 && nst > 0 && foreach_item!(backend, sh ? vprev_sh_cv! : vprev_cv!, (prev, lite, St), nst)
         momentum!(dtT, true)
+        ntw > 0 && foreach_item!(backend, sh ? tf_momentum_sh! : tf_momentum_psv!, (lite, TW, FT(tbeg + n * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(V -> V .*= B.gs, vel(B)), blocks)
         length(forces) > 0 && run_once!(backend, sh ? force_sh_cv! : force_cv!, (lite, FS, it, dtT))
         KernelAbstractions.synchronize(backend)
         exchange_v!()
         record && nst > 0 && foreach_item!(backend, sh ? record_sh_cv! : record_cv!, (rec, acc, prev, lite, St, itw, dtT), nst)
         stress!(vc, dtT)
+        ntw > 0 && foreach_item!(backend, sh ? tf_stress_sh! : tf_stress_psv!, (lite, TW, vc, FT(tbeg + (n + 0.5) * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(S -> S .*= B.gs, str(B)), blocks)
         length(moments) > 0 && run_once!(backend, sh ? moment_sh_cv! : moment_cv!, (lite, MS, it))
         KernelAbstractions.synchronize(backend)
@@ -1032,8 +1047,9 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     # a driver (misfit gradients) takes over
     driver === nothing || return drive_curvilinear(driver, (; backend, FT, blocks, hostblocks, nb, nx, nzt, nl, no, hx, ox, xr, ia, ib,
         par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!, exchange_s!, owned, St, nst, FS, forces,
-        Hξ, hξ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, vc, own_stations=own, sponge=absorber === :cerjan, nsrc=length(srcs), st_all,
-        seismograms, ts, fq_ref, loc=A -> A[xr .- ow, :], ftab=ft, mtab=mt, MS, moments, srcs, stf, tables, ow, owy=0))
+        Hξ, hξ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, vc, own_stations=own, sponge=absorber === :cerjan, nsrc=length(allsrcs), st_all,
+        seismograms, ts, fq_ref, loc=A -> A[xr .- ow, :], ftab=ft, mtab=mt, MS, moments, srcs=allsrcs, stf, tables, ow, owy=0,
+        TW, ntw, tfkind=sh ? Val(:sh) : Val(:psv)))
     # checkpoints (one file per process): the wavefield and memory variables, the recording and the plane accumulators
     ckp = checkpoint === nothing ? nothing : par !== nothing ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")

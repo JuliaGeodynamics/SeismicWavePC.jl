@@ -52,7 +52,7 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
   are grid lines, so the jump stays sharp. Other heterogeneity (a magma chamber, gradients) is sampled at the nodes.
 - **Time step and boundaries.** The time step follows from the spectral radius of the operator: `dt` is not needed, give
   the duration `tmax`. The sides and the bottom absorb with impedance boundary conditions; `absorber = :pml` adds a
-  perfectly matched layer of `na = 20` nodes (the CFS-PML of OpenSWPC on the ξ and η parts of the SBP operators: about
+  perfectly matched layer of `na = 20` nodes (at least 6; the CFS-PML of OpenSWPC on the ξ and η parts of the SBP operators: about
   20 times fewer reflections, ~1.5× the cost per step with layers on all sides), `:cerjan` a sponge.
 - **Stations** with `surface=true` record exactly on the topography. Attenuation, moment tensors and forces work as on
   the staggered grid.
@@ -70,7 +70,10 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
   surface `fs` on the topography, `xy` planes and sections resampled at regular heights; `:v`, `:u`, `:ps`, also in pieces).
 - **Checkpoints** (`checkpoint`, `checkpoint_every`, `restart`) as on the staggered grid.
 - **SH waves** in 2D (`wave = :sh`), with everything above (attenuation, VTI with γ, PML, gradients, Born, MPI, GPUs).
-- **Not yet:** plane and teleseismic waves.
+- **Teleseismic waves** ([`TeleseismicWave`](@ref)) as on the staggered grid: total-field / scattered-field injection
+  along a box (the box reaches up to the topography; the model must be horizontally layered and elastic along its sides
+  and bottom, where the topography must be flat), with the exact gradient. `PlaneWave` (OpenSWPC's initial plane wave)
+  is not available on curvilinear grids: use `TeleseismicWave`.
 
 ![A hill, a Moho-like interface and a magma chamber on a curvilinear grid](assets/2D_curvilinear.png)
 

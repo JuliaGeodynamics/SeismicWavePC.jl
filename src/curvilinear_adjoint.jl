@@ -171,6 +171,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     # PML: the forward memory variables (copies: `scratch`) make the operators give the stretched strains and divergences of
     # the forward; the adjoint applies the parts of the operators of the stretched directions separately (`part`)
     pml = pmlof(blocks[1]) !== nothing
+    lite = map(B -> merge(B, (; pml=nothing)), blocks)
     memnames(P) = Tuple(k for k in keys(P) if getfield(P, k) isa AbstractArray && !(k in (:gx, :gy, :gz)))
     scratch = pml ? Tuple(merge(blocks[b].pml, NamedTuple{memnames(blocks[b].pml)}(map(copy, pml_arrays(blocks[b])))) for b in 1:nb) : nothing
     withpml(blk, b) = pml ? merge(blk, (; pml=scratch[b])) : blk
@@ -356,6 +357,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             # moment tensors (stress glut, after the stress update)
             nM > 0 && run_once!(backend, moment_sens_cv!, (AM, gmM, Adj, MS, it, dtT, Val(sn)))
             c.sponge && foreach(b -> foreach(S -> S .*= blocks[b].gs, comps(Adj[b], sn)), 1:nb)      # (the sponge is diagonal)
+            c.ntw > 0 && foreach_item!(backend, tf_grad_stress!, (Grad, Adj, lite, Mv, c.TW, FT(c.tbeg + (n + 0.5) * c.dt), dtT, c.tfkind), c.ntw)
             # stress update: gradient (λ, μ, τ) and v̄ += dt Gᵀ (C₁ σ̄ - Cτ Q)
             for b in 1:nb, k in 1:nV
                 copyto!(Win[b][k], q[b][nV+k])
@@ -390,6 +392,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                 run_once!(backend, force_sens_cv!, (AF, gmF, Adj, map(B -> merge(B, (; pml=nothing)), blocks), FS, it, dtT, Val(vn)))
             end
             c.sponge && foreach(b -> foreach(V -> V .*= blocks[b].gs, comps(Adj[b], vn)), 1:nb)
+            c.ntw > 0 && foreach_item!(backend, tf_grad_momentum!, (Grad, Adj, lite, c.TW, FT(c.tbeg + n * c.dt), dtT, c.tfkind), c.ntw)
             for b in 1:nb
                 g, B = Grad[b], blocks[b]
                 for (k, ab) in enumerate(comps(B, an))
@@ -534,6 +537,7 @@ function curvilinear_source_gradients(c, N, AF, gmF, AM, gmM)
         (; M=dP, M0=sum(src.M[j] * dP[j] for j in 1:6), x, y, z, t0, trise, stf=gmM[l, :], t=tm)
     end
     return map(srcs) do src
+        src isa Union{MomentTensorSource,ForceSource} || return nothing        # (a teleseismic wave)
         i = src isa MomentTensorSource ? findfirst(x -> x === src, moments) : findfirst(x -> x === src, forces)
         src isa MomentTensorSource ? mts[i] : fs[i]
     end
