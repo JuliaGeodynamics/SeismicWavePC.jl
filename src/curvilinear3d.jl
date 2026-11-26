@@ -277,7 +277,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     gx, hξ = sbp_grid(gξ[1], gξ[end], nx)
     gy, hψ = sbp_grid(gψ[1], gψ[end], ny)
     (maximum(abs, gx .- gξ) < 1e-6 * (gξ[end] - gξ[1]) && maximum(abs, gy .- gψ) < 1e-6 * (gψ[end] - gψ[1])) ||
-        error("curvilinear grid: x and y must be the nodes of the SBP grid (make the mesh with curvilinear_mesh)")
+        error("curvilinear grid: x and y must be the nodes of the SBP grid (make the mesh with curvilinear_mesh, or with GMG's curvilinear_grid(sbp_nodes(...), sbp_nodes(...), ...; spacing = :sbp))")
     Zm = 1e3 .* Z
     all(>(0), diff(Zm; dims=3)) || error("curvilinear grid: z must increase with the row index (and rows must not touch)")
     # MPI: this process holds the nodes ia:ib in x, ja:jb in y, and CV_HALO halo nodes around them (local = global - offset)

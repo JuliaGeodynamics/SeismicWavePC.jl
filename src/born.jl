@@ -80,7 +80,7 @@ function born(model::CartData, δm::CartData; T::Type{<:AbstractFloat}=Float32, 
     bad = intersect(keys(kwargs), (:snapshots, :callback, :checkpoint, :restart, :driver))
     isempty(bad) || error("born does not take the keywords $(join(bad, ", "))")
     size(δm) == size(model) || error("δm must be on the grid of the model (size $(size(model)), got $(size(δm)))")
-    keys(δm.fields) ⊆ (:rho, :vp, :vs, :Qp, :Qs, :epsilon, :delta, :gamma, :z) ||        # (z: the mesh of curvilinear grids)
+    keys(δm.fields) ⊆ (:rho, :vp, :vs, :Qp, :Qs, :epsilon, :delta, :gamma, :z, :Z) ||    # (z, Z: the heights of curvilinear meshes)
         error("δm may have the fields rho, vp, vs, Qp, Qs (and epsilon, delta, gamma), got $(keys(δm.fields))")
     has_anisotropy(δm) && !has_anisotropy(model) &&
         error("δm perturbs epsilon, delta or gamma: give the model these fields (zero for an isotropic background)")

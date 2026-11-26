@@ -45,7 +45,9 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
 
 - **The mesh.** [`curvilinear_mesh`](@ref) makes the mesh from surfaces (functions or surface `CartData`): a grid line
   follows the topography and every interface with a large jump in the material (e.g. a Moho). Columns are vertical. Fill
-  the material at the nodes with the usual GMG tools.
+  the material at the nodes with the usual GMG tools. GMG ≥ 0.10.2 makes the same mesh, with all its model tools working
+  on it (`add_layer!`, `add_box!`, `add_ellipsoid!`, interpolation of data onto it):
+  `curvilinear_grid(sbp_nodes(-72, 52, 249), 0, (topo, moho, -80.0); dz=0.5, spacing=:sbp)`.
 - **Blocks.** The mesh is split into blocks at grid rows where the material jumps along the full width. Their interfaces
   are grid lines, so the jump stays sharp. Other heterogeneity (a magma chamber, gradients) is sampled at the nodes.
 - **Time step and boundaries.** The time step follows from the spectral radius of the operator: `dt` is not needed, give

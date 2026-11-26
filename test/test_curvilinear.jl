@@ -393,4 +393,21 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         M = simulate(addfield(mesh, merge(base, (; vs=base.vs .- 1e-3 .* δv))); kw..., stations=sts, verbose=false)
         @test maximum(abs, δd.v .- (P.v .- M.v) ./ 2e-3) < 1e-6 * maximum(abs, δd.v)
     end
+    @testset "the mesh of GMG (curvilinear_grid with SBP spacing)" begin
+        if isdefined(GeophysicalModelGenerator, :curvilinear_grid)              # (GMG ≥ 0.10.2)
+            topog(x) = 1.2 * exp(-x^2 / 12)
+            mohog(x) = -4.0 + 0.6 * sin(2π * x / 10)
+            a = curvilinear_mesh(range(-8, 8, length=49), [topog, mohog]; dz=0.33, bottom=-10)
+            b = curvilinear_grid(sbp_nodes(-8, 8, 49), 0, (topog, mohog, -10.0); dz=0.33, spacing=:sbp)
+            @test size(a) == size(b) && a.x.val == b.x.val && maximum(abs, a.z.val .- b.z.val) < 1e-12
+            a3 = curvilinear_mesh(range(-6, 6, length=33), range(-5, 5, length=29), [(x, y) -> exp(-(x^2 + y^2) / 10)]; dz=0.4, bottom=-8)
+            b3 = curvilinear_grid(sbp_nodes(-6, 6, 33), sbp_nodes(-5, 5, 29), ((x, y) -> exp(-(x^2 + y^2) / 10), -8.0); dz=0.4, spacing=:sbp)
+            @test size(a3) == size(b3) && maximum(abs, a3.z.val .- b3.z.val) < 1e-12
+            o = ones(size(b.x.val))
+            m = addfield(b, (; rho=2600 .* o, vp=5.5 .* o, vs=3.2 .* o))                # (with GMG's field Z)
+            kw = (; tmax=1.0, sources=[ForceSource(0.0, 0.0, -3.0; fz=1e14)], stations=[Station("s", 1.0, 0.0, 0.0; surface=true)], verbose=false)
+            @test simulate(m; kw...).v == simulate(addfield(a, (; rho=2600 .* o, vp=5.5 .* o, vs=3.2 .* o)); kw...).v
+            @test maximum(abs, born(m, addfield(b, (; vs=0.1 .* o)); kw...)[2].v) > 0
+        end
+    end
 end
