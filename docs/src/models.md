@@ -54,7 +54,9 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
   the staggered grid.
 - **3D:** `curvilinear_mesh(x, y, surfaces; dz, bottom)` with surfaces z(x, y) (functions or surface `CartData`); columns
   are vertical in 3D too.
-- **Not yet:** MPI, SH waves, plane waves, anisotropy, gradients.
+- **MPI and GPUs** as on the staggered grid: `nproc` processes along x (2D) or `(npx, npy)` (3D); the columns are not
+  split. Results are identical to a run on one process.
+- **Not yet:** SH waves, plane waves, anisotropy, gradients.
 
 ![A hill, a Moho-like interface and a magma chamber on a curvilinear grid](assets/2D_curvilinear.png)
 

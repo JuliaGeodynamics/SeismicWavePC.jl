@@ -3,9 +3,10 @@
 # Jη = (Jx, Jy, 1) = (-z_ξ, -z_ψ, 1). Momentum: ρ J ∂t v_c = Dξ(J σ_c1) + Dψ(J σ_c2) + Dη(Jx σ_c1 + Jy σ_c2 + σ_c3); gradient:
 # ∂x = Dξ + (Jx/J) Dη, ∂y = Dψ + (Jy/J) Dη, ∂z = Dη/J. SAT terms, blocks, time stepping as in 2D.
 
-"`flag ? interior : general` SBP derivative (no closure over the element type: the kernels stay type stable)."
-@inline dmin(g::G, i, n, ::Val{int}, ::Type{T}) where {G,int,T} = int ? dminus_int(g, i, T) : dminus(g, i, n)
-@inline dpl(g::G, i, n, ::Val{int}, ::Type{T}) where {G,int,T} = int ? dplus_int(g, i, T) : dplus(g, i, n)
+"`flag ? interior : general` SBP derivative at the local index i (global i + o of n: MPI subdomains; the boundary closures
+in global indices). No closure over the element type: the kernels stay type stable."
+@inline dmin(g::G, i, o, n, ::Val{int}, ::Type{T}) where {G,int,T} = int ? dminus_int(g, i, T) : dminus(q -> g(q - o), i + o, n)
+@inline dpl(g::G, i, o, n, ::Val{int}, ::Type{T}) where {G,int,T} = int ? dplus_int(g, i, T) : dplus(q -> g(q - o), i + o, n)
 
 # The tractions across η = const (scaled), G_c = Jx σ_c1 + Jy σ_c2 + σ_c3, in a pointwise pass before the momentum update:
 # the η stencils then read one array each (7× faster on CPUs: 8 planes of three arrays did not stay in cache).
@@ -18,24 +19,24 @@ end
 
 # Momentum at node (i, j, k); the region flags (fx, fy, fz): interior in x, y, η (no closures, no SAT terms there).
 @inline Base.@propagate_inbounds function momentum3_cv!(B, Bd, Bu, dt, damp, ::Val{flags}, i, j, k) where {flags}
-    (; V1, V2, V3, S11, S22, S33, S23, S13, S12, G1, G2, G3, J, iρJ, a1, a2, a3, hξ, hψ, hη) = B
+    (; V1, V2, V3, S11, S22, S33, S23, S13, S12, G1, G2, G3, J, iρJ, a1, a2, a3, hξ, hψ, hη, ox, oy, nxg, nyg) = B
     fx, fy, fz = Val(flags[1]), Val(flags[2]), Val(flags[3])
     nx, ny, nz = size(V1)
     T = eltype(V1)
     w = T(SBP_W[1])
     # J σ_c1 along ξ, J σ_c2 along ψ, G_c along η
-    d1 = dmin(q -> @inbounds(J[q, j, k] * S11[q, j, k]), i, nx, fx, T) / hξ + dmin(q -> @inbounds(J[i, q, k] * S12[i, q, k]), j, ny, fy, T) / hψ +
-         dmin(q -> @inbounds(G1[i, j, q]), k, nz, fz, T) / hη
-    d2 = dmin(q -> @inbounds(J[q, j, k] * S12[q, j, k]), i, nx, fx, T) / hξ + dmin(q -> @inbounds(J[i, q, k] * S22[i, q, k]), j, ny, fy, T) / hψ +
-         dmin(q -> @inbounds(G2[i, j, q]), k, nz, fz, T) / hη
-    d3 = dmin(q -> @inbounds(J[q, j, k] * S13[q, j, k]), i, nx, fx, T) / hξ + dmin(q -> @inbounds(J[i, q, k] * S23[i, q, k]), j, ny, fy, T) / hψ +
-         dmin(q -> @inbounds(G3[i, j, q]), k, nz, fz, T) / hη
-    if !flags[1] && (i == 1 || i == nx)                 # sides x: the traction J σ_c1 removed
-        s = (i == 1 ? 1 : -1) * J[i, j, k] / (w * hξ)
+    d1 = dmin(q -> @inbounds(J[q, j, k] * S11[q, j, k]), i, ox, nxg, fx, T) / hξ + dmin(q -> @inbounds(J[i, q, k] * S12[i, q, k]), j, oy, nyg, fy, T) / hψ +
+         dmin(q -> @inbounds(G1[i, j, q]), k, 0, nz, fz, T) / hη
+    d2 = dmin(q -> @inbounds(J[q, j, k] * S12[q, j, k]), i, ox, nxg, fx, T) / hξ + dmin(q -> @inbounds(J[i, q, k] * S22[i, q, k]), j, oy, nyg, fy, T) / hψ +
+         dmin(q -> @inbounds(G2[i, j, q]), k, 0, nz, fz, T) / hη
+    d3 = dmin(q -> @inbounds(J[q, j, k] * S13[q, j, k]), i, ox, nxg, fx, T) / hξ + dmin(q -> @inbounds(J[i, q, k] * S23[i, q, k]), j, oy, nyg, fy, T) / hψ +
+         dmin(q -> @inbounds(G3[i, j, q]), k, 0, nz, fz, T) / hη
+    if !flags[1] && (i + ox == 1 || i + ox == nxg)       # sides x: the traction J σ_c1 removed
+        s = (i + ox == 1 ? 1 : -1) * J[i, j, k] / (w * hξ)
         d1 += s * S11[i, j, k]; d2 += s * S12[i, j, k]; d3 += s * S13[i, j, k]
     end
-    if !flags[2] && (j == 1 || j == ny)                 # sides y: J σ_c2
-        s = (j == 1 ? 1 : -1) * J[i, j, k] / (w * hψ)
+    if !flags[2] && (j + oy == 1 || j + oy == nyg)       # sides y: J σ_c2
+        s = (j + oy == 1 ? 1 : -1) * J[i, j, k] / (w * hψ)
         d1 += s * S12[i, j, k]; d2 += s * S22[i, j, k]; d3 += s * S23[i, j, k]
     end
     if !flags[3] && (k == 1 || k == nz)                 # free surface, bottom, interfaces
@@ -70,21 +71,21 @@ end
 # Stress at node (i, j, k): gradients with D₊ (half the velocity mismatch at interfaces added to Dη v), and the stress
 # update of the staggered 3D solver (generalized Zener body).
 @inline Base.@propagate_inbounds function stress3_cv!(B, Bd, Bu, vc, dt, ::Val{flags}, i, j, k) where {flags}
-    (; V1, V2, V3, S11, S22, S33, S23, S13, S12, J, Jx, Jy, lam, mu, hξ, hψ, hη) = B
+    (; V1, V2, V3, S11, S22, S33, S23, S13, S12, J, Jx, Jy, lam, mu, hξ, hψ, hη, ox, oy, nxg, nyg) = B
     fx, fy, fz = Val(flags[1]), Val(flags[2]), Val(flags[3])
     nx, ny, nz = size(V1)
     T = eltype(V1)
     w = T(SBP_W[1])
     # (no local helper closures: one capturing the type T would make the kernel allocate)
-    x1 = dpl(q -> @inbounds(V1[q, j, k]), i, nx, fx, T) / hξ
-    x2 = dpl(q -> @inbounds(V2[q, j, k]), i, nx, fx, T) / hξ
-    x3 = dpl(q -> @inbounds(V3[q, j, k]), i, nx, fx, T) / hξ
-    y1 = dpl(q -> @inbounds(V1[i, q, k]), j, ny, fy, T) / hψ
-    y2 = dpl(q -> @inbounds(V2[i, q, k]), j, ny, fy, T) / hψ
-    y3 = dpl(q -> @inbounds(V3[i, q, k]), j, ny, fy, T) / hψ
-    z1 = dpl(q -> @inbounds(V1[i, j, q]), k, nz, fz, T) / hη
-    z2 = dpl(q -> @inbounds(V2[i, j, q]), k, nz, fz, T) / hη
-    z3 = dpl(q -> @inbounds(V3[i, j, q]), k, nz, fz, T) / hη
+    x1 = dpl(q -> @inbounds(V1[q, j, k]), i, ox, nxg, fx, T) / hξ
+    x2 = dpl(q -> @inbounds(V2[q, j, k]), i, ox, nxg, fx, T) / hξ
+    x3 = dpl(q -> @inbounds(V3[q, j, k]), i, ox, nxg, fx, T) / hξ
+    y1 = dpl(q -> @inbounds(V1[i, q, k]), j, oy, nyg, fy, T) / hψ
+    y2 = dpl(q -> @inbounds(V2[i, q, k]), j, oy, nyg, fy, T) / hψ
+    y3 = dpl(q -> @inbounds(V3[i, q, k]), j, oy, nyg, fy, T) / hψ
+    z1 = dpl(q -> @inbounds(V1[i, j, q]), k, 0, nz, fz, T) / hη
+    z2 = dpl(q -> @inbounds(V2[i, j, q]), k, 0, nz, fz, T) / hη
+    z3 = dpl(q -> @inbounds(V3[i, j, q]), k, 0, nz, fz, T) / hη
     if !flags[3]
         if k == nz && Bu !== nothing
             z1 -= (V1[i, j, k] - Bu.V1[i, j, 1]) / (2w * hη); z2 -= (V2[i, j, k] - Bu.V2[i, j, 1]) / (2w * hη)
@@ -184,7 +185,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
                                 tbeg=0.0, absorber=:impedance, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                                 density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, backend=CPU(),
                                 T::Type{FT}=Float32, verbose=true, wavefield=true, jump=0.05, wave=:psv, interpolation=:sinc,
-                                free_surface=:openswpc, kwargs...) where {FT}
+                                free_surface=:openswpc, nproc=1, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
     absorber in (:impedance, :none) || error("curvilinear grids absorb with impedance boundary conditions: absorber = :impedance (or :none)")
     srcs = sources isa AbstractVector ? sources : [sources]
@@ -204,6 +205,16 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         error("curvilinear grid: x and y must be the nodes of the SBP grid (make the mesh with curvilinear_mesh)")
     Zm = 1e3 .* Z
     all(>(0), diff(Zm; dims=3)) || error("curvilinear grid: z must increase with the row index (and rows must not touch)")
+    # MPI: this process holds the nodes ia:ib in x, ja:jb in y, and CV_HALO halo nodes around them (local = global - offset)
+    par = cv_mpi(nproc, 2)
+    me = par === nothing ? 0 : par.me
+    ia, ib = par === nothing ? (1, nx) : extrema(part_range(nx, par.dims[1], par.coords[1]))
+    ja, jb = par === nothing ? (1, ny) : extrema(part_range(ny, par.dims[2], par.coords[2]))
+    par === nothing || min(ib - ia, jb - ja) + 1 >= SBP_NB + CV_HALO || error("curvilinear grid: too many processes for $nx × $ny nodes")
+    hx = par === nothing ? 0 : CV_HALO
+    ox, oy = ia - hx - 1, ja - hx - 1
+    xr, yr = clamp.(ia-hx:ib+hx, 1, nx), clamp.(ja-hx:jb+hx, 1, ny)
+    nlx, nly, nox, noy = length(xr), length(yr), ib - ia + 1, jb - ja + 1
     f = model.fields
     haskey(f, :rho) && haskey(f, :vp) && haskey(f, :vs) || error("the model needs fields rho, vp and vs")
     ρ = f.rho .* (density_unit === :g_cm3 ? 1e3 : 1.0)
@@ -261,25 +272,35 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     end
     nb = length(hostblocks)
     blocks = Tuple(map(hostblocks) do H
-        z() = KernelAbstractions.zeros(backend, FT, nx, ny, H.nz)
-        R() = KernelAbstractions.zeros(backend, FT, NM, nx, ny, H.nz)
+        z() = KernelAbstractions.zeros(backend, FT, nlx, nly, H.nz)
+        R() = KernelAbstractions.zeros(backend, FT, NM, nlx, nly, H.nz)
+        loc(A) = dev(FT.(A[xr, yr, :]))
         mem = attenuation ? (; R11=R(), R22=R(), R33=R(), R23=R(), R13=R(), R12=R()) : (;)
-        merge((; V1=z(), V2=z(), V3=z(), S11=z(), S22=z(), S33=z(), S23=z(), S13=z(), S12=z(), G1=z(), G2=z(), G3=z(), J=dev(FT.(H.J)), Jx=dev(FT.(H.Jx)),
-               Jy=dev(FT.(H.Jy)), iρJ=dev(FT.(1 ./ (H.ρ .* H.J))), lam=dev(FT.(H.lam)), mu=dev(FT.(H.mu)),
-               tp=attenuation ? dev(FT.(H.taup)) : nothing, ts=attenuation ? dev(FT.(H.taus)) : nothing,
-               a1=dev(FT.(H.a1)), a2=dev(FT.(H.a2)), a3=dev(FT.(H.a3)), hξ=FT(hξ), hψ=FT(hψ), hη=FT(H.hη)), mem)
+        merge((; V1=z(), V2=z(), V3=z(), S11=z(), S22=z(), S33=z(), S23=z(), S13=z(), S12=z(), G1=z(), G2=z(), G3=z(), J=loc(H.J),
+               Jx=loc(H.Jx), Jy=loc(H.Jy), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam), mu=loc(H.mu),
+               tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1), a2=loc(H.a2),
+               a3=loc(H.a3), hξ=FT(hξ), hψ=FT(hψ), hη=FT(H.hη), ox, oy, nxg=nx, nyg=ny), mem)
     end)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing
-    # 27 regions per block: low / interior / high in x, y and η, with their kernel flags
+    # up to 27 regions per block: low / interior / high in x, y and η, with their kernel flags (in x and y: the global
+    # segments intersected with the nodes of this process, in local indices)
     m = SBP_NB
-    seg(n) = ((0, m, false), (m, n - 2m, true), (n - m, m, false))
+    function seg(n, a0, b0, o)
+        S = Tuple{Int,Int,Bool}[]
+        for (lo, hi, f) in ((1, m, false), (m + 1, n - m, true), (n - m + 1, n, false))
+            a, b = max(lo, a0), min(hi, b0)
+            a <= b && push!(S, (a - o - 1, b - a + 1, f))
+        end
+        S
+    end
     regions = map(hostblocks) do H
-        Tuple(((a[1], b[1], c[1]), (a[2], b[2], c[2]), Val((a[3], b[3], c[3]))) for a in seg(nx), b in seg(ny), c in seg(H.nz))
+        Tuple(((a[1], b[1], c[1]), (a[2], b[2], c[2]), Val((a[3], b[3], c[3]))) for a in seg(nx, ia, ib, ox), b in seg(ny, ja, jb, oy),
+              c in seg(H.nz, 1, H.nz, 0))
     end
     function momentum!(dtT, damp)
         for b in 1:nb                                  # the tractions of all blocks first (interfaces read the neighbours')
-            foreach_cell!(backend, traction3_cv!, (blocks[b],), (0, 0, 0), (nx, ny, hostblocks[b].nz))
+            foreach_cell!(backend, traction3_cv!, (blocks[b],), (0, 0, 0), (nlx, nly, hostblocks[b].nz))
         end
         for b in 1:nb
             foreach_region!(backend, momentum3_cv!, (blocks[b], below_(b), above_(b), dtT, damp), regions[b])
@@ -289,17 +310,24 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         foreach_region!(backend, stress3_cv!, (blocks[b], below_(b), above_(b), vc, dtT), regions[b])
     end
     fields(B) = (B.V1, B.V2, B.V3, B.S11, B.S22, B.S33, B.S23, B.S13, B.S12)
+    exchange_v!() = foreach(B -> cv_exchange!(par, (B.V1, B.V2, B.V3)), blocks)
+    exchange_s!() = foreach(B -> cv_exchange!(par, (B.S11, B.S22, B.S33, B.S23, B.S13, B.S12)), blocks)
+    owned(A) = view(A, hx+1:hx+nox, hx+1:hx+noy, :)
+    vnorm2() = cv_sum(par, sum(B -> sum(abs2, owned(B.V1)) + sum(abs2, owned(B.V2)) + sum(abs2, owned(B.V3)), blocks))
     if dt === nothing
         foreach(B -> foreach(A -> copyto!(A, FT.(randn(size(A)))), (B.V1, B.V2, B.V3)), blocks)
+        exchange_v!()
         λ = 0.0
         for _ in 1:100
             foreach(B -> foreach(A -> fill!(A, 0), (B.S11, B.S22, B.S33, B.S23, B.S13, B.S12)), blocks)
             stress!(nothing, one(FT))
-            nrm0 = sqrt(sum(B -> sum(abs2, B.V1) + sum(abs2, B.V2) + sum(abs2, B.V3), blocks))
+            exchange_s!()
+            nrm0 = sqrt(vnorm2())
             foreach(B -> foreach(A -> fill!(A, 0), (B.V1, B.V2, B.V3)), blocks)
             momentum!(one(FT), false)
             KernelAbstractions.synchronize(backend)
-            nrm = sqrt(sum(B -> sum(abs2, B.V1) + sum(abs2, B.V2) + sum(abs2, B.V3), blocks))
+            exchange_v!()
+            nrm = sqrt(vnorm2())
             λ = nrm / nrm0
             foreach(B -> foreach(A -> (A ./= FT(nrm)), (B.V1, B.V2, B.V3)), blocks)
         end
@@ -348,8 +376,10 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     end
     forces = filter(s -> s isa ForceSource, srcs)
     moments = filter(s -> s isa MomentTensorSource, srcs)
-    ft = source_table(forces, (H, i, j, k) -> 1.0)
-    mt = source_table(moments, (H, i, j, k) -> 1 / H.J[i, j, k])
+    mine(t) = (q = findall(n -> ia <= t.i[n] <= ib && ja <= t.j[n] <= jb, eachindex(t.i));
+               (b=t.b[q], i=t.i[q] .- ox, j=t.j[q] .- oy, k=t.k[q], c=t.c[q], n=t.n[q]))
+    ft = mine(source_table(forces, (H, i, j, k) -> 1.0))
+    mt = mine(source_table(moments, (H, i, j, k) -> 1 / H.J[i, j, k]))
     FS = (; b=dev(ft.b), i=dev(ft.i), j=dev(ft.j), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n), F=dev(FT[s.F[c] for s in forces, c in 1:3]),
           s=dev(FT[moment_rate(stf, tbeg + (it - 1) * dt, s.t0, s.trise) for s in forces, it in 1:nt]))
     MS = (; b=dev(mt.b), i=dev(mt.i), j=dev(mt.j), k=dev(mt.k), c=dev(FT.(mt.c)), n=dev(mt.n), M=dev(FT[s.M0 * s.M[c] for s in moments, c in 1:6]),
@@ -363,18 +393,31 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         k0, wz = lagrange_weights(gη, η)
         (b, i0, j0, k0, wx, wy, wz)
     end
-    St = (; b=dev([s[1] for s in st]), i0=dev([s[2] for s in st]), j0=dev([s[3] for s in st]), k0=dev([s[4] for s in st]),
+    own = findall(s -> ia <= s[2] + 2 <= ib && ja <= s[3] + 2 <= jb, st)     # the stations of this process
+    st = st[own]
+    nst = length(st)
+    St = (; b=dev([s[1] for s in st]), i0=dev([s[2] - ox for s in st]), j0=dev([s[3] - oy for s in st]), k0=dev([s[4] for s in st]),
           wx=dev(FT[s[5][a] for a in 1:6, s in st]), wy=dev(FT[s[6][a] for a in 1:6, s in st]), wz=dev(FT[s[7][a] for a in 1:6, s in st]))
     nrec = cld(nt, record_every)
     rec = KernelAbstractions.zeros(backend, FT, nrec, 18, nst)
     acc = KernelAbstractions.zeros(backend, FT, 3, nst)
     prev = KernelAbstractions.zeros(backend, FT, 3, nst)
-    function velocity_field()
+    function velocity_field()                       # (with MPI: gathered on rank 0, `nothing` elsewhere)
         keep(b) = b == 1 ? (1:hostblocks[b].nz) : (2:hostblocks[b].nz)
-        r(c) = Float64.(cat((Array(getfield(blocks[b], c))[:, :, keep(b)] for b in 1:nb)...; dims=3))
-        return CartData(model.x.val, model.y.val, model.z.val, (; V=(r(:V1), r(:V2), r(:V3))))
+        r(c) = Float64.(cat((Array(owned(getfield(blocks[b], c)))[:, :, keep(b)] for b in 1:nb)...; dims=3))
+        V = (r(:V1), r(:V2), r(:V3))
+        if par !== nothing
+            parts = MPI.gather((ia, ib, ja, jb, V), par.comm; root=0)
+            me == 0 || return nothing
+            V = ntuple(_ -> zeros(nx, ny, nzt), 3)
+            for (a, b, c, d, p) in parts, q in 1:3
+                V[q][a:b, c:d, :] .= p[q]
+            end
+        end
+        return CartData(model.x.val, model.y.val, model.z.val, (; V))
     end
-    movie = (snapshot_every > 0 && callback === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
+    movie = (snapshot_every > 0 && callback === nothing && me == 0) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
+    verbose &= me == 0
     verbose && @printf("SeismicWavePC: 3D on a curvilinear grid, %d × %d × %d nodes in %d block(s) (interfaces at rows %s), %d steps of %.4g s%s%s\n",
                        nx, ny, nzt, nb, isempty(rows) ? "–" : join(rows, ", "), nt, dt, attenuation ? ", attenuation" : "",
                        absorber === :impedance ? ", absorbing sides and bottom" : "")
@@ -384,26 +427,32 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         itw > 0 && nst > 0 && foreach_item!(backend, vprev3_cv!, (prev, blocks, St), nst)
         momentum!(dtT, true)
         length(forces) > 0 && run_once!(backend, force3_cv!, (blocks, FS, it, dtT))
+        KernelAbstractions.synchronize(backend)
+        exchange_v!()
         nst > 0 && foreach_item!(backend, record3_cv!, (rec, acc, prev, blocks, St, itw, dtT), nst)
         stress!(vc, dtT)
         length(moments) > 0 && run_once!(backend, moment3_cv!, (blocks, MS, it))
+        KernelAbstractions.synchronize(backend)
+        exchange_s!()
         if snapshot_every > 0 && n % snapshot_every == 0
-            KernelAbstractions.synchronize(backend)
             data = velocity_field()
-            callback === nothing ? (movie = write_paraview(data, "wavefield_$(lpad(n, 6, '0'))"; directory=snapshot_dir, pvd=movie,
-                                                            time=tbeg + n * dt, verbose=false)) : callback(data, tbeg + n * dt)
+            if me == 0
+                callback === nothing ? (movie = write_paraview(data, "wavefield_$(lpad(n, 6, '0'))"; directory=snapshot_dir, pvd=movie,
+                                                                time=tbeg + n * dt, verbose=false)) : callback(data, tbeg + n * dt)
+            end
         end
-        if verbose && (it % max(1, nt ÷ 10) == 0 || it == nt)
-            KernelAbstractions.synchronize(backend)
-            vmax = maximum(B -> max(maximum(abs, B.V1), maximum(abs, B.V2), maximum(abs, B.V3)), blocks)
+        if (verbose || par !== nothing) && (it % max(1, nt ÷ 10) == 0 || it == nt)
+            vmax = cv_max(par, Float64(maximum(B -> max(maximum(abs, owned(B.V1)), maximum(abs, owned(B.V2)), maximum(abs, owned(B.V3))), blocks)))
             isfinite(vmax) || error("curvilinear grid: the simulation became unstable at step $it")
-            @printf("  step %6d/%d  t = %8.4f s  max|v| = %.3e m/s\n", it, nt, tbeg + it * dt, vmax)
+            verbose && @printf("  step %6d/%d  t = %8.4f s  max|v| = %.3e m/s\n", it, nt, tbeg + it * dt, vmax)
         end
     end
     KernelAbstractions.synchronize(backend)
     movie === nothing || movie_paraview(movie)
     verbose && @printf("  finished in %.2f s\n", time() - wall)
-    traces = Float64.(Array(rec))
+    traces = zeros(nrec, 18, length(stations))
+    traces[:, :, own] .= Float64.(Array(rec))
+    par === nothing || MPI.Allreduce!(traces, +, par.comm)
     return Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), traces[:, 1:3, :], traces[:, 4:6, :],
                        traces[:, 7:12, :], traces[:, 13:18, :], collect(stations), (:x, :y, :z), (:xx, :yy, :zz, :yz, :xz, :xy),
                        wavefield ? velocity_field() : nothing)

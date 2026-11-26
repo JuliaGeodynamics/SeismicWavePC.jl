@@ -1,5 +1,5 @@
 # Started by test_mpi.jl with 4 MPI processes. Exits with an error if a parallel run differs from the serial one.
-# The argument selects a part (forward, gradient, born, vti, other; default all): test_mpi.jl starts each part in fresh processes, so that
+# The argument selects a part (forward, gradient, born, vti, other, curvilinear; default all): test_mpi.jl starts each part in fresh processes, so that
 # the code compiled for one part does not stay in memory for the next (4 processes compiling everything need ~15 GB).
 using MPI
 MPI.Init()
@@ -182,3 +182,42 @@ for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
 end
 MPI.Barrier(MPI.COMM_WORLD)
 end
+
+# curvilinear grids: subdomains in x (2D) and x, y (3D), halos of 4 nodes; a hill, a curved interface (two blocks),
+# attenuation, a double couple, a force, stations at the surface and at depth (also across subdomain boundaries)
+if runs("curvilinear")
+    topo(x) = 1.5 * exp(-x^2 / 18)
+    moho(x) = -5.0 + 0.8 * sin(2π * x / 16)
+    mesh = curvilinear_mesh(range(-12, 12, length=97), [topo, moho]; dz=0.4, bottom=-15)
+    X, Z = mesh.x.val, mesh.z.val
+    low = Z .< moho.(X)
+    o = ones(size(X))
+    m = addfield(mesh, (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=200 .* o, Qs=100 .* o))
+    srcs = [DoubleCoupleSource(-2.0, 0.0, -7.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0), ForceSource(4.5, 0.0, -3.0; fz=1e14, trise=1.0)]
+    sts = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -9:3:9]
+    push!(sts, Station("d", 0.1, 0.0, -6.0))
+    kw = (; dt=0.02, tmax=6.0, sources=srcs, stations=sts, T=Float64, verbose=false)
+    s1, s2 = simulate(m; kw...), simulate(m; kw..., nproc=4)
+    e = maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v)
+    eV = rank == 0 ? maximum(i -> maximum(abs, s1.wavefield.fields.V[i] .- s2.wavefield.fields.V[i]), 1:3) / maximum(abs, s1.wavefield.fields.V[3]) : 0.0
+    rank == 0 && println("MPI curvilinear 2D nproc=4: seismograms $e, wavefield $eV")
+    (e < 1e-10 && eV < 1e-10) || error("MPI curvilinear 2D result differs on rank $rank")
+    # 3D
+    topo3(x, y) = 1.0 * exp(-(x^2 + y^2) / 18)
+    moho3(x, y) = -5.0 + 0.6 * sin(2π * x / 16) * cos(2π * y / 20)
+    mesh = curvilinear_mesh(range(-8, 8, length=41), range(-7, 7, length=37), [topo3, moho3]; dz=0.5, bottom=-12)
+    X, Y, Z = mesh.x.val, mesh.y.val, mesh.z.val
+    low = Z .< moho3.(X, Y)
+    o = ones(size(X))
+    m = addfield(mesh, (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=200 .* o, Qs=100 .* o))
+    srcs = [DoubleCoupleSource(-1.0, 0.5, -7.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0), ForceSource(2.5, -1.5, -3.0; fz=1e14, trise=1.0)]
+    sts = [Station("s$x$y", Float64(x), Float64(y), 0.0; surface=true) for x in -6:3:6 for y in (-4, 0, 5)]
+    push!(sts, Station("d", 0.1, -0.2, -6.0))
+    kw = (; dt=0.03, tmax=4.0, sources=srcs, stations=sts, T=Float64, verbose=false)
+    s1, s2 = simulate(m; kw...), simulate(m; kw..., nproc=(2, 2))
+    e = maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v)
+    eV = rank == 0 ? maximum(i -> maximum(abs, s1.wavefield.fields.V[i] .- s2.wavefield.fields.V[i]), 1:3) / maximum(abs, s1.wavefield.fields.V[3]) : 0.0
+    rank == 0 && println("MPI curvilinear 3D nproc=(2, 2): seismograms $e, wavefield $eV")
+    (e < 1e-10 && eV < 1e-10) || error("MPI curvilinear 3D result differs on rank $rank")
+end
+MPI.Barrier(MPI.COMM_WORLD)

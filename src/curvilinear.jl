@@ -192,17 +192,18 @@ end
 # implicit (trapezoidal): unconditionally stable. `damp = false` leaves it out (power iteration).
 # `Val(true)`: a node away from the sides (interior stencils in x, no side terms): the boundary rows then vectorize.
 @inline Base.@propagate_inbounds function momentum_cv!(B, Bd, Bu, dt, damp, ::Val{xint}, i, k) where {xint}
-    (; V1, V2, S11, S22, S12, J, Jx, iρJ, a1, a2, hξ, hη) = B
-    nx, nz = size(V1)
+    (; V1, V2, S11, S22, S12, J, Jx, iρJ, a1, a2, hξ, hη, ox, nxg) = B
+    nz = size(V1, 2)
     T = eltype(V1)
     w = T(SBP_W[1])
+    # x: local index i, global i + ox of nxg (MPI subdomains); the boundary closures in global indices
     g1, g2 = j -> @inbounds(J[j, k] * S11[j, k]), j -> @inbounds(J[j, k] * S12[j, k])
-    d1 = (xint ? dminus_int(g1, i, T) : dminus(g1, i, nx)) / hξ + dminus(j -> @inbounds(Jx[i, j] * S11[i, j] + S12[i, j]), k, nz) / hη
-    d2 = (xint ? dminus_int(g2, i, T) : dminus(g2, i, nx)) / hξ + dminus(j -> @inbounds(Jx[i, j] * S12[i, j] + S22[i, j]), k, nz) / hη
+    d1 = (xint ? dminus_int(g1, i, T) : dminus(q -> g1(q - ox), i + ox, nxg)) / hξ + dminus(j -> @inbounds(Jx[i, j] * S11[i, j] + S12[i, j]), k, nz) / hη
+    d2 = (xint ? dminus_int(g2, i, T) : dminus(q -> g2(q - ox), i + ox, nxg)) / hξ + dminus(j -> @inbounds(Jx[i, j] * S12[i, j] + S22[i, j]), k, nz) / hη
     if xint
-    elseif i == 1
+    elseif i + ox == 1
         d1 += J[i, k] * S11[i, k] / (w * hξ); d2 += J[i, k] * S12[i, k] / (w * hξ)
-    elseif i == nx
+    elseif i + ox == nxg
         d1 -= J[i, k] * S11[i, k] / (w * hξ); d2 -= J[i, k] * S12[i, k] / (w * hξ)
     end
     if k == nz
@@ -260,9 +261,10 @@ end
     T = eltype(V1)
     w = T(SBP_W[1])
     g1, g2 = j -> @inbounds(V1[j, k]), j -> @inbounds(V2[j, k])
-    a = (xint ? dplus_int(g1, i, T) : dplus(g1, i, nx)) / hξ
+    ox, nxg = B.ox, B.nxg
+    a = (xint ? dplus_int(g1, i, T) : dplus(q -> g1(q - ox), i + ox, nxg)) / hξ
     b = dplus(j -> @inbounds(V1[i, j]), k, nz) / hη
-    c = (xint ? dplus_int(g2, i, T) : dplus(g2, i, nx)) / hξ
+    c = (xint ? dplus_int(g2, i, T) : dplus(q -> g2(q - ox), i + ox, nxg)) / hξ
     e = dplus(j -> @inbounds(V2[i, j]), k, nz) / hη
     if k == nz && Bu !== nothing
         b -= (V1[i, k] - Bu.V1[i, 1]) / (2w * hη); e -= (V2[i, k] - Bu.V2[i, 1]) / (2w * hη)
@@ -367,19 +369,68 @@ function delta_weights(g, H, h, x0)
     return collect(i0:i0+5), [w[a] / H[i0+a-1] for a in 1:6]
 end
 
+# ------------------------------------------------------------------ MPI: subdomains in x (and y in 3D); columns stay whole
+
+const CV_HALO = 4                       # the reach of the interior stencils
+"The nodes of part `c` (1-based) of `p` of `n` nodes."
+part_range(n, p, c) = fld((c - 1) * n, p)+1:fld(c * n, p)
+
+"MPI for the curvilinear solver: `nothing` on one process, else the Cartesian communicator, rank, dims, coordinates (1-based)
+and neighbours (left, right) of the `N` decomposed directions."
+function cv_mpi(nproc, N)
+    dims = ntuple(a -> a <= length(nproc) ? Int(nproc[a]) : 1, N)
+    prod(dims) == 1 && return nothing
+    MPI.Initialized() || MPI.Init()
+    np = MPI.Comm_size(MPI.COMM_WORLD)
+    np == prod(dims) || error("nproc = $nproc needs $(prod(dims)) MPI processes, julia runs on $np")
+    comm = MPI.Cart_create(MPI.COMM_WORLD, collect(dims); periodic=fill(false, N), reorder=false)
+    me = MPI.Comm_rank(comm)
+    coords = Tuple(Int.(MPI.Cart_coords(comm, me))) .+ 1
+    nb = ntuple(a -> MPI.Cart_shift(comm, a - 1, 1), N)
+    return (; comm, me, dims, coords, nb)
+end
+
+"Exchange the halos (width CV_HALO) of the decomposed directions of `arrays` (all the same size) with the neighbours."
+function cv_exchange!(par, arrays)
+    par === nothing && return nothing
+    nd, h = ndims(arrays[1]), CV_HALO
+    for a in 1:length(par.dims)
+        left, right = par.nb[a]
+        n = size(arrays[1], a)
+        sel(r) = ntuple(b -> b == a ? r : Colon(), nd)
+        pack(r) = reduce(vcat, (vec(Array(view(A, sel(r)...))) for A in arrays))    # one message per neighbour
+        sl, sr = pack(h+1:2h), pack(n-2h+1:n-h)
+        rl, rr = similar(sl), similar(sr)
+        MPI.Waitall([MPI.Irecv!(rl, par.comm; source=left, tag=0), MPI.Irecv!(rr, par.comm; source=right, tag=1),
+                     MPI.Isend(sl, par.comm; dest=left, tag=1), MPI.Isend(sr, par.comm; dest=right, tag=0)])
+        m = length(sl) ÷ length(arrays)
+        for (q, A) in enumerate(arrays), (buf, r, nbr) in ((rl, 1:h, left), (rr, n-h+1:n, right))
+            nbr == MPI.PROC_NULL && continue
+            dest = view(A, sel(r)...)
+            d = similar(A, length(dest))
+            copyto!(d, view(buf, (q-1)*m+1:q*m))
+            dest .= reshape(d, size(dest))
+        end
+    end
+    return nothing
+end
+cv_sum(par, x) = par === nothing ? x : MPI.Allreduce(x, +, par.comm)
+cv_max(par, x) = par === nothing ? x : MPI.Allreduce(x, max, par.comm)
+
 """
     simulate_curvilinear(model; tmax or nt, sources, ...)
 
 2D P-SV on a deformed (terrain-following) `CartData` (see [`curvilinear_mesh`](@ref)); called by `simulate` for such a
 model. Keywords as in `simulate`, and: `dt = nothing` (from the spectral radius of the operator: 90 % of the leapfrog
 limit), `tmax` (duration) instead of `nt`, `absorber = :impedance` (or `:none`: free sides and bottom), `jump = 0.05`
-(relative jump of vp or vs that makes a grid row an interface, see `find_blocks`).
+(relative jump of vp or vs that makes a grid row an interface, see `find_blocks`), `nproc` MPI processes along x (2D) or
+`(npx, npy)` (3D): start julia with `mpiexec`; the columns are not split.
 """
 function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=nothing, sources, stations=Station[], stf=:kupper,
                               tbeg=0.0, absorber=:impedance, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                               density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, backend=CPU(),
                               T::Type{FT}=Float32, verbose=true, wavefield=true, jump=0.05, wave=:psv, interpolation=:sinc,
-                              free_surface=:openswpc, kwargs...) where {FT}
+                              free_surface=:openswpc, nproc=1, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
     wave === :psv || error("curvilinear grids: P-SV only (wave = :psv)")
     absorber in (:impedance, :none) || error("curvilinear grids absorb with impedance boundary conditions: absorber = :impedance (or :none)")
@@ -397,6 +448,15 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         error("curvilinear grid: x must be the nodes of the SBP grid (make the mesh with curvilinear_mesh)")
     Zm = 1e3 .* Z[:, 1, :]
     all(>(0), diff(Zm; dims=2)) || error("curvilinear grid: z must increase with the row index (and rows must not touch)")
+    # MPI: this process holds the nodes ia:ib in x and CV_HALO halo nodes on either side (local = global - ox)
+    par = cv_mpi(nproc, 1)
+    me = par === nothing ? 0 : par.me
+    ia, ib = par === nothing ? (1, nx) : extrema(part_range(nx, par.dims[1], par.coords[1]))
+    par === nothing || ib - ia + 1 >= SBP_NB + CV_HALO || error("curvilinear grid: too many processes in x for $nx nodes")
+    hx = par === nothing ? 0 : CV_HALO
+    ox = ia - hx - 1
+    xr = clamp.(ia-hx:ib+hx, 1, nx)                   # the local nodes (beyond the domain ends: copies, not used)
+    nl, no = length(xr), ib - ia + 1
     f = model.fields
     haskey(f, :rho) && haskey(f, :vp) && haskey(f, :vs) || error("the model needs fields rho, vp and vs")
     ρ = f.rho[:, 1, :] .* (density_unit === :g_cm3 ? 1e3 : 1.0)
@@ -450,23 +510,32 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     end
     nb = length(hostblocks)
     blocks = Tuple(map(hostblocks) do H
-        z() = KernelAbstractions.zeros(backend, FT, nx, H.nz)
-        mem = attenuation ? (; R11=KernelAbstractions.zeros(backend, FT, NM, nx, H.nz), R22=KernelAbstractions.zeros(backend, FT, NM, nx, H.nz),
-                               R12=KernelAbstractions.zeros(backend, FT, NM, nx, H.nz)) : (;)
-        merge((; V1=z(), V2=z(), S11=z(), S22=z(), S12=z(), J=dev(FT.(H.J)), Jx=dev(FT.(H.Jx)), iρJ=dev(FT.(1 ./ (H.ρ .* H.J))),
-               lam=dev(FT.(H.lam)), mu=dev(FT.(H.mu)), tp=attenuation ? dev(FT.(H.taup)) : nothing,
-               ts=attenuation ? dev(FT.(H.taus)) : nothing, a1=dev(FT.(H.a1)), a2=dev(FT.(H.a2)), hξ=FT(hξ), hη=FT(H.hη)), mem)
+        z() = KernelAbstractions.zeros(backend, FT, nl, H.nz)
+        loc(A) = dev(FT.(A[xr, :]))
+        mem = attenuation ? (; R11=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz), R22=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz),
+                               R12=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz)) : (;)
+        merge((; V1=z(), V2=z(), S11=z(), S22=z(), S12=z(), J=loc(H.J), Jx=loc(H.Jx), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam),
+               mu=loc(H.mu), tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1),
+               a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx), mem)
     end)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing
     # the regions of a block, each with its kernel variant: the interior (branch-free), the top and bottom rows away from
     # the sides (closures in η only: vectorize) and the side columns (closures in both directions). All regions of a block
     # in one parallel loop on the CPU (one launch per kernel and block: many small launches cost much on a loaded machine).
+    # (with MPI: the global segmentation in x, intersected with the nodes of this process)
     m = SBP_NB
     regions = map(hostblocks) do H
         nz = H.nz
-        (((m, m), (nx - 2m, nz - 2m), Val(:int)), ((m, 0), (nx - 2m, m), Val(true)), ((m, nz - m), (nx - 2m, m), Val(true)),
-         ((0, 0), (m, nz), Val(false)), ((nx - m, 0), (m, nz), Val(false)))
+        R = Any[]
+        for (lo, hi, xint) in ((1, m, false), (m + 1, nx - m, true), (nx - m + 1, nx, false))
+            a, b = max(lo, ia), min(hi, ib)
+            a > b && continue
+            l0, w = a - ox - 1, b - a + 1
+            xint ? push!(R, ((l0, m), (w, nz - 2m), Val(:int)), ((l0, 0), (w, m), Val(true)), ((l0, nz - m), (w, m), Val(true))) :
+                   push!(R, ((l0, 0), (w, nz), Val(false)))
+        end
+        Tuple(R)
     end
     momentum!(dtT, damp) = for b in 1:nb
         foreach_region!(backend, momentum_cv!, (blocks[b], below_(b), above_(b), dtT, damp), regions[b])
@@ -474,18 +543,24 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     stress!(vc, dtT) = for b in 1:nb
         foreach_region!(backend, stress_cv!, (blocks[b], below_(b), above_(b), vc, dtT), regions[b])
     end
+    exchange_v!() = foreach(B -> cv_exchange!(par, (B.V1, B.V2)), blocks)
+    exchange_s!() = foreach(B -> cv_exchange!(par, (B.S11, B.S22, B.S12)), blocks)
+    owned(A) = view(A, hx+1:hx+no, :)
     # the time step: power iteration for the largest eigenvalue λ of v -> M(S(v)); leapfrog is stable for dt < 2/√λ
     if dt === nothing
         foreach(B -> (copyto!(B.V1, FT.(randn(size(B.V1)))); copyto!(B.V2, FT.(randn(size(B.V2))))), blocks)
+        exchange_v!()
         λ = 0.0
         for _ in 1:100
             foreach(B -> (fill!(B.S11, 0); fill!(B.S22, 0); fill!(B.S12, 0)), blocks)
             stress!(nothing, one(FT))
-            nrm0 = sqrt(sum(B -> sum(abs2, B.V1) + sum(abs2, B.V2), blocks))
+            exchange_s!()
+            nrm0 = sqrt(cv_sum(par, sum(B -> sum(abs2, owned(B.V1)) + sum(abs2, owned(B.V2)), blocks)))
             foreach(B -> (fill!(B.V1, 0); fill!(B.V2, 0)), blocks)
             momentum!(one(FT), false)
             KernelAbstractions.synchronize(backend)
-            nrm = sqrt(sum(B -> sum(abs2, B.V1) + sum(abs2, B.V2), blocks))
+            exchange_v!()
+            nrm = sqrt(cv_sum(par, sum(B -> sum(abs2, owned(B.V1)) + sum(abs2, owned(B.V2)), blocks)))
             λ = nrm / nrm0
             foreach(B -> (B.V1 ./= FT(nrm); B.V2 ./= FT(nrm)), blocks)
         end
@@ -532,8 +607,10 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     end
     forces = filter(s -> s isa ForceSource, srcs)
     moments = filter(s -> s isa MomentTensorSource, srcs)
-    ft = source_table(forces, (H, i, k) -> 1.0)
-    mt = source_table(moments, (H, i, k) -> 1 / H.J[i, k])
+    # the nodes of this process, in local indices
+    mine(t) = (q = findall(i -> ia <= i <= ib, t.i); (b=t.b[q], i=t.i[q] .- ox, k=t.k[q], c=t.c[q], n=t.n[q]))
+    ft = mine(source_table(forces, (H, i, k) -> 1.0))
+    mt = mine(source_table(moments, (H, i, k) -> 1 / H.J[i, k]))
     FS = (; b=dev(ft.b), i=dev(ft.i), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n),
           F=dev(FT[s.F[c] for s in forces, c in (1, 3)]),
           s=dev(FT[moment_rate(stf, tbeg + (it - 1) * dt, s.t0, s.trise) for s in forces, it in 1:nt]))
@@ -554,21 +631,34 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         k0, wz = lagrange_weights(gη, η)
         (b, i0, k0, wx, wz)
     end
-    St = (; b=dev([s[1] for s in st]), i0=dev([s[2] for s in st]), k0=dev([s[3] for s in st]),
+    own = findall(s -> ia <= s[2] + 2 <= ib, st)        # the stations of this process (the centre of their stencil)
+    st = st[own]
+    nst = length(st)
+    St = (; b=dev([s[1] for s in st]), i0=dev([s[2] - ox for s in st]), k0=dev([s[3] for s in st]),
           wx=dev(FT[s[4][a] for a in 1:6, s in st]), wz=dev(FT[s[5][a] for a in 1:6, s in st]))
     nrec = cld(nt, record_every)
     rec = KernelAbstractions.zeros(backend, FT, nrec, 10, nst)
     acc = KernelAbstractions.zeros(backend, FT, 2, nst)
     prev = KernelAbstractions.zeros(backend, FT, 2, nst)
     # the wavefield on the mesh (the shared interface rows from the block above)
+    # (with MPI: gathered on rank 0, `nothing` elsewhere)
     function velocity_field()
         cols = [k == 1 ? (1:H.nz) : (2:H.nz) for (k, H) in enumerate(hostblocks)]
-        v1 = reduce(hcat, [Array(blocks[b].V1)[:, cols[b]] for b in 1:nb])
-        v2 = reduce(hcat, [Array(blocks[b].V2)[:, cols[b]] for b in 1:nb])
+        v1 = reduce(hcat, [Array(owned(blocks[b].V1))[:, cols[b]] for b in 1:nb])
+        v2 = reduce(hcat, [Array(owned(blocks[b].V2))[:, cols[b]] for b in 1:nb])
+        if par !== nothing
+            parts = MPI.gather((ia, ib, v1, v2), par.comm; root=0)
+            me == 0 || return nothing
+            v1, v2 = zeros(nx, nzt), zeros(nx, nzt)
+            for (a, b, p1, p2) in parts
+                v1[a:b, :] .= p1; v2[a:b, :] .= p2
+            end
+        end
         r(A) = reshape(Float64.(A), nx, 1, nzt)
         return CartData(model.x.val, model.y.val, model.z.val, (; V=(r(v1), zero(r(v1)), r(v2))))
     end
-    movie = (snapshot_every > 0 && callback === nothing) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
+    movie = (snapshot_every > 0 && callback === nothing && me == 0) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
+    verbose &= me == 0
     if verbose
         @printf("SeismicWavePC: PSV on a curvilinear grid, %d × %d nodes in %d block(s) (interfaces at rows %s), %d steps of %.4g s%s%s\n",
                 nx, nzt, nb, isempty(rows) ? "–" : join(rows, ", "), nt, dt, attenuation ? ", attenuation" : "",
@@ -581,26 +671,32 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         itw > 0 && nst > 0 && foreach_item!(backend, vprev_cv!, (prev, blocks, St), nst)
         momentum!(dtT, true)
         length(forces) > 0 && run_once!(backend, force_cv!, (blocks, FS, it, dtT))
+        KernelAbstractions.synchronize(backend)
+        exchange_v!()
         nst > 0 && foreach_item!(backend, record_cv!, (rec, acc, prev, blocks, St, itw, dtT), nst)
         stress!(vc, dtT)
         length(moments) > 0 && run_once!(backend, moment_cv!, (blocks, MS, it))
+        KernelAbstractions.synchronize(backend)
+        exchange_s!()
         if snapshot_every > 0 && n % snapshot_every == 0
-            KernelAbstractions.synchronize(backend)
             data = velocity_field()
-            callback === nothing ? (movie = write_paraview(data, "wavefield_$(lpad(n, 6, '0'))"; directory=snapshot_dir, pvd=movie,
-                                                            time=tbeg + n * dt, verbose=false)) : callback(data, tbeg + n * dt)
+            if me == 0
+                callback === nothing ? (movie = write_paraview(data, "wavefield_$(lpad(n, 6, '0'))"; directory=snapshot_dir, pvd=movie,
+                                                                time=tbeg + n * dt, verbose=false)) : callback(data, tbeg + n * dt)
+            end
         end
-        if verbose && (it % max(1, nt ÷ 10) == 0 || it == nt)
-            KernelAbstractions.synchronize(backend)
-            vmax = maximum(B -> max(maximum(abs, B.V1), maximum(abs, B.V2)), blocks)
+        if (verbose || par !== nothing) && (it % max(1, nt ÷ 10) == 0 || it == nt)
+            vmax = cv_max(par, Float64(maximum(B -> max(maximum(abs, owned(B.V1)), maximum(abs, owned(B.V2))), blocks)))
             isfinite(vmax) || error("curvilinear grid: the simulation became unstable at step $it")
-            @printf("  step %6d/%d  t = %8.4f s  max|v| = %.3e m/s\n", it, nt, tbeg + it * dt, vmax)
+            verbose && @printf("  step %6d/%d  t = %8.4f s  max|v| = %.3e m/s\n", it, nt, tbeg + it * dt, vmax)
         end
     end
     KernelAbstractions.synchronize(backend)
     movie === nothing || movie_paraview(movie)
     verbose && @printf("  finished in %.2f s\n", time() - wall)
-    traces = Float64.(Array(rec))
+    traces = zeros(nrec, 10, length(stations))
+    traces[:, :, own] .= Float64.(Array(rec))
+    par === nothing || MPI.Allreduce!(traces, +, par.comm)
     return Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), traces[:, 1:2, :], traces[:, 3:4, :],
                        traces[:, 5:7, :], traces[:, 8:10, :], collect(stations), (:x, :z), (:xx, :zz, :xz),
                        wavefield ? velocity_field() : nothing)
