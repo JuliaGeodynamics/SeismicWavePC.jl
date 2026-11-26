@@ -196,8 +196,12 @@ if runs("curvilinear")
     srcs = [DoubleCoupleSource(-2.0, 0.0, -7.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0), ForceSource(4.5, 0.0, -3.0; fz=1e14, trise=1.0)]
     sts = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -9:3:9]
     push!(sts, Station("d", 0.1, 0.0, -6.0))
-    kw = (; dt=0.02, tmax=6.0, sources=srcs, stations=sts, T=Float64, verbose=false)
+    # the stable time step of the serial run, the same on all ranks (fixed for both runs)
+    stable_dt(m, srcs) = MPI.bcast((r = simulate(m; tmax=0.05, sources=srcs, T=Float64, verbose=false); r.t[2] - r.t[1]), MPI.COMM_WORLD; root=0)
+    growing(v) = !all(isfinite, v) || maximum(abs, v[3end÷4:end, :, :]) > maximum(abs, v)
+    kw = (; dt=stable_dt(m, srcs), tmax=6.0, sources=srcs, stations=sts, T=Float64, verbose=false)
     s1, s2 = simulate(m; kw...), simulate(m; kw..., nproc=4)
+    growing(s1.v) && error("MPI curvilinear 2D test: unstable")
     e = maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v)
     eV = rank == 0 ? maximum(i -> maximum(abs, s1.wavefield.fields.V[i] .- s2.wavefield.fields.V[i]), 1:3) / maximum(abs, s1.wavefield.fields.V[3]) : 0.0
     rank == 0 && println("MPI curvilinear 2D nproc=4: seismograms $e, wavefield $eV")
@@ -213,11 +217,26 @@ if runs("curvilinear")
     srcs = [DoubleCoupleSource(-1.0, 0.5, -7.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0), ForceSource(2.5, -1.5, -3.0; fz=1e14, trise=1.0)]
     sts = [Station("s$x$y", Float64(x), Float64(y), 0.0; surface=true) for x in -6:3:6 for y in (-4, 0, 5)]
     push!(sts, Station("d", 0.1, -0.2, -6.0))
-    kw = (; dt=0.03, tmax=4.0, sources=srcs, stations=sts, T=Float64, verbose=false)
+    kw = (; dt=stable_dt(m, srcs), tmax=4.0, sources=srcs, stations=sts, T=Float64, verbose=false)
     s1, s2 = simulate(m; kw...), simulate(m; kw..., nproc=(2, 2))
+    growing(s1.v) && error("MPI curvilinear 3D test: unstable")
     e = maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v)
     eV = rank == 0 ? maximum(i -> maximum(abs, s1.wavefield.fields.V[i] .- s2.wavefield.fields.V[i]), 1:3) / maximum(abs, s1.wavefield.fields.V[3]) : 0.0
     rank == 0 && println("MPI curvilinear 3D nproc=(2, 2): seismograms $e, wavefield $eV")
     (e < 1e-10 && eV < 1e-10) || error("MPI curvilinear 3D result differs on rank $rank")
+    # misfit gradient (2D)
+    mesh = curvilinear_mesh(range(-12, 12, length=97), [topo, moho]; dz=0.4, bottom=-15)
+    X, Z = mesh.x.val, mesh.z.val
+    low = Z .< moho.(X)
+    base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2))
+    srcs = [DoubleCoupleSource(-2.0, 0.0, -7.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0)]
+    sts = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -9:3:9]
+    kw = (; dt=stable_dt(addfield(mesh, base), srcs), tmax=4.0, sources=srcs, T=Float64)
+    obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* (1 .+ 0.03 .* exp.(-(X .^ 2 .+ (Z .+ 2) .^ 2) ./ 4))))); kw..., stations=sts, verbose=false)
+    J1, g1, _ = misfit_gradient(addfield(mesh, base), obs; kw...)
+    J2, g2, _ = misfit_gradient(addfield(mesh, base), obs; kw..., nproc=4)
+    e = (abs(J1 / J2 - 1), maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs)))
+    rank == 0 && println("MPI curvilinear gradient nproc=4: misfit, gradient $e")
+    all(<(1e-10), e) || error("MPI curvilinear gradient differs on rank $rank")
 end
 MPI.Barrier(MPI.COMM_WORLD)

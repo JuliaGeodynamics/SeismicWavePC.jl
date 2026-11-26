@@ -315,7 +315,8 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     owned(A) = view(A, hx+1:hx+nox, hx+1:hx+noy, :)
     vnorm2() = cv_sum(par, sum(B -> sum(abs2, owned(B.V1)) + sum(abs2, owned(B.V2)) + sum(abs2, owned(B.V3)), blocks))
     if dt === nothing
-        foreach(B -> foreach(A -> copyto!(A, FT.(randn(size(A)))), (B.V1, B.V2, B.V3)), blocks)
+        rng = Random.Xoshiro(20261126 + me)                 # (seeded: the same time step in every run)
+        foreach(B -> foreach(A -> copyto!(A, FT.(randn(rng, size(A)))), (B.V1, B.V2, B.V3)), blocks)
         exchange_v!()
         λ = 0.0
         for _ in 1:100
