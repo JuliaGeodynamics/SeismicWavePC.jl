@@ -224,6 +224,23 @@ if runs("curvilinear")
     eV = rank == 0 ? maximum(i -> maximum(abs, s1.wavefield.fields.V[i] .- s2.wavefield.fields.V[i]), 1:3) / maximum(abs, s1.wavefield.fields.V[3]) : 0.0
     rank == 0 && println("MPI curvilinear 3D nproc=(2, 2): seismograms $e, wavefield $eV")
     (e < 1e-10 && eV < 1e-10) || error("MPI curvilinear 3D result differs on rank $rank")
+    # snapshot planes (netCDF): collected by rank 0 and in pieces, against the serial files
+    using NCDatasets
+    snapdirs = MPI.bcast(rank == 0 ? (mktempdir(), mktempdir(), mktempdir()) : nothing, 0, MPI.COMM_WORLD)
+    for (dir, nproc, pieces) in zip(snapdirs, (1, (2, 2), (2, 2)), (false, false, true))
+        (nproc == 1 && rank > 0) || simulate(m; kw..., tmax=1.0, nproc, snapshot_every=25, snapshot_dir=dir,
+                                             snapshots=Snapshots(; xy=-1.0, xz=0.4, yz=-0.3, fs=true, quantities=(:v, :u), pieces))
+        MPI.Barrier(MPI.COMM_WORLD)
+    end
+    if rank == 0
+        same(a, b) = size(a) == size(b) && all(((x, y),) -> x == y || (isnan(x) && isnan(y)), zip(a, b))
+        for f in readdir(snapdirs[1]), dir in snapdirs[2:3]
+            a, b = read_snapshots(joinpath(snapdirs[1], f)), read_snapshots(joinpath(dir, f))
+            (a.axes == b.axes && a.t == b.t && all(v -> same(a[v], b[v]), a.variables)) || error("MPI curvilinear snapshot $f ($dir) differs")
+        end
+        println("MPI curvilinear snapshots: $(length(readdir(snapdirs[1]))) files, collected and in $(length(readdir(snapdirs[3]))) pieces, identical to the serial run")
+    end
+    MPI.Barrier(MPI.COMM_WORLD)
     # misfit gradient (2D, attenuation)
     mesh = curvilinear_mesh(range(-12, 12, length=97), [topo, moho]; dz=0.4, bottom=-15)
     X, Z = mesh.x.val, mesh.z.val

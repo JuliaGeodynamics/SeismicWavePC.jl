@@ -1,7 +1,7 @@
 # Curvilinear (terrain-following) grids: SBP operators, the mesh and its blocks, agreement with the staggered solver on a
 # flat model (moment tensor source, attenuation), Rayleigh waves with stations exactly on the surface, and a model with
 # topography and a curved interface (stability, Float32).
-using SeismicWavePC, GeophysicalModelGenerator, LinearAlgebra, Test
+using SeismicWavePC, GeophysicalModelGenerator, LinearAlgebra, NCDatasets, Test
 const SW = SeismicWavePC
 isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
 
@@ -293,5 +293,33 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         L = zeros(size(X))
         simulate(m; kw..., stations=sts, verbose=false, snapshot_every=1, callback=(w, t) -> (L .+= w.fields.V[1] .^ 2 .+ w.fields.V[3] .^ 2))
         @test g.fields.illumination ≈ L rtol = 1e-12
+    end
+    @testset "snapshot planes (netCDF)" begin
+        topos(x, y) = 1.0 * exp(-(x^2 + y^2) / 10)
+        mesh = curvilinear_mesh(range(-6, 6, length=33), range(-5, 5, length=29), [topos]; dz=0.4, bottom=-8)
+        o = ones(size(mesh.x.val))
+        m = addfield(mesh, (; rho=2600 .* o, vp=5.5 .* o, vs=3.2 .* o))
+        kw = (; tmax=1.5, sources=[DoubleCoupleSource(-1.0, 0.5, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0)], T=Float64, verbose=false)
+        dir = mktempdir()
+        last = Ref{Any}()
+        simulate(m; kw..., snapshot_every=20, snapshot_dir=dir, snapshots=Snapshots(fs=true, xy=0.3, quantities=(:v, :u)),
+                 callback=(w, t) -> (last[] = (w, t)))
+        s = read_snapshots(joinpath(dir, "swpc.3d.fs.v.nc"))
+        w, t = last[]
+        @test s.t[end] ≈ t rtol = 1e-6                                              # (Float32 in the file)
+        @test s["Vz", length(s.t)] ≈ w.fields.V[3][:, :, end] rtol = 1e-6        # the free surface: the top nodes
+        xy = read_snapshots(joinpath(dir, "swpc.3d.xy.v.nc"))
+        air = isnan.(xy["rho"])                                                  # above the topography
+        @test 0 < count(air) < length(air) && all(iszero, xy["Vz", length(xy.t)][air])
+        @test all(>(0), s["max-A"])
+        # 2D: the model resampled at regular heights
+        topo2(x) = 1.0 * exp(-x^2 / 10)
+        mesh = curvilinear_mesh(range(-6, 6, length=33), [topo2]; dz=0.4, bottom=-8)
+        o = ones(size(mesh.x.val))
+        dir = mktempdir()
+        simulate(addfield(mesh, (; rho=2600 .* o, vp=5.5 .* o, vs=3.2 .* o)); kw..., sources=[ForceSource(0.0, 0.0, -3.0; fz=1e14)],
+                 snapshot_every=20, snapshot_dir=dir, snapshots=Snapshots(xz=true, quantities=(:v,)))
+        s = read_snapshots(joinpath(dir, "swpc.psv.xz.v.nc"))
+        @test first.(s.axes) == ("x", "z") && maximum(abs, s["Vz", length(s.t)]) > 0
     end
 end

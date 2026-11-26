@@ -62,7 +62,10 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
   grid (also with attenuation, on GPUs and with MPI).
 - **Anisotropy (VTI)** as on the staggered grid (fields `epsilon`, `delta`, `gamma`; the symmetry axis stays vertical on the
   deformed mesh), also in gradients and Born modelling.
-- **Not yet:** SH waves, plane waves.
+- **Snapshots:** ParaView files and callbacks of the whole wavefield, and netCDF planes ([`Snapshots`](@ref): the free
+  surface `fs` on the topography, `xy` planes and sections resampled at regular heights; `:v`, `:u`, also in pieces).
+- **Not yet:** SH waves, plane waves, a PML (the sides and the bottom absorb with impedance conditions), snapshots of
+  divergence and rotation (`:ps`).
 
 ![A hill, a Moho-like interface and a magma chamber on a curvilinear grid](assets/2D_curvilinear.png)
 

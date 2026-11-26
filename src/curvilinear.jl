@@ -445,7 +445,7 @@ limit), `tmax` (duration) instead of `nt`, `absorber = :impedance` (or `:none`: 
 """
 function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=nothing, sources, stations=Station[], stf=:kupper,
                               tbeg=0.0, absorber=:impedance, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
-                              density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, backend=CPU(),
+                              density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, snapshots=nothing, backend=CPU(),
                               T::Type{FT}=Float32, verbose=true, wavefield=true, jump=0.05, wave=:psv, interpolation=:sinc,
                               free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
@@ -695,7 +695,11 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         r(A) = reshape(Float64.(A), nx, 1, nzt)
         return CartData(model.x.val, model.y.val, model.z.val, (; V=(r(v1), zero(r(v1)), r(v2))))
     end
-    movie = (snapshot_every > 0 && callback === nothing && me == 0) ? movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
+    planes = snapshots === nothing ? nothing :
+             setup_planes_cv(snapshots, 2, (; hostblocks, nx, ny=1, gx, gy=nothing, Zm, ia, ib, ja=1, jb=1, oy=0, ox, dev, backend, FT, dir=snapshot_dir,
+                                              me, parallel=par !== nothing))
+    movie = (snapshot_every > 0 && callback === nothing && snapshots === nothing && me == 0) ?
+            movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     verbose &= me == 0
     if verbose
         @printf("SeismicWavePC: PSV on a curvilinear grid, %d × %d nodes in %d block(s) (interfaces at rows %s), %d steps of %.4g s%s%s\n",
@@ -734,7 +738,17 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     for it in 1:nt
         n = it - 1
         step!(it, true)
-        if snapshot_every > 0 && n % snapshot_every == 0
+        if planes !== nothing                          # netCDF planes: displacement and peaks every step
+            store = snapshot_every > 0 && n % snapshot_every == 0
+            for p in planes
+                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, blocks, p.pts, dtT, store, Val(2)), length(p.own))
+            end
+            if store
+                KernelAbstractions.synchronize(backend)
+                write_planes(planes, :psv, n ÷ snapshot_every + 1, tbeg + n * dt, 1.0, par !== nothing, me)
+            end
+        end
+        if snapshot_every > 0 && n % snapshot_every == 0 && (planes === nothing || callback !== nothing)
             data = velocity_field()
             if me == 0
                 callback === nothing ? (movie = write_paraview(data, "wavefield_$(lpad(n, 6, '0'))"; directory=snapshot_dir, pvd=movie,
@@ -749,6 +763,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     end
     KernelAbstractions.synchronize(backend)
     movie === nothing || movie_paraview(movie)
+    planes === nothing || write_peaks(planes, snapshots.quantities, :psv, 1.0, par !== nothing, me)
     verbose && @printf("  finished in %.2f s\n", time() - wall)
     return seismograms(all_traces(), wavefield ? velocity_field() : nothing)
 end
