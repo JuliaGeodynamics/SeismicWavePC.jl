@@ -171,18 +171,19 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         end
     end
 
-    @testset "misfit gradient (2D) against finite differences" begin
+    @testset "misfit gradient (2D, attenuation) against finite differences" begin
         topog(x) = 1.2 * exp(-x^2 / 12)
         mohog(x) = -4.0 + 0.6 * sin(2π * x / 10)
         mesh = curvilinear_mesh(range(-8, 8, length=49), [topog, mohog]; dz=0.33, bottom=-10)
         X, Z = mesh.x.val, mesh.z.val
         low = Z .< mohog.(X)
-        base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2))
+        base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=ifelse.(low, 300.0, 60.0),
+                Qs=ifelse.(low, 150.0, 30.0))
         srcs = [DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0), ForceSource(2.0, 0.0, -2.5; fz=1e14, trise=1.0)]
         sts = [[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -6:3:6]; Station("d", 0.3, 0.0, -6.0)]
         r0 = simulate(addfield(mesh, base); tmax=0.1, sources=srcs, T=Float64, verbose=false)
         kw = (; dt=r0.t[2] - r0.t[1], tmax=4.0, sources=srcs, T=Float64)
-        pert = merge(base, (; vs=base.vs .* (1 .- 0.04 .* exp.(-((X .- 0.5) .^ 2 .+ (Z .+ 1) .^ 2) ./ 3))))
+        pert = merge(base, (; vs=base.vs .* (1 .- 0.04 .* exp.(-((X .- 0.5) .^ 2 .+ (Z .+ 1) .^ 2) ./ 3)), Qs=base.Qs .* 1.3))
         obs = simulate(addfield(mesh, pert); kw..., stations=sts, verbose=false)
         J, g, _ = misfit_gradient(addfield(mesh, base), obs; kw..., checkpoint_steps=17)
         @test keys(g.fields) == (:rho, :vp, :vs, :Qp, :Qs)
@@ -191,7 +192,8 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         for (f, δ) in ((:vs, 0.02 .* base.vs .* exp.(-((X .- 2) .^ 2 .+ (Z .- 0.2) .^ 2) ./ 3)),     # at the surface
                        (:vp, 0.02 .* base.vp .* exp.(-((X .+ 2) .^ 2 .+ (Z .+ 4) .^ 2) ./ 3)),     # across the interface
                        (:rho, 0.02 .* base.rho .* exp.(-((X .- 0.5) .^ 2 .+ (Z .+ 2) .^ 2) ./ 4)),
-                       (:vs, 0.02 .* base.vs .* exp.(-((X .+ 7.5) .^ 2 .+ (Z .+ 5) .^ 2) ./ 2)))   # at an absorbing side
+                       (:vs, 0.02 .* base.vs .* exp.(-((X .+ 7.5) .^ 2 .+ (Z .+ 5) .^ 2) ./ 2)),   # at an absorbing side
+                       (:Qs, 5 .* exp.(-((X .- 1) .^ 2 .+ (Z .+ 1) .^ 2) ./ 4)), (:Qp, 10 .* exp.(-((X .+ 1) .^ 2 .+ (Z .+ 2) .^ 2) ./ 4)))
             ε = 1e-3
             fd = (Jof(addfield(mesh, merge(base, (; f => base[f] .+ ε .* δ)))) - Jof(addfield(mesh, merge(base, (; f => base[f] .- ε .* δ))))) / 2ε
             @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6

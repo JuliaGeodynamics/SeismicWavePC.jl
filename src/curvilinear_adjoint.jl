@@ -1,11 +1,12 @@
-# Misfit gradients on curvilinear grids (2D P-SV, elastic): the exact discrete adjoint of the leapfrog scheme of
-# curvilinear.jl. The scheme conserves energy, E = ½ Σ H (ρJ |v|² + J σ:C⁻¹σ), so its momentum operator A (divergence,
+# Misfit gradients on curvilinear grids (2D P-SV and 3D): the exact discrete adjoint of the leapfrog scheme of
+# curvilinear.jl and curvilinear3d.jl. The scheme conserves energy, E = ½ Σ H (ρJ |v|² + J σ:C⁻¹σ), so its momentum operator A (divergence,
 # all SAT terms: ρJ ∂t v = A σ) and gradient operator G (strains, with the interface penalty: ∂t σ = C G v) satisfy
 #     H A = -(H J G)ᵀ   (in the pairing σ11 exx + σ22 ezz + σ12 exz),
 # i.e. Aᵀ = -(H J) G H⁻¹ and Gᵀ = -H A (H J)⁻¹: the adjoint applies the forward kernels (on "operator blocks" with
 # ρJ = 1 for A, and λ = 0, μ = ½ for G) and pointwise scalings. The implicit impedance damping is diagonal. The forward
-# wavefield comes from checkpoints, recomputed segment by segment. Gradients with respect to λ, μ, 1/(ρJ) and the damping
-# (vp, vs at the boundary nodes) are turned into ρ, vp, vs on the nodes of the model.
+# wavefield comes from checkpoints, recomputed segment by segment. Attenuation: adjoint memory variables (the transposed
+# Crank-Nicolson recursion; pointwise). Gradients with respect to λ, μ, τp, τs, 1/(ρJ) and the damping (vp, vs at the
+# boundary nodes) are turned into ρ, vp, vs, Qp, Qs on the nodes of the model.
 
 struct CurvilinearGradient{O,M}
     observed::O
@@ -34,153 +35,6 @@ Base.@propagate_inbounds function force_grad_cv!(G, A, S, it, dt)
     end
 end
 
-function drive_curvilinear(d::CurvilinearGradient, c)
-    (; backend, FT, blocks, hostblocks, nb, nx, nzt, nl, no, hx, ox, xr, ia, ib, par, me, dt, dtT, nt, nrec, record_every,
-       momentum!, stress!, step!, exchange_v!, exchange_s!, St, nst, FS, forces, Hξ, tbeg, attenuation, dev, model,
-       all_traces, stations, density_unit) = c
-    attenuation && error("misfit gradients on curvilinear grids: elastic models only (for now)")
-    zero_(H) = KernelAbstractions.zeros(backend, FT, nl, H.nz)
-    fields(B) = (B.V1, B.V2, B.S11, B.S22, B.S12)
-    # 1. forward, with checkpoints (host) every K steps; the misfit and its residual
-    K = something(d.checkpoint_steps, max(1, ceil(Int, sqrt(nt))))
-    ckpt = Dict{Int,Any}()
-    for it in 1:nt
-        (it - 1) % K == 0 && (ckpt[it] = [Array.(fields(B)) for B in blocks])
-        step!(it, true)
-    end
-    tr = all_traces()
-    J, adj = d.misfit(tr[:, 1:2, :], d.observed.v, d.observed.t)
-    # the residuals go to the nodes of this process of every station whose stencil reaches them (a station near a
-    # subdomain boundary feeds both sides; the forward run reads the neighbour's nodes from the halo instead)
-    sel = [n for (n, s) in enumerate(c.st_all) if s[2] <= ib && s[2] + 5 >= ia]
-    St = (; b=dev([c.st_all[n][1] for n in sel]), i0=dev([c.st_all[n][2] - ox for n in sel]), k0=dev([c.st_all[n][3] for n in sel]),
-          wx=dev(FT[(ia <= c.st_all[n][2] + a - 1 <= ib) * c.st_all[n][4][a] for a in 1:6, n in sel]),
-          wz=dev(FT[c.st_all[n][5][a] for a in 1:6, n in sel]))
-    nst = length(sel)
-    Rres = dev(FT.(adj[:, :, sel]))
-    # 2. the adjoint fields, operator blocks and gradient accumulators
-    ones_(H) = (A = zero_(H); fill!(A, 1); A)
-    halves(H) = (A = zero_(H); fill!(A, FT(0.5)); A)
-    loc(A) = dev(FT.(A[xr, :]))
-    Hw = [loc([Hξ[i] * h for i in 1:nx, h in sbp_weights(H.nz, H.hη)]) for H in hostblocks]          # SBP norm per node
-    HJ = [Hw[b] .* blocks[b].J for b in 1:nb]
-    Adj = Tuple((; V1=zero_(H), V2=zero_(H), S11=zero_(H), S22=zero_(H), S12=zero_(H)) for H in hostblocks)
-    Grad = Tuple((; lam=zero_(H), mu=zero_(H), iρJ=zero_(H), a1=zero_(H), a2=zero_(H)) for H in hostblocks)
-    Win = Tuple((zero_(H), zero_(H)) for H in hostblocks)                  # inputs of G (velocities)
-    Gout = Tuple((zero_(H), zero_(H), zero_(H)) for H in hostblocks)       # its strains (exx, ezz, exz/2)
-    Yin = Tuple((zero_(H), zero_(H), zero_(H)) for H in hostblocks)        # inputs of A (stresses)
-    Aout = Tuple((zero_(H), zero_(H)) for H in hostblocks)                 # A y
-    Gblk = Tuple(merge(blocks[b], (; V1=Win[b][1], V2=Win[b][2], S11=Gout[b][1], S22=Gout[b][2], S12=Gout[b][3],
-                                    lam=zero_(hostblocks[b]), mu=halves(hostblocks[b]), tp=nothing, ts=nothing)) for b in 1:nb)
-    Ablk = Tuple(merge(blocks[b], (; S11=Yin[b][1], S22=Yin[b][2], S12=Yin[b][3], V1=Aout[b][1], V2=Aout[b][2],
-                                    iρJ=ones_(hostblocks[b]))) for b in 1:nb)
-    AblkF = Tuple(merge(Ablk[b], (; S11=blocks[b].S11, S22=blocks[b].S22, S12=blocks[b].S12)) for b in 1:nb)   # A σ of the forward
-    "G w: the strains of the velocities in Win (exchanged first); exz in Gout[3] is halved"
-    function Gop!()
-        foreach(b -> cv_exchange!(par, Win[b]), 1:nb)
-        foreach(g -> foreach(A -> fill!(A, 0), g), Gout)
-        stress!(nothing, one(FT), Gblk)
-    end
-    function Aop!(blk)
-        blk === Ablk && foreach(b -> cv_exchange!(par, Yin[b]), 1:nb)
-        foreach(a -> foreach(A -> fill!(A, 0), a), Aout)
-        momentum!(one(FT), false, blk)
-    end
-    # 3. backward, segment by segment
-    store = [Tuple(Tuple(zero_(H) for _ in 1:6) for H in hostblocks) for _ in 1:K]   # per step: v old (2), v new (2), A σ (2)
-    for s0 in sort!(collect(keys(ckpt)); rev=true)
-        s1 = min(s0 + K - 1, nt)
-        for (b, B) in enumerate(blocks), (A, h) in zip(fields(B), ckpt[s0][b])
-            copyto!(A, h)
-        end
-        for it in s0:s1
-            q = store[it-s0+1]
-            Aop!(AblkF)
-            for b in 1:nb
-                copyto!(q[b][1], blocks[b].V1); copyto!(q[b][2], blocks[b].V2)
-                copyto!(q[b][5], Aout[b][1]); copyto!(q[b][6], Aout[b][2])
-            end
-            step!(it, false)
-            for b in 1:nb
-                copyto!(q[b][3], blocks[b].V1); copyto!(q[b][4], blocks[b].V2)
-            end
-        end
-        for it in s1:-1:s0
-            n = it - 1
-            itw = n % record_every == 0 ? n ÷ record_every + 1 : 0
-            q = store[it-s0+1]
-            # stress update σ^{n+1} = σⁿ + dt C G v^{n+1/2}: gradient (λ, μ) and v̄ += dt Gᵀ C σ̄
-            for b in 1:nb
-                copyto!(Win[b][1], q[b][3]); copyto!(Win[b][2], q[b][4])
-            end
-            Gop!()
-            for b in 1:nb
-                a, g, (ex, ez, ex2) = Adj[b], Grad[b], Gout[b]
-                @. g.lam += dtT * (a.S11 + a.S22) * (ex + ez)
-                @. g.mu += dtT * (2a.S11 * ex + 2a.S22 * ez + 2a.S12 * ex2)
-                l, m = blocks[b].lam, blocks[b].mu
-                Y1, Y2, Y3 = Yin[b]
-                @. Y1 = ((l + 2m) * a.S11 + l * a.S22) / HJ[b]
-                @. Y2 = (l * a.S11 + (l + 2m) * a.S22) / HJ[b]
-                @. Y3 = m * a.S12 / HJ[b]
-            end
-            Aop!(Ablk)
-            for b in 1:nb
-                @. Adj[b].V1 -= dtT * Hw[b] * Aout[b][1]
-                @. Adj[b].V2 -= dtT * Hw[b] * Aout[b][2]
-            end
-            # recording at step n: v(tₙ) = (v^{n-1/2} + v^{n+1/2}) / 2
-            itw > 0 && nst > 0 && run_once!(backend, residual_cv!, (Adj, St, Rres, itw, FT(0.5)))
-            # momentum v^{n+1/2} = P v^{n-1/2} + Q dt (1/ρJ) A σⁿ (+ forces): gradient (1/ρJ, damping) and σ̄ += Aᵀ(...)
-            length(forces) > 0 && run_once!(backend, force_grad_cv!, (Grad, Adj, FS, it, dtT))
-            for b in 1:nb
-                a, g, B = Adj[b], Grad[b], blocks[b]
-                b1, b2 = B.a1, B.a2
-                @. g.iρJ += dtT * (a.V1 * q[b][5] / (1 + b1 * dtT / 2) + a.V2 * q[b][6] / (1 + b2 * dtT / 2))
-                @. g.a1 -= dtT / 2 * a.V1 * (q[b][1] + q[b][3]) / (1 + b1 * dtT / 2)
-                @. g.a2 -= dtT / 2 * a.V2 * (q[b][2] + q[b][4]) / (1 + b2 * dtT / 2)
-                @. Win[b][1] = dtT * B.iρJ * a.V1 / ((1 + b1 * dtT / 2) * Hw[b])
-                @. Win[b][2] = dtT * B.iρJ * a.V2 / ((1 + b2 * dtT / 2) * Hw[b])
-            end
-            Gop!()
-            for b in 1:nb
-                a, B, (ex, ez, ex2) = Adj[b], blocks[b], Gout[b]
-                @. a.S11 -= HJ[b] * ex
-                @. a.S22 -= HJ[b] * ez
-                @. a.S12 -= HJ[b] * 2ex2
-                @. a.V1 *= (1 - B.a1 * dtT / 2) / (1 + B.a1 * dtT / 2)
-                @. a.V2 *= (1 - B.a2 * dtT / 2) / (1 + B.a2 * dtT / 2)
-            end
-            itw > 0 && nst > 0 && run_once!(backend, residual_cv!, (Adj, St, Rres, itw, FT(0.5)))
-        end
-    end
-    KernelAbstractions.synchronize(backend)
-    # 4. to ρ, vp, vs [per kg/m³, km/s] on the nodes of the model (owned nodes; summed over the processes)
-    gρ, gvp, gvs = zeros(nx, nzt), zeros(nx, nzt), zeros(nx, nzt)
-    for (b, H) in enumerate(hostblocks)
-        g = map(A -> Float64.(Array(A)), Grad[b])
-        for k in 1:H.nz, il in hx+1:hx+no
-            i = il + ox
-            ρ, vp, vs, Jn = H.ρ[i, k], H.vp[i, k], H.vs[i, k], H.J[i, k]
-            gl, gm, gi, ga1, ga2 = g.lam[il, k], g.mu[il, k], g.iρJ[il, k], g.a1[il, k], g.a2[il, k]
-            r = H.kmap[i, k]
-            gρ[i, r] += gl * (vp^2 - 2vs^2) + gm * vs^2 - gi / (ρ^2 * Jn)
-            gvp[i, r] += gl * 2ρ * vp + ga1 * H.da.a1vp[i, k] + ga2 * H.da.a2vp[i, k]
-            gvs[i, r] += -4gl * ρ * vs + 2gm * ρ * vs + ga1 * H.da.a1vs[i, k] + ga2 * H.da.a2vs[i, k]
-        end
-    end
-    if par !== nothing
-        foreach(A -> MPI.Allreduce!(A, +, par.comm), (gρ, gvp, gvs))
-    end
-    rho_unit = density_unit === :g_cm3 ? 1e3 : 1.0
-    r3(A) = reshape(A, nx, 1, nzt)
-    g = CartData(model.x.val, model.y.val, model.z.val, (; rho=r3(gρ .* rho_unit), vp=r3(gvp .* 1e3), vs=r3(gvs .* 1e3),
-                                                          Qp=r3(zeros(nx, nzt)), Qs=r3(zeros(nx, nzt))))
-    return J, g, Any[nothing for _ in 1:c.nsrc]              # (no source gradients on curvilinear grids yet)
-end
-
-# ------------------------------------------------------------------ 3D
-
 Base.@propagate_inbounds function residual3_cv!(blocks, St, R, itw, s)
     for n in 1:length(St.b)
         B = blocks[St.b[n]]
@@ -201,49 +55,71 @@ Base.@propagate_inbounds function force3_grad_cv!(G, A, S, it, dt)
     end
 end
 
-function drive_curvilinear3(d::CurvilinearGradient, c)
-    (; backend, FT, blocks, hostblocks, nb, nx, ny, nzt, nlx, nly, nox, noy, hx, ox, oy, xr, yr, ia, ib, ja, jb, par, dt, dtT, nt,
-       record_every, momentum!, stress!, step!, FS, forces, Hξ, Hψ, attenuation, dev, model, all_traces, density_unit) = c
-    attenuation && error("misfit gradients on curvilinear grids: elastic models only (for now)")
-    zero_(H) = KernelAbstractions.zeros(backend, FT, nlx, nly, H.nz)
-    fill_(H, v) = (A = zero_(H); fill!(A, FT(v)); A)
-    fields(B) = (B.V1, B.V2, B.V3, B.S11, B.S22, B.S33, B.S23, B.S13, B.S12)
-    # 1. forward with checkpoints; misfit and residual
+drive_curvilinear(d::CurvilinearGradient, c) = curvilinear_gradient(d, c, 2)
+drive_curvilinear3(d::CurvilinearGradient, c) = curvilinear_gradient(d, c, 3)
+
+function curvilinear_gradient(d::CurvilinearGradient, c, N)
+    (; backend, FT, blocks, hostblocks, nb, nx, nzt, hx, ox, par, dtT, nt, record_every, momentum!, stress!, step!, FS, forces,
+       Hξ, attenuation, dev, model, all_traces, density_unit, vc, ts, fq_ref, loc) = c
+    ny, oy = N == 2 ? (1, 0) : (c.ny, c.oy)
+    vn = N == 2 ? (:V1, :V2) : (:V1, :V2, :V3)
+    sn = N == 2 ? (:S11, :S22, :S12) : (:S11, :S22, :S33, :S23, :S13, :S12)       # normal stresses first
+    rn = N == 2 ? (:R11, :R22, :R12) : (:R11, :R22, :R33, :R23, :R13, :R12)
+    an = N == 2 ? (:a1, :a2) : (:a1, :a2, :a3)
+    nS = length(sn)
+    comps(B, names) = map(k -> getfield(B, k), names)
+    zero_(b, n...) = KernelAbstractions.zeros(backend, FT, n..., size(blocks[b].J)...)
+    fill_(b, v) = (A = zero_(b); fill!(A, FT(v)); A)
+    fields(B) = (comps(B, vn)..., comps(B, sn)..., (attenuation ? comps(B, rn) : ())...)
+    # 1. forward, with checkpoints (host) every K steps; the misfit and its residual
     K = something(d.checkpoint_steps, max(1, ceil(Int, sqrt(nt))))
     ckpt = Dict{Int,Any}()
     for it in 1:nt
         (it - 1) % K == 0 && (ckpt[it] = [Array.(fields(B)) for B in blocks])
         step!(it, true)
     end
-    tr = all_traces()
-    J, adj = d.misfit(tr[:, 1:3, :], d.observed.v, d.observed.t)
-    # the residuals go to the nodes of this process of every station whose stencil reaches them
+    J, adj = d.misfit(all_traces()[:, 1:N, :], d.observed.v, d.observed.t)
+    # the residuals go to the nodes of this process of every station whose stencil reaches them (a station near a
+    # subdomain boundary feeds both sides; the forward run reads the neighbour's nodes from the halo instead)
     sa = c.st_all
-    sel = [n for (n, s) in enumerate(sa) if s[2] <= ib && s[2] + 5 >= ia && s[3] <= jb && s[3] + 5 >= ja]
-    St = (; b=dev([sa[n][1] for n in sel]), i0=dev([sa[n][2] - ox for n in sel]), j0=dev([sa[n][3] - oy for n in sel]),
-          k0=dev([sa[n][4] for n in sel]), wx=dev(FT[(ia <= sa[n][2] + a - 1 <= ib) * sa[n][5][a] for a in 1:6, n in sel]),
-          wy=dev(FT[(ja <= sa[n][3] + a - 1 <= jb) * sa[n][6][a] for a in 1:6, n in sel]), wz=dev(FT[sa[n][7][a] for a in 1:6, n in sel]))
+    inx(s) = s[2] <= c.ib && s[2] + 5 >= c.ia
+    wx(s, a) = (c.ia <= s[2] + a - 1 <= c.ib) * s[N+2][a]
+    if N == 2
+        sel = [n for (n, s) in enumerate(sa) if inx(s)]
+        St = (; b=dev([sa[n][1] for n in sel]), i0=dev([sa[n][2] - ox for n in sel]), k0=dev([sa[n][3] for n in sel]),
+              wx=dev(FT[wx(sa[n], a) for a in 1:6, n in sel]), wz=dev(FT[sa[n][5][a] for a in 1:6, n in sel]))
+        residual!, force_grad! = residual_cv!, force_grad_cv!
+    else
+        sel = [n for (n, s) in enumerate(sa) if inx(s) && s[3] <= c.jb && s[3] + 5 >= c.ja]
+        St = (; b=dev([sa[n][1] for n in sel]), i0=dev([sa[n][2] - ox for n in sel]), j0=dev([sa[n][3] - oy for n in sel]),
+              k0=dev([sa[n][4] for n in sel]), wx=dev(FT[wx(sa[n], a) for a in 1:6, n in sel]),
+              wy=dev(FT[(c.ja <= sa[n][3] + a - 1 <= c.jb) * sa[n][6][a] for a in 1:6, n in sel]),
+              wz=dev(FT[sa[n][7][a] for a in 1:6, n in sel]))
+        residual!, force_grad! = residual3_cv!, force3_grad_cv!
+    end
     nst = length(sel)
     Rres = dev(FT.(adj[:, :, sel]))
-    # 2. adjoint fields, operator blocks, gradient accumulators
-    Hw = [dev(FT.([Hξ[xr[i]] * Hψ[yr[j]] * h for i in 1:nlx, j in 1:nly, h in sbp_weights(H.nz, H.hη)])) for H in hostblocks]
+    # 2. the adjoint fields, operator blocks and gradient accumulators
+    weights(H) = N == 2 ? [Hξ[i] * h for i in 1:nx, h in sbp_weights(H.nz, H.hη)] :
+                          [Hξ[i] * c.Hψ[j] * h for i in 1:nx, j in 1:ny, h in sbp_weights(H.nz, H.hη)]
+    Hw = [dev(FT.(loc(weights(H)))) for H in hostblocks]                                    # SBP norm per node
     HJ = [Hw[b] .* blocks[b].J for b in 1:nb]
-    Adj = Tuple((; V1=zero_(H), V2=zero_(H), V3=zero_(H), S11=zero_(H), S22=zero_(H), S33=zero_(H), S23=zero_(H), S13=zero_(H),
-                   S12=zero_(H)) for H in hostblocks)
-    Grad = Tuple((; lam=zero_(H), mu=zero_(H), iρJ=zero_(H), a=(zero_(H), zero_(H), zero_(H))) for H in hostblocks)
-    Win = Tuple(ntuple(_ -> zero_(H), 3) for H in hostblocks)
-    Gout = Tuple(ntuple(_ -> zero_(H), 6) for H in hostblocks)        # exx, eyy, ezz, eyz/2, exz/2, exy/2
-    Yin = Tuple(ntuple(_ -> zero_(H), 6) for H in hostblocks)
-    Aout = Tuple(ntuple(_ -> zero_(H), 3) for H in hostblocks)
-    Tr = Tuple(ntuple(_ -> zero_(H), 3) for H in hostblocks)          # the tractions of the A operator
-    Gblk = Tuple(merge(blocks[b], (; V1=Win[b][1], V2=Win[b][2], V3=Win[b][3], S11=Gout[b][1], S22=Gout[b][2], S33=Gout[b][3],
-                                    S23=Gout[b][4], S13=Gout[b][5], S12=Gout[b][6], lam=zero_(hostblocks[b]),
-                                    mu=fill_(hostblocks[b], 0.5), tp=nothing, ts=nothing)) for b in 1:nb)
-    Ablk = Tuple(merge(blocks[b], (; S11=Yin[b][1], S22=Yin[b][2], S33=Yin[b][3], S23=Yin[b][4], S13=Yin[b][5], S12=Yin[b][6],
-                                    V1=Aout[b][1], V2=Aout[b][2], V3=Aout[b][3], iρJ=fill_(hostblocks[b], 1), G1=Tr[b][1],
-                                    G2=Tr[b][2], G3=Tr[b][3])) for b in 1:nb)
-    AblkF = Tuple(merge(Ablk[b], (; S11=blocks[b].S11, S22=blocks[b].S22, S33=blocks[b].S33, S23=blocks[b].S23, S13=blocks[b].S13,
-                                     S12=blocks[b].S12)) for b in 1:nb)
+    Adj = Tuple(NamedTuple{(vn..., sn...)}(ntuple(_ -> zero_(b), N + nS)) for b in 1:nb)
+    Rb = Tuple(attenuation ? ntuple(_ -> zero_(b, NM), nS) : () for b in 1:nb)            # adjoint memory variables
+    Qm = Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb)                                      # Σₘ c2ₘ R̄ₘ (0: elastic)
+    Wk = Tuple(ntuple(_ -> zero_(b), 7) for b in 1:nb)                                       # work arrays
+    Grad = Tuple((; lam=zero_(b), mu=zero_(b), tp=zero_(b), ts=zero_(b), iρJ=zero_(b), a=ntuple(_ -> zero_(b), N)) for b in 1:nb)
+    Win = Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb)        # inputs of G (velocities)
+    Gout = Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb)      # its strains (normal; shear halved)
+    Yin = Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb)       # inputs of A (stresses)
+    Aout = Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb)       # A y
+    nomem = attenuation ? NamedTuple{rn}(ntuple(_ -> nothing, nS)) : (;)
+    Gblk = Tuple(merge(blocks[b], NamedTuple{vn}(Win[b]), NamedTuple{sn}(Gout[b]), nomem,
+                       (; lam=zero_(b), mu=fill_(b, 0.5), tp=nothing, ts=nothing)) for b in 1:nb)
+    tractions(b) = N == 3 ? (; G1=zero_(b), G2=zero_(b), G3=zero_(b)) : (;)                 # (3D: the η tractions of A)
+    Ablk = Tuple(merge(blocks[b], NamedTuple{sn}(Yin[b]), NamedTuple{vn}(Aout[b]), (; iρJ=fill_(b, 1)), tractions(b)) for b in 1:nb)
+    AblkF = Tuple(merge(Ablk[b], NamedTuple{sn}(comps(blocks[b], sn))) for b in 1:nb)       # A σ of the forward
+    "G w: the strains of the velocities in Win (exchanged first); shear strains in Gout halved"
     function Gop!()
         foreach(b -> cv_exchange!(par, Win[b]), 1:nb)
         foreach(g -> foreach(A -> fill!(A, 0), g), Gout)
@@ -254,9 +130,50 @@ function drive_curvilinear3(d::CurvilinearGradient, c)
         foreach(a -> foreach(A -> fill!(A, 0), a), Aout)
         momentum!(one(FT), false, blk)
     end
-    Vs(B) = (B.V1, B.V2, B.V3)
+    c1, c2, d1, d2 = attenuation ? vc : (nothing, nothing, nothing, zero(FT))
+    # the transposed stress update σ^{n+1} = σⁿ + dt (C₁ e + Σₘ d1ₘ Rₘ^{n+1}), Rₘ^{n+1} = c1ₘ Rₘⁿ - c2ₘ dt Cτ e with the
+    # strains e = G v^{n+1/2} in Gout and σ̄ = P: adjoint memory variables, the gradient (λ, μ, τp, τs) and Y = (C₁ P - Cτ Q) / HJ.
+    # (C(tp, ts) e: normal c: (λ+2μ) tp div - 2μ ts (div - e_cc), shear: μ ts γ; C₁ = C(1 + τp(1+d2), 1 + τs(1+d2)), Cτ = C(τp, τs))
+    function stress_adjoint!(b)
+        B, P, e, Q, gr, Y = blocks[b], comps(Adj[b], sn), Gout[b], Qm[b], Grad[b], Yin[b]
+        dv, sP, bS, hS, sQ, bQ, hQ = Wk[b]
+        l, m = B.lam, B.mu
+        τp, τs = attenuation ? (B.tp, B.ts) : (zero(FT), zero(FT))
+        if attenuation
+            for k in 1:nS
+                fill!(Q[k], 0)
+                for j in 1:NM
+                    R = selectdim(Rb[b][k], 1, j)
+                    @. R = c1[j] * R + dtT * d1[j] * P[k]
+                    @. Q[k] += c2[j] * R
+                end
+            end
+        end
+        dv .= e[1]; sP .= P[1]; bS .= P[1] .* e[1]; sQ .= Q[1]; bQ .= Q[1] .* e[1]
+        for k in 2:N
+            dv .+= e[k]; sP .+= P[k]; bS .+= P[k] .* e[k]; sQ .+= Q[k]; bQ .+= Q[k] .* e[k]
+        end
+        @. bS = dv * sP - bS; @. bQ = dv * sQ - bQ                 # Σ_c P_c (div - e_cc)
+        fill!(hS, 0); fill!(hQ, 0)
+        for k in N+1:nS
+            @. hS += 2P[k] * e[k]; @. hQ += 2Q[k] * e[k]            # Σ P γ (e: γ / 2)
+        end
+        @. gr.lam += dtT * dv * ((1 + τp * (1 + d2)) * sP - τp * sQ)
+        @. gr.mu += dtT * (2dv * ((1 + τp * (1 + d2)) * sP - τp * sQ) - 2((1 + τs * (1 + d2)) * bS - τs * bQ) +
+                          (1 + τs * (1 + d2)) * hS - τs * hQ)
+        if attenuation
+            @. gr.tp += dtT * (l + 2m) * dv * ((1 + d2) * sP - sQ)
+            @. gr.ts += dtT * m * ((1 + d2) * (hS - 2bS) - (hQ - 2bQ))
+        end
+        for k in 1:N
+            @. Y[k] = ((l + 2m) * ((1 + τp * (1 + d2)) * sP - τp * sQ) - 2m * ((1 + τs * (1 + d2)) * (sP - P[k]) - τs * (sQ - Q[k]))) / HJ[b]
+        end
+        for k in N+1:nS
+            @. Y[k] = m * ((1 + τs * (1 + d2)) * P[k] - τs * Q[k]) / HJ[b]
+        end
+    end
     # 3. backward, segment by segment
-    store = [Tuple(Tuple(zero_(H) for _ in 1:9) for H in hostblocks) for _ in 1:K]   # v old (3), v new (3), A σ (3)
+    store = [Tuple(ntuple(_ -> zero_(b), 3N) for b in 1:nb) for _ in 1:K]   # per step: v old (N), v new (N), A σ (N)
     for s0 in sort!(collect(keys(ckpt)); rev=true)
         s1 = min(s0 + K - 1, nt)
         for (b, B) in enumerate(blocks), (A, h) in zip(fields(B), ckpt[s0][b])
@@ -265,83 +182,87 @@ function drive_curvilinear3(d::CurvilinearGradient, c)
         for it in s0:s1
             q = store[it-s0+1]
             Aop!(AblkF)
-            for b in 1:nb, m in 1:3
-                copyto!(q[b][m], Vs(blocks[b])[m]); copyto!(q[b][6+m], Aout[b][m])
+            for b in 1:nb, k in 1:N
+                copyto!(q[b][k], comps(blocks[b], vn)[k]); copyto!(q[b][2N+k], Aout[b][k])
             end
             step!(it, false)
-            for b in 1:nb, m in 1:3
-                copyto!(q[b][3+m], Vs(blocks[b])[m])
+            for b in 1:nb, k in 1:N
+                copyto!(q[b][N+k], comps(blocks[b], vn)[k])
             end
         end
         for it in s1:-1:s0
             n = it - 1
             itw = n % record_every == 0 ? n ÷ record_every + 1 : 0
             q = store[it-s0+1]
-            for b in 1:nb, m in 1:3
-                copyto!(Win[b][m], q[b][3+m])
+            # stress update: gradient (λ, μ, τ) and v̄ += dt Gᵀ (C₁ σ̄ - Cτ Q)
+            for b in 1:nb, k in 1:N
+                copyto!(Win[b][k], q[b][N+k])
             end
             Gop!()
-            for b in 1:nb
-                a, g, (exx, eyy, ezz, h23, h13, h12) = Adj[b], Grad[b], Gout[b]
-                @. g.lam += dtT * (a.S11 + a.S22 + a.S33) * (exx + eyy + ezz)
-                @. g.mu += dtT * (2a.S11 * exx + 2a.S22 * eyy + 2a.S33 * ezz + 2a.S23 * h23 + 2a.S13 * h13 + 2a.S12 * h12)
-                l, m = blocks[b].lam, blocks[b].mu
-                Y = Yin[b]
-                @. Y[1] = ((l + 2m) * a.S11 + l * (a.S22 + a.S33)) / HJ[b]
-                @. Y[2] = ((l + 2m) * a.S22 + l * (a.S11 + a.S33)) / HJ[b]
-                @. Y[3] = ((l + 2m) * a.S33 + l * (a.S11 + a.S22)) / HJ[b]
-                @. Y[4] = m * a.S23 / HJ[b]; @. Y[5] = m * a.S13 / HJ[b]; @. Y[6] = m * a.S12 / HJ[b]
-            end
+            foreach(stress_adjoint!, 1:nb)
             Aop!(Ablk)
-            for b in 1:nb, m in 1:3
-                V = Vs(Adj[b])[m]
-                @. V -= dtT * Hw[b] * Aout[b][m]
+            for b in 1:nb, k in 1:N
+                V = comps(Adj[b], vn)[k]
+                @. V -= dtT * Hw[b] * Aout[b][k]
             end
-            itw > 0 && nst > 0 && run_once!(backend, residual3_cv!, (Adj, St, Rres, itw, FT(0.5)))
-            length(forces) > 0 && run_once!(backend, force3_grad_cv!, (Grad, Adj, FS, it, dtT))
+            # recording at step n: v(tₙ) = (v^{n-1/2} + v^{n+1/2}) / 2
+            itw > 0 && nst > 0 && run_once!(backend, residual!, (Adj, St, Rres, itw, FT(0.5)))
+            # momentum v^{n+1/2} = P v^{n-1/2} + Q dt (1/ρJ) A σⁿ (+ forces): gradient (1/ρJ, damping) and σ̄ += Aᵀ(...)
+            length(forces) > 0 && run_once!(backend, force_grad!, (Grad, Adj, FS, it, dtT))
             for b in 1:nb
                 g, B = Grad[b], blocks[b]
-                for (m, ab) in enumerate((B.a1, B.a2, B.a3))
-                    V = Vs(Adj[b])[m]
-                    @. g.iρJ += dtT * V * q[b][6+m] / (1 + ab * dtT / 2)
-                    @. g.a[m] -= dtT / 2 * V * (q[b][m] + q[b][3+m]) / (1 + ab * dtT / 2)
-                    @. Win[b][m] = dtT * B.iρJ * V / ((1 + ab * dtT / 2) * Hw[b])
+                for (k, ab) in enumerate(comps(B, an))
+                    V = comps(Adj[b], vn)[k]
+                    @. g.iρJ += dtT * V * q[b][2N+k] / (1 + ab * dtT / 2)
+                    @. g.a[k] -= dtT / 2 * V * (q[b][k] + q[b][N+k]) / (1 + ab * dtT / 2)
+                    @. Win[b][k] = dtT * B.iρJ * V / ((1 + ab * dtT / 2) * Hw[b])
                 end
             end
             Gop!()
             for b in 1:nb
-                a, B, (exx, eyy, ezz, h23, h13, h12) = Adj[b], blocks[b], Gout[b]
-                @. a.S11 -= HJ[b] * exx; @. a.S22 -= HJ[b] * eyy; @. a.S33 -= HJ[b] * ezz
-                @. a.S23 -= HJ[b] * 2h23; @. a.S13 -= HJ[b] * 2h13; @. a.S12 -= HJ[b] * 2h12
-                for (m, ab) in enumerate((B.a1, B.a2, B.a3))
-                    V = Vs(a)[m]
+                S = comps(Adj[b], sn)
+                for k in 1:nS
+                    @. S[k] -= HJ[b] * (1 + (k > N)) * Gout[b][k]
+                end
+                for (k, ab) in enumerate(comps(blocks[b], an))
+                    V = comps(Adj[b], vn)[k]
                     @. V *= (1 - ab * dtT / 2) / (1 + ab * dtT / 2)
                 end
             end
-            itw > 0 && nst > 0 && run_once!(backend, residual3_cv!, (Adj, St, Rres, itw, FT(0.5)))
+            itw > 0 && nst > 0 && run_once!(backend, residual!, (Adj, St, Rres, itw, FT(0.5)))
         end
     end
     KernelAbstractions.synchronize(backend)
-    # 4. to ρ, vp, vs on the model nodes
-    gρ, gvp, gvs = zeros(nx, ny, nzt), zeros(nx, ny, nzt), zeros(nx, ny, nzt)
+    # 4. to ρ, vp, vs [per kg/m³, km/s], Qp, Qs on the nodes of the model (owned nodes; summed over the processes)
+    gρ, gvp, gvs, gqp, gqs = (zeros(nx, ny, nzt) for _ in 1:5)
+    f = model.fields
     for (b, H) in enumerate(hostblocks)
-        gl, gm, gi = Float64.(Array(Grad[b].lam)), Float64.(Array(Grad[b].mu)), Float64.(Array(Grad[b].iρJ))
-        ga = map(A -> Float64.(Array(A)), Grad[b].a)
-        for k in 1:H.nz, jl in hx+1:hx+noy, il in hx+1:hx+nox
-            i, j = il + ox, jl + oy
-            ρ, vp, vs, Jn = H.ρ[i, j, k], H.vp[i, j, k], H.vs[i, j, k], H.J[i, j, k]
-            l, m, iρ = gl[il, jl, k], gm[il, jl, k], gi[il, jl, k]
-            r = H.kmap[i, j, k]
-            gρ[i, j, r] += l * (vp^2 - 2vs^2) + m * vs^2 - iρ / (ρ^2 * Jn)
-            gvp[i, j, r] += 2l * ρ * vp + sum(ga[c][il, jl, k] * H.da[c][1][i, j, k] for c in 1:3)
-            gvs[i, j, r] += -4l * ρ * vs + 2m * ρ * vs + sum(ga[c][il, jl, k] * H.da[c][2][i, j, k] for c in 1:3)
+        g = map(x -> x isa Tuple ? map(A -> Float64.(Array(A)), x) : Float64.(Array(x)), Grad[b])     # (loop-local)
+        da = H.da isa NamedTuple ? ((H.da.a1vp, H.da.a1vs), (H.da.a2vp, H.da.a2vs)) : H.da
+        own = N == 2 ? CartesianIndices((hx+1:hx+c.no, 1:H.nz)) : CartesianIndices((hx+1:hx+c.nox, hx+1:hx+c.noy, 1:H.nz))
+        off = N == 2 ? CartesianIndex(ox, 0) : CartesianIndex(ox, oy, 0)
+        for Il in own
+            I = Il + off
+            node = N == 2 ? CartesianIndex(I[1], 1, H.kmap[I]) : CartesianIndex(I[1], I[2], H.kmap[I])
+            ρ, vp, vs, tp, ts_ = H.ρ[I], H.vp[I], H.vs[I], H.taup[I], H.taus[I]
+            χp, χs = visco_chi(ts, tp, fq_ref), visco_chi(ts, ts_, fq_ref)
+            gl, gmt = g.lam[Il], g.mu[Il] - 2g.lam[Il]                          # lam = ρ vp²/χp² - 2 mu
+            gρ[node] += gl * vp^2 / χp^2 + gmt * vs^2 / χs^2 - g.iρJ[Il] / (ρ^2 * H.J[I])
+            gvp[node] += gl * 2ρ * vp / χp^2 + sum(k -> g.a[k][Il] * da[k][1][I], 1:N)
+            gvs[node] += gmt * 2ρ * vs / χs^2 + sum(k -> g.a[k][Il] * da[k][2][I], 1:N)
+            if attenuation
+                dtp = g.tp[Il] - gl * 2ρ * vp^2 / χp^3 * visco_dchi(ts, tp, fq_ref)
+                dts = g.ts[Il] - gmt * 2ρ * vs^2 / χs^3 * visco_dchi(ts, ts_, fq_ref)
+                qp, qs = haskey(f, :Qp) ? f.Qp[node] : Inf, haskey(f, :Qs) ? f.Qs[node] : Inf
+                gqp[node] += isfinite(qp) ? -dtp * tp / qp : 0.0              # tau = NM zeta / Q
+                gqs[node] += isfinite(qs) ? -dts * ts_ / qs : 0.0
+            end
         end
     end
-    par === nothing || foreach(A -> MPI.Allreduce!(A, +, par.comm), (gρ, gvp, gvs))
+    par === nothing || foreach(A -> MPI.Allreduce!(A, +, par.comm), (gρ, gvp, gvs, gqp, gqs))
     rho_unit = density_unit === :g_cm3 ? 1e3 : 1.0
-    g = CartData(model.x.val, model.y.val, model.z.val, (; rho=gρ .* rho_unit, vp=gvp .* 1e3, vs=gvs .* 1e3, Qp=zeros(nx, ny, nzt),
-                                                          Qs=zeros(nx, ny, nzt)))
-    return J, g, Any[nothing for _ in 1:c.nsrc]
+    grad = CartData(model.x.val, model.y.val, model.z.val, (; rho=gρ .* rho_unit, vp=gvp .* 1e3, vs=gvs .* 1e3, Qp=gqp, Qs=gqs))
+    return J, grad, Any[nothing for _ in 1:c.nsrc]              # (no source gradients on curvilinear grids yet)
 end
 
 # ------------------------------------------------------------------ Born modelling (2D and 3D)

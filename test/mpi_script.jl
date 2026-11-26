@@ -224,19 +224,19 @@ if runs("curvilinear")
     eV = rank == 0 ? maximum(i -> maximum(abs, s1.wavefield.fields.V[i] .- s2.wavefield.fields.V[i]), 1:3) / maximum(abs, s1.wavefield.fields.V[3]) : 0.0
     rank == 0 && println("MPI curvilinear 3D nproc=(2, 2): seismograms $e, wavefield $eV")
     (e < 1e-10 && eV < 1e-10) || error("MPI curvilinear 3D result differs on rank $rank")
-    # misfit gradient (2D)
+    # misfit gradient (2D, attenuation)
     mesh = curvilinear_mesh(range(-12, 12, length=97), [topo, moho]; dz=0.4, bottom=-15)
     X, Z = mesh.x.val, mesh.z.val
     low = Z .< moho.(X)
-    base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2))
+    base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=200 .* one.(X), Qs=100 .* one.(X))
     srcs = [DoubleCoupleSource(-2.0, 0.0, -7.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0)]
     sts = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -9:3:9]
     kw = (; dt=stable_dt(addfield(mesh, base), srcs), tmax=4.0, sources=srcs, T=Float64)
     obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* (1 .+ 0.03 .* exp.(-(X .^ 2 .+ (Z .+ 2) .^ 2) ./ 4))))); kw..., stations=sts, verbose=false)
     J1, g1, _ = misfit_gradient(addfield(mesh, base), obs; kw...)
     J2, g2, _ = misfit_gradient(addfield(mesh, base), obs; kw..., nproc=4)
-    e = (abs(J1 / J2 - 1), maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs)))
-    rank == 0 && println("MPI curvilinear gradient nproc=4: misfit, gradient $e")
+    e = (abs(J1 / J2 - 1), maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs, :Qp, :Qs)))
+    rank == 0 && println("MPI curvilinear gradient (attenuation) nproc=4: misfit, gradient $e")
     all(<(1e-10), e) || error("MPI curvilinear gradient differs on rank $rank")
     # misfit gradient (3D)
     mesh = curvilinear_mesh(range(-8, 8, length=41), range(-7, 7, length=37), [topo3, moho3]; dz=0.5, bottom=-12)

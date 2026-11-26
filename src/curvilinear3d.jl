@@ -458,7 +458,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     driver === nothing || return drive_curvilinear3(driver, (; backend, FT, blocks, hostblocks, nb, nx, ny, nzt, nlx, nly, nox, noy,
         hx, ox, oy, xr, yr, ia, ib, ja, jb, par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!,
         exchange_s!, FS, forces, Hξ, Hψ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, nsrc=length(srcs), st_all,
-        seismograms, ts, fq_ref, loc=A -> A[xr, yr, :]))
+        seismograms, ts, fq_ref, vc, loc=A -> A[xr, yr, :]))
     for it in 1:nt
         n = it - 1
         step!(it, true)
