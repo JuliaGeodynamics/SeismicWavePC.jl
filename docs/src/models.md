@@ -44,7 +44,7 @@ model = CartData(X, Y, Z, (; rho, vp, vs, epsilon=fill(0.1, size(X)), delta=fill
   stays symmetric: qP waves along the axes attenuate with `Qp`, S waves with `Qs`; isotropic media give exactly the
   isotropic scheme.
 - Everything else works as for isotropic models: free surface and topography, oceans, PML, sources and stations between
-  grid points, GPUs, MPI, gradients (`misfit_gradient` also returns `epsilon`, `delta`, `gamma`; exact, as checked against
+  grid points, GPUs, MPI (also a [`DistributedModel`](@ref) created with `anisotropy = true`), gradients (`misfit_gradient` also returns `epsilon`, `delta`, `gamma`; exact, as checked against
   automatic differentiation) and Born modelling. Not yet: plane waves and teleseismic waves (their incoming field assumes
   isotropic layers).
 - Models without these fields run the isotropic kernels: anisotropy costs nothing when it is not used.
@@ -101,7 +101,7 @@ result = simulate(model; nproc=(2, 2), dt, nt, sources, stations)
 ```
 
 The function returns a `NamedTuple` of arrays of size `(length(ix), length(iy), length(z))` or a `CartData`, with the fields of
-a `CartData` model. The results are those of the same model given as a `CartData`. The memory a process needs for the setup
+a `CartData` model (with `DistributedModel(...; anisotropy = true)` also `epsilon`, `delta`, `gamma`). The results are those of the same model given as a `CartData`. The memory a process needs for the setup
 then grows with its subdomain, not with the model. Moment tensor and force sources at their cells (`interpolation = :cell`),
 stations, snapshots, checkpoints, GPUs and stretched grids work as usual; plane and teleseismic waves, sources between grid
 points, misfit gradients and Born modelling need a `CartData`. The wavefield at the end is not collected (`wavefield = true` does).

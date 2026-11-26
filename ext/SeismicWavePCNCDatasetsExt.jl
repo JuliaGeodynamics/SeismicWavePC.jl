@@ -69,11 +69,17 @@ function bilinear(gx, gy, d, px, py)
     return (1 - u) * (1 - v) * d[i, j] + u * (1 - v) * d[i+1, j] + (1 - u) * v * d[i, j+1] + u * v * d[i+1, j+1]
 end
 
-# Snapshot files in OpenSWPC's netCDF layout: coordinates, time (unlimited), medium, and one variable per field
-function SeismicWavePC.snapshot_create(file, axes, vars, unit, medium)
+# Snapshot files in OpenSWPC's netCDF layout: coordinates, time (unlimited), medium, and one variable per field.
+# `piece = (whole, offset)`: the file holds the points of one MPI process, a piece of a plane of `whole` points that starts
+# after `offset` points along the two axes.
+function SeismicWavePC.snapshot_create(file, axes, vars, unit, medium; piece=nothing)
     NCDataset(file, "c") do ds
         ds.attrib["title"] = "SeismicWavePC.jl snapshot (OpenSWPC format)"
         ds.attrib["convention"] = "components at cell centres, x east, y north, z up; coordinate z is the depth"
+        if piece !== nothing
+            ds.attrib["whole_size"] = Int32[piece[1]...]
+            ds.attrib["piece_offset"] = Int32[piece[2]...]
+        end
         for (name, c) in axes
             defDim(ds, name, length(c))
             defVar(ds, name, Float32.(c), (name,), attrib=["long_name" => name, "units" => "km"])
@@ -112,6 +118,67 @@ function SeismicWavePC.snapshot_peaks(file, (V, Hz, A))
         end
     end
     return nothing
+end
+
+# Snapshots of one plane and quantity: one file, or the pieces `<name>.<rank>.nc` of the MPI processes
+function SeismicWavePC.read_snapshots(file::AbstractString)
+    dir, base = isempty(dirname(file)) ? "." : dirname(file), replace(basename(file), r"\.nc$" => "")
+    pieces = isdir(dir) ? sort!([joinpath(dir, f) for f in readdir(dir) if startswith(f, base * ".") && occursin(r"^\.\d{4}\.nc$", f[length(base)+1:end])]) : String[]
+    isfile(file) && !isempty(pieces) && error("both $file and pieces of it ($(basename(pieces[1])), …) exist: remove the files of the other run")
+    files = isfile(file) ? [String(file)] : pieces
+    isempty(files) && error("no snapshot file $file, nor pieces of it ($(base).0000.nc, …)")
+    info = map(files) do f
+        NCDataset(f) do ds
+            dims = dimnames(ds["rho"])                                    # the two axes of the plane
+            sz = (Int(ds.dim[dims[1]]), Int(ds.dim[dims[2]]))
+            get2(name, default) = haskey(ds.attrib, name) ? (Int(ds.attrib[name][1]), Int(ds.attrib[name][2])) : default
+            (; dims=(String(dims[1]), String(dims[2])), sz, offset=get2("piece_offset", (0, 0)), whole=get2("whole_size", sz),
+               coords=(Float64.(ds[dims[1]][:]), Float64.(ds[dims[2]][:])), t=Float64.(ds["t"][:]),
+               variables=String[v for v in keys(ds) if !(v in dims) && v != "t"])
+        end
+    end
+    first_ = info[1]
+    all(i -> i.dims == first_.dims && i.whole == first_.whole && i.variables == first_.variables && i.t == first_.t &&
+             all(i.offset .+ i.sz .<= i.whole), info) || error("the pieces of $file do not belong together")
+    if !isfile(file)                                                     # pieces: every point of the plane once
+        covered = falses(first_.whole)
+        for i in info
+            r = (i.offset[1]+1:i.offset[1]+i.sz[1], i.offset[2]+1:i.offset[2]+i.sz[2])
+            any(view(covered, r...)) && error("the pieces of $file overlap (pieces of another run?)")
+            covered[r...] .= true
+        end
+        all(covered) || error("the pieces of $file leave points of the plane out (a piece is missing)")
+    end
+    coords = (fill(NaN, first_.whole[1]), fill(NaN, first_.whole[2]))
+    for i in info, a in 1:2
+        coords[a][i.offset[a]+1:i.offset[a]+i.sz[a]] .= i.coords[a]
+    end
+    return SeismicWavePC.SnapshotSeries(files, [i.offset for i in info], [i.sz for i in info],
+                                        (first_.dims[1] => coords[1], first_.dims[2] => coords[2]), first_.t, first_.variables)
+end
+
+# One snapshot of a field, put together from the files (NaN where no piece has the point)
+function Base.getindex(s::SeismicWavePC.SnapshotSeries, var::AbstractString, k::Integer)
+    A = fill(NaN32, length(s.axes[1][2]), length(s.axes[2][2]))
+    for (f, o, sz) in zip(s.files, s.offsets, s.sizes)
+        NCDataset(f) do ds
+            ndims(ds[var]) == 3 || error("the field $var has no time: read it with s[\"$var\"]")
+            A[o[1]+1:o[1]+sz[1], o[2]+1:o[2]+sz[2]] = ds[var].var[:, :, k]
+        end
+    end
+    return A
+end
+# A field without time, or all snapshots of a field
+function Base.getindex(s::SeismicWavePC.SnapshotSeries, var::AbstractString)
+    nd = NCDataset(ds -> ndims(ds[var]), s.files[1])
+    nd == 3 && return cat((s[var, k] for k in eachindex(s.t))...; dims=3)
+    A = fill(NaN32, length(s.axes[1][2]), length(s.axes[2][2]))
+    for (f, o, sz) in zip(s.files, s.offsets, s.sizes)
+        NCDataset(f) do ds
+            A[o[1]+1:o[1]+sz[1], o[2]+1:o[2]+sz[2]] = ds[var].var[:, :]
+        end
+    end
+    return A
 end
 
 # Random medium of OpenSWPC's gen_rmed2d / gen_rmed3d: dimensions x, (y,) z (z = depth), variable "random media"

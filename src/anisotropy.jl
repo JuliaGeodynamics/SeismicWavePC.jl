@@ -19,7 +19,7 @@
 
 "Does the model have VTI fields (`epsilon`, `delta`, `gamma`)?"
 has_anisotropy(model) = any(f -> haskey(model.fields, f), (:epsilon, :delta, :gamma))
-has_anisotropy(::DistributedModel) = false     # shortcut: VTI needs a CartData; add epsilon/delta/gamma to model_block(::DistributedModel) when needed
+has_anisotropy(model::DistributedModel) = model.anisotropy
 
 @inline pos(x) = ifelse(x > zero(x), x, zero(x))
 
