@@ -3,9 +3,11 @@
 # and receivers rotated with it), and a Gaussian hill (3 km high, σ = 5 km) between the source and the receivers. Two lines
 # of 5 receivers: "deep" (10 km below the surface) and "shallow" (1 km); components (u_t, u_n) along the surface frame.
 #
-# The staircase free surface (default, `free_surface = :openswpc`) and `free_surface = :corners` on the 500 m grid of the benchmark, against
-# references: for the tilted planes the exact answer is the flat case (whose surface lies on cell faces) rotated, computed
-# on a 62.5 m grid; for the hill, `:corners` on a 62.5 m grid. Error: relative L2 of (u_t, u_n) per receiver over 0–9 s.
+# The staircase free surface (default, `free_surface = :openswpc`), `free_surface = :corners` and the curvilinear SBP-SAT
+# solver (`grid = :curvilinear`: a terrain-following mesh, the free surface exactly on the topography) on the 500 m grid of
+# the benchmark, against references: for the tilted planes the exact answer is the flat case (whose surface lies on cell
+# faces) rotated, computed on a 62.5 m grid; for the hill, `:corners` on a 62.5 m grid. Error: relative L2 of (u_t, u_n)
+# per receiver over 0–9 s. Also prints the run time of every simulation (after a warm-up run that compiles).
 #
 #   julia -t auto --project=examples examples/topography_benchmark.jl
 #
@@ -32,14 +34,27 @@ function nodes(case, dx)
     ax(1), ax(2)
 end
 
-"(u_t, u_n) at the receivers on the 0.01 s axis: Dict((line, i) => (ut, un))"
-function run(case, free_surface, dx)
+"""
+(u_t, u_n) at the receivers on the 0.01 s axis, Dict((line, i) => (ut, un)), and the run time of the simulation [s].
+`variant`: a `free_surface` of the staggered grid (cells of size dx) or :curvilinear (nodes dx apart; the tilts on a mesh
+whose bottom is parallel to the surface, 80 km below it, as the rotated box; PML as wide as on the staggered grid).
+"""
+function run(case, variant, dx)
     zs = surface(case)
     xn, zn = nodes(case, dx)
-    x, z = range(first(xn) + dx / 2, last(xn), step=dx), range(first(zn) + dx / 2, last(zn), step=dx)
-    X, Y, Z = xyz_grid(x, 0, z)
-    air = Z .> zs.(X)
-    model = CartData(X, Y, Z, (; rho=ifelse.(air, 1.0, ρ), vp=ifelse.(air, 0.0, vp), vs=ifelse.(air, 0.0, vs)))
+    if variant === :curvilinear
+        xm = range(first(xn), last(xn), length=length(xn))
+        mesh = case == "hill" ? curvilinear_mesh(xm, [zs]; dz=dx, bottom=first(zn)) :
+               (flat = curvilinear_mesh(xm, [x -> 0.0]; dz=dx, bottom=-80.0); Zt = flat.z.val .+ zs.(flat.x.val);
+                CartData(flat.x.val, zero(Zt), Zt, (; z=copy(Zt))))
+        o = ones(size(mesh.x.val))
+        model = addfield(mesh, (; rho=ρ .* o, vp=vp .* o, vs=vs .* o))
+    else
+        x, z = range(first(xn) + dx / 2, last(xn), step=dx), range(first(zn) + dx / 2, last(zn), step=dx)
+        X, Y, Z = xyz_grid(x, 0, z)
+        air = Z .> zs.(X)
+        model = CartData(X, Y, Z, (; rho=ifelse.(air, 1.0, ρ), vp=ifelse.(air, 0.0, vp), vs=ifelse.(air, 0.0, vs)))
+    end
     # a line force of 1e10 N/m along n, Gaussian weights (σ = 500 m, cut at 2σ) over the nodes of the 500 m grid;
     # stf = :ricker with trise = 1/f0, t0 = 0.5/f0 is the Ricker wavelet of the benchmark (delay 1.5/f0) divided by trise
     s, n = to_grid(case, src_flat...), frame(case).n
@@ -49,36 +64,51 @@ function run(case, free_surface, dx)
     sources = [ForceSource(p[1], 0.0, p[2]; fx=1e10 * wi / W * n[1] / f0, fz=1e10 * wi / W * n[2] / f0, t0=0.5 / f0, trise=1 / f0) for (p, wi) in w]
     rec = receivers(case)
     stations = [Station("$(line)_$i", p[1], 0.0, p[2]) for (line, i, p) in rec]
-    dt = 0.04dx
-    r = simulate(model; dt, nt=round(Int, duration / dt), sources, stations, stf=:ricker, interpolation=:sinc, free_surface,
-                 T=Float64, verbose=false)
-    t, f = r.t .+ dt, frame(case)                     # displacement at sample it: Σ v dt up to step it
+    if variant === :curvilinear                      # (dt from the stability limit; displacement at r.t)
+        time = @elapsed r = simulate(model; grid=:curvilinear, tmax=duration + 0.05, sources, stations, stf=:ricker, T=Float64,
+                                     verbose=false, absorber=:pml, na=round(Int, 10 / dx))
+        t = r.t
+    else
+        dt = 0.04dx
+        time = @elapsed r = simulate(model; dt, nt=round(Int, duration / dt), sources, stations, stf=:ricker, interpolation=:sinc,
+                                     free_surface=variant, T=Float64, verbose=false)
+        t = r.t .+ dt                                # displacement at sample it: Σ v dt up to step it
+    end
+    f, dt = frame(case), t[2] - t[1]
     at(u) = [τ >= t[end] ? u[end] : (j = searchsortedlast(t, τ); j == 0 ? 0.0 : u[j] + (u[j+1] - u[j]) * (τ - t[j]) / dt) for τ in TAX]
     Dict((line, i) => (at(r.u[:, 1, k] .* f.t[1] .+ r.u[:, 2, k] .* f.t[2]), at(r.u[:, 1, k] .* f.n[1] .+ r.u[:, 2, k] .* f.n[2]))
-         for (k, (line, i, _)) in enumerate(rec))
+         for (k, (line, i, _)) in enumerate(rec)), time
 end
 const TAX = 0.01:0.01:duration
 err(a, r) = sqrt(sum(abs2, a[1] .- r[1]) + sum(abs2, a[2] .- r[2])) / sqrt(sum(abs2, r[1]) + sum(abs2, r[2]))
 
 cases = ["tilt0", "tilt10", "tilt20", "tilt30", "hill"]
-variants = (:openswpc, :corners)
-flat = run("tilt0", :openswpc, 0.0625)
-ref = Dict(c => (c == "hill" ? run("hill", :corners, 0.0625) : flat) for c in cases)
-res = Dict((c, v) => run(c, v, 0.5) for c in cases, v in variants)
+variants = (:openswpc, :corners, :curvilinear)
+foreach(v -> run("tilt0", v, 0.5), variants)          # (compile)
+flat, tflat = run("tilt0", :openswpc, 0.0625)
+hill, thill = run("hill", :corners, 0.0625)
+ref = Dict(c => (c == "hill" ? hill : flat) for c in cases)
+runs = Dict((c, v) => run(c, v, 0.5) for c in cases, v in variants)
+res = Dict(k => first(v) for (k, v) in runs)
 E = Dict((c, v, line) => [err(res[(c, v)][(line, i)], ref[c][(line, i)]) for i in 1:5] for c in cases, v in variants, line in (:deep, :shallow))
 println("relative L2 error of (u_t, u_n) on the 500 m grid, mean (max) over the 5 receivers of a line")
 for c in cases, line in (:deep, :shallow)
-    @printf("%-7s %-8s %s\n", c, line, join((@sprintf("%-10s %5.1f %% (%4.1f)", v, 100sum(E[(c, v, line)]) / 5, 100maximum(E[(c, v, line)])) for v in variants), "   "))
+    @printf("%-7s %-8s %s\n", c, line, join((@sprintf("%-11s %5.1f %% (%4.1f)", v, 100sum(E[(c, v, line)]) / 5, 100maximum(E[(c, v, line)])) for v in variants), "   "))
 end
+println("run times [s] on the 500 m grid ($(Threads.nthreads()) threads)")
+for c in cases
+    @printf("%-7s %s\n", c, join((@sprintf("%-11s %6.2f", v, last(runs[(c, v)])) for v in variants), "   "))
+end
+@printf("references on the 62.5 m grid: flat (openswpc) %.1f s, hill (corners) %.1f s\n", tflat, thill)
 
 fig = Figure(size=(1300, 900), fontsize=16)
-colors = (openswpc=:darkorange, corners=:dodgerblue)
+colors = (openswpc=:darkorange, corners=:dodgerblue, curvilinear=:crimson)
 labels = ["flat", "10°", "20°", "30°", "hill"]
 for (j, line) in enumerate((:deep, :shallow))
     ax = Axis(fig[1, j], title="$line line (500 m grid)", xticks=(1:5, labels), ylabel="relative L2 error (%)")
     for (k, v) in enumerate(variants)
-        x = (1:5) .+ (k - 1.5) * 0.3
-        barplot!(ax, x, [100sum(E[(c, v, line)]) / 5 for c in cases], width=0.28, color=colors[v], label=string(v))
+        x = (1:5) .+ (k - 2) * 0.27
+        barplot!(ax, x, [100sum(E[(c, v, line)]) / 5 for c in cases], width=0.25, color=colors[v], label=string(v))
         scatter!(ax, x, [100maximum(E[(c, v, line)]) for c in cases], color=:black, markersize=7)
     end
     ylims!(ax, 0, nothing)
