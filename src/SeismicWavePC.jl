@@ -29,6 +29,7 @@ include("planewave.jl")
 include("injection.jl")
 include("snapshots.jl")
 include("simulation.jl")
+include("curvilinear.jl")
 include("files.jl")
 include("layered.jl")
 include("green.jl")
@@ -41,6 +42,7 @@ include("anisotropy.jl")
 include("inversion.jl")
 
 export MomentTensorSource, DoubleCoupleSource, ForceSource, PlaneWave, TeleseismicWave, Station, Seismograms, simulate, moment_rate, SampledSTF, CPU, DistributedModel
+export curvilinear_mesh
 export ReciprocalGreen, reciprocal_green, seismogram, Snapshots, random_medium, perturb, read_random_medium, misfit_gradient, born,
        L2Misfit, TravelTimeMisfit, ModelParameters, initial_parameters, to_model, WaveformProblem, objective,
        objective_and_gradient, fg!

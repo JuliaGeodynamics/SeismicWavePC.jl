@@ -4,7 +4,7 @@ include("setup.jl")
 
 # Pkg.test("SeismicWavePC"; test_args=["types", "gradient"]) runs only those files. MPI first: its 4 processes start while
 # this process is still small (memory of the CI runners)
-const TESTS = ["mpi", "basics", "openswpc", "files", "types", "gradient", "born", "anisotropy", "inversion", "interpolation", "distributed", "rayleigh"]
+const TESTS = ["mpi", "basics", "openswpc", "files", "types", "gradient", "born", "anisotropy", "inversion", "interpolation", "distributed", "rayleigh", "curvilinear"]
 
 @testset "SeismicWavePC" begin
     for t in (isempty(ARGS) ? TESTS : ARGS)

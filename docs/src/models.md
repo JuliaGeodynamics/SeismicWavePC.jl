@@ -21,6 +21,45 @@ three solid cells; flat surfaces and outer corners are unchanged. In 2D tests on
 the exact flat surface, it makes the surface seismograms 2–4 times more accurate (misfit 17 instead of 34–52 % at 20 cells
 per S wavelength, 3–4 instead of 6–12 % at 80). See [Validation](@ref) for a benchmark with tilted planes and a hill.
 
+## Topography on a curvilinear grid
+
+The staircase of cells is accurate away from the surface, but close to a sloping surface its errors reach 10–30 % at
+16 points per S wavelength (see [Validation](@ref)). A 2D model can instead be a *deformed* `CartData`: a terrain-following
+mesh whose top row of nodes is the topography. It is then simulated on a curvilinear grid with summation-by-parts (SBP)
+finite differences: the free surface lies exactly on the topography, and the scheme is provably stable (the discrete
+energy is conserved, or dissipated at the absorbing boundaries). The SBP operators are the boundary-optimized dual-pairing
+operators of Mattsson, Niemelä & Winters (2026, order 7), from [SummationByPartsOperators.jl](https://github.com/ranocha/SummationByPartsOperators.jl).
+
+```julia
+topo(x) = 3.0 * exp(-x^2 / 50)                                   # [km]
+moho(x) = -7.0 + 1.5 * sin(2π * x / 40)
+mesh = curvilinear_mesh(range(-72, 52, length=249), [topo, moho]; dz=0.5, bottom=-80)
+X, Z = mesh.x.val, mesh.z.val
+Phase = ifelse.(Z .< moho.(X), 2, 1)                              # layers
+add_ellipsoid!(Phase, zeros(size(Phase)), mesh; cen=(0, 0, -3), axes=(3, 3, 1.5), phase=ConstantPhase(3))   # a magma chamber
+vp_, vs_, rho_ = (5.5, 6.5, 3.8), (3.2, 3.75, 2.0), (2600.0, 2900.0, 2400.0)
+model = addfield(mesh, (; rho=getindex.(Ref(rho_), Phase), vp=getindex.(Ref(vp_), Phase), vs=getindex.(Ref(vs_), Phase)))
+result = simulate(model; tmax=20.0, sources, stations)           # dt from the stability limit
+```
+
+- **The mesh.** [`curvilinear_mesh`](@ref) makes the mesh from surfaces (functions or surface `CartData`): a grid line
+  follows the topography and every interface with a large jump in the material (e.g. a Moho). Columns are vertical. Fill
+  the material at the nodes with the usual GMG tools.
+- **Blocks.** The mesh is split into blocks at grid rows where the material jumps along the full width. Their interfaces
+  are grid lines, so the jump stays sharp. Other heterogeneity (a magma chamber, gradients) is sampled at the nodes.
+- **Time step and boundaries.** The time step follows from the spectral radius of the operator: `dt` is not needed, give
+  the duration `tmax`. The sides and the bottom absorb with impedance boundary conditions (no absorbing layer).
+- **Stations** with `surface=true` record exactly on the topography. Attenuation, moment tensors and forces work as on
+  the staggered grid.
+- **Not yet:** 3D, MPI, SH waves, plane waves, anisotropy, gradients.
+
+![A hill, a Moho-like interface and a magma chamber on a curvilinear grid](assets/2D_curvilinear.png)
+
+*[`examples/2D_curvilinear.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/2D_curvilinear.jl): the
+model on its deformed mesh and the vertical velocity at stations on the topography.*
+- **Cost.** A step costs about 3–4× one on the staggered grid with as many cells. Near topography, however, the
+  curvilinear grid reaches the same accuracy with about 8× coarser spacing (in 2D, 64× fewer cells, 8× fewer steps).
+
 ## Anisotropy (VTI)
 
 With any of the fields `epsilon`, `delta`, `gamma` (Thomsen parameters; missing ones are 0) the model is transversely

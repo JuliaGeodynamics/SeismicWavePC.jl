@@ -93,6 +93,9 @@ Keyword arguments
 - `interpolation = :cell`: sources and stations at the cell that contains them (as OpenSWPC), or `:sinc` at their exact
   position, between grid points (Kaiser-windowed sinc interpolation, Hicks 2002; strain is then still taken at the cell).
 - `wave = :psv`: `:psv` or `:sh`, for 2D models.
+- `grid = :auto`: a deformed 2D model (a terrain-following mesh, see [`curvilinear_mesh`](@ref)) runs on a curvilinear grid
+  ([`SeismicWavePC.simulate_curvilinear`](@ref): SBP finite differences, the free surface at the true topography),
+  any other on the staggered grid; `:curvilinear` or `:staggered` to choose.
 - `free_surface = :openswpc`: the shear modulus at the shear-stress points is the harmonic mean of the four cells around them,
   zero next to air or water (as OpenSWPC). On a stair-stepped topography this also zeroes the shear stress at the inner
   corners of the steps, so a top cell one cell wide in x (or y) has no shear coupling to the ground in that direction and
@@ -117,7 +120,12 @@ Keyword arguments
   `DistributedModel`.
 - `verbose = true`: print a summary and the progress (on rank 0).
 """
-function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolation=:cell, free_surface=:openswpc, kwargs...)
+function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolation=:cell, free_surface=:openswpc, grid=:auto, kwargs...)
+    grid in (:auto, :staggered, :curvilinear) || error("grid must be :auto, :staggered or :curvilinear, got :$grid")
+    if model isa CartData && (grid === :curvilinear || (grid === :auto && is_curvilinear(model)))
+        size(model)[2] == 1 || error("curvilinear grids are 2D only (for now)")
+        return simulate_curvilinear(model; wave, kwargs...)
+    end
     mode = size(model)[2] == 1 ? wave : :p3d
     mode in (:psv, :sh, :p3d) || error("wave must be :psv or :sh, got :$wave")
     interpolation in (:cell, :sinc) || error("interpolation must be :cell or :sinc, got :$interpolation")

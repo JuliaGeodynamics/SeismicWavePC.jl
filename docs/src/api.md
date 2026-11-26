@@ -25,6 +25,8 @@ SeismicWavePC.SnapshotSeries
 ## Models
 
 ```@docs
+curvilinear_mesh
+SeismicWavePC.simulate_curvilinear
 DistributedModel
 random_medium
 perturb
