@@ -119,6 +119,40 @@ faces of the 62.5 m reference, but between them at 125–500 m. Deep / shallow l
 The same sub-cell averaging (effective media, Moczo et al. 2002) would also help the staggered code: average when the
 model is given finer than the grid.
 
+## 6. One CartData for the whole model
+
+[`cartdata_example.jl`](cartdata_example.jl). The model is a single deformed `CartData` (vertical columns, a grid line
+along each major interface). It contains the hill, an undulating interface with a large jump (Moho-like, vs 3.2 → 3.75
+km/s) and a magma chamber (vs 2 km/s):
+
+```julia
+mesh  = curvilinear_mesh(range(-72, 52, length=249), [topo, moho]; dz=0.5, bottom=-80)   # plain deformed CartData
+Phase = ifelse.(mesh.z.val .< moho.(mesh.x.val), 2, 1)                                   # layers, as with GMG
+add_ellipsoid!(Phase, Temp, mesh; cen=(0, 0, -3), axes=(3, 3, 1.5), phase=ConstantPhase(3))  # GMG on the deformed mesh
+model = addfield(mesh, (; rho, vp, vs))
+run_cartdata(model; case="hill")                                                         # blocks found internally
+```
+
+- **How the blocks are found** (`find_blocks`): an interface is a grid row where vp or vs jumps by more than 5 % along the
+  full width. Jumps over part of the width (the chamber) and smooth gradients stay inside a block.
+- **Material at the interface row:** each block takes the material of its own side.
+- **Interface nodes may carry the material of either side.** When every column jumps between the same two rows, the
+  mesh decides: the spacing pattern of the grid lines changes at the one that follows the interface. Otherwise the GMG
+  convention applies (a node on a surface is not below it).
+- **Check** ([`check_blocks.jl`](check_blocks.jl)): `.<` and `.<=` give the same blocks and identical results.
+
+Relative differences to the curvilinear run at 125 m (deep / shallow; no exact reference):
+
+| | 500 m | 250 m | 125 m | 62.5 m |
+|---|---|---|---|---|
+| curvilinear | 0.87 / 1.3 % | 0.21 / 0.53 % | – | |
+| staggered (SeismicWavePC) | | 0.95 / 7.7 % | 0.42 / 3.1 % | 0.24 / 1.3 % |
+
+Curvilinear at 500 m is about as accurate as staggered at 62.5 m. The chamber is a staircase in both (first order at its
+edges).
+
+![single CartData](cartdata_example.png)
+
 ## Not done
 
 - absorbing boundaries;
@@ -133,4 +167,5 @@ model is given finer than the grid.
     julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/operators.jl      # section 2 (~2 min)
     julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/experiments.jl    # sections 3, 4 (~6 min)
     julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/interface_order.jl  # section 5 (~4 min)
+    julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/cartdata_example.jl # section 6 (~4 min)
     FAMILY=Mattsson2017 ORDER=5 julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/curvi.jl hill 500 40 10000

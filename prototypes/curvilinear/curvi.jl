@@ -70,10 +70,9 @@ wflat(η, D, D0=0.0) = D === nothing ? 1.0 : (s = clamp((η + D) / (D - D0), 0.0
 """
     run_case(case; dx, T, dt, order, family, flatten, flatten_from, interfaces, layer)
 
-Blocks stacked in η: the block boundaries `interfaces` (η values, e.g. material interfaces that follow the surface) are
-grid lines, the blocks are coupled by SAT (continuity of velocity and traction, energy-neutral: half of the traction
-mismatch on the momentum, half of the velocity mismatch on the stress of each side). Each block has at least 13 points
-in η (the boundary closures); the time step follows from the finest block. The material is sampled inside each block only (no averaging across interfaces).
+The cases of the benchmark on a mapping z = η + h(ξ) w(η) (see the top), material from `material` averaged over the cell
+of each node. Blocks stacked in η: the block boundaries `interfaces` (η values, e.g. material interfaces that follow the
+surface) are grid lines. Builds the meshes and runs them with `run_blocks`.
 """
 function run_case(case; dx=500.0, T=9.0, dt=nothing, order=7, family=MattssonNiemeläWinters2026, flatten=nothing,
                   flatten_from=0.0, interfaces=Float64[], layer=nothing)
@@ -81,39 +80,14 @@ function run_case(case; dx=500.0, T=9.0, dt=nothing, order=7, family=MattssonNie
     s = source(case)
     ξ0, ξ1, η0 = s[1] - 62e3, s[1] + 62e3, -80e3
     Nx = round(Int, (ξ1 - ξ0) / dx) + 1
-    Uξ = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=ξ0, xmax=ξ1, N=Nx)
-    Ddξ, Dgξ = Uξ.minus, Uξ.plus                                        # divergence, gradient
-    gξ, Hξ = grid(Ddξ), diag(mass_matrix(Ddξ))
+    gξ = collect(grid(upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=ξ0, xmax=ξ1, N=Nx).minus))
     zmap(ξ, η) = η + h(ξ) * wflat(η, flatten, flatten_from)
-    "η of the physical point (x, z) (bisection; z increases with η)"
-    function eta(x, z)
-        a, b = η0 - 50e3, 10e3
-        for _ in 1:80
-            m = (a + b) / 2
-            zmap(x, m) < z ? (a = m) : (b = m)
-        end
-        (a + b) / 2
-    end
     edges = [η0; sort(interfaces); 0.0]                                 # block boundaries, bottom to top
     off = (-0.375, -0.125, 0.125, 0.375)
-    blocks = map(1:length(edges)-1) do b
+    meshes = map(1:length(edges)-1) do b
         lo, hi = edges[b], edges[b+1]
         Nz = max(13, round(Int, (hi - lo) / dx) + 1)
-        Uη = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=lo, xmax=hi, N=Nz)
-        gη = grid(Uη.minus)
-        dξ!(out, A, D) = Threads.@threads for k in 1:Nz
-            mul!(view(out, :, k), D, view(A, :, k))
-        end
-        dη!(out, A, D) = Threads.@threads for i in 1:Nx
-            mul!(view(out, i, :), D, view(A, i, :))
-        end
-        # metric: x = ξ, J = z_η, Jξ = (z_η, 0), Jη = (-z_ξ, 1), with the divergence operators
-        Zm = [zmap(ξ, η) for ξ in gξ, η in gη]
-        J, Jηx = similar(Zm), similar(Zm)
-        dη!(J, Zm, Uη.minus)
-        dξ!(Jηx, Zm, Ddξ)
-        Jηx .*= -1
-        minimum(J) > 0 || error("the mapping folds (min J = $(minimum(J)))")
+        gη = collect(grid(upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=lo, xmax=hi, N=Nz).minus))
         # material: averaged over the cell of each node (4 × 4 samples), inside the block only
         hη = (hi - lo) / (Nz - 1)
         ρ, lam, mu = (zeros(Nx, Nz) for _ in 1:3)
@@ -133,22 +107,79 @@ function run_case(case; dx=500.0, T=9.0, dt=nothing, order=7, family=MattssonNie
                 lam[i, k] = 16 / sM - 2mu[i, k]
             end
         end
-        (; lo, hi, Nz, gη, Hη=diag(mass_matrix(Uη.minus)), Ddη=Uη.minus, Dgη=Uη.plus, dξ!, dη!, J, Jηx, ρ, lam, mu,
-           M=lam .+ 2 .* mu, ρJ=ρ .* J, W=Tuple(zeros(Nx, Nz) for _ in 1:5), F=Dict{Tuple{Int,Int},Float64}())
+        (; Z=[zmap(ξ, η) for ξ in gξ, η in gη], ρ, lam, mu)
+    end
+    run_blocks(gξ, meshes; case, T, dt, order, family)
+end
+
+"""
+    run_blocks(gξ, meshes; case, T, dt, order, family)
+
+The solver. `meshes` (bottom to top): blocks of a deformed mesh with vertical columns at the horizontal nodes `gξ` (the
+grid of the SBP operator in x): `Z` (Nx × Nz, physical depth of the nodes, increasing with the index; the nodes are those
+of the SBP operator on η̂ ∈ [0, 1]) and the material `ρ`, `lam`, `mu` at the nodes (SI). Adjacent blocks share their
+interface (the top row of one is the bottom row of the next); they are coupled by SAT (continuity of velocity and
+traction, energy-neutral: half of the traction mismatch on the momentum, half of the velocity mismatch on the stress of
+each side). Metric terms from `Z` with the divergence operators. Each block needs ≥ 13 points in η; the time step follows
+from the finest block. The top of the top block is the free surface.
+"""
+function run_blocks(gξ, meshes; case, T=9.0, dt=nothing, order=7, family=MattssonNiemeläWinters2026)
+    Nx = length(gξ)
+    Uξ = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=gξ[1], xmax=gξ[end], N=Nx)
+    maximum(abs, grid(Uξ.minus) .- gξ) < 1e-6 * (gξ[end] - gξ[1]) || error("x is not the grid of the SBP operator")
+    Ddξ, Dgξ = Uξ.minus, Uξ.plus                                        # divergence, gradient
+    Hξ = diag(mass_matrix(Ddξ))
+    dx = gξ[Nx÷2+1] - gξ[Nx÷2]
+    for b in 1:length(meshes)-1
+        maximum(abs, meshes[b].Z[:, end] .- meshes[b+1].Z[:, 1]) < 1e-6 * dx || error("blocks $b and $(b+1) do not share their interface")
+    end
+    blocks = map(meshes) do m
+        Nz = size(m.Z, 2)
+        Uη = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=0.0, xmax=1.0, N=Nz)
+        gη = collect(grid(Uη.minus))
+        dξ!(out, A, D) = Threads.@threads for k in 1:Nz
+            mul!(view(out, :, k), D, view(A, :, k))
+        end
+        dη!(out, A, D) = Threads.@threads for i in 1:Nx
+            mul!(view(out, i, :), D, view(A, i, :))
+        end
+        # metric: x = ξ, J = z_η, Jξ = (z_η, 0), Jη = (-z_ξ, 1), with the divergence operators
+        J, Jηx = similar(m.Z), similar(m.Z)
+        dη!(J, m.Z, Uη.minus)
+        dξ!(Jηx, m.Z, Ddξ)
+        Jηx .*= -1
+        minimum(J) > 0 || error("the mesh folds (min J = $(minimum(J)))")
+        (; Nz, gη, Z=m.Z, Hη=diag(mass_matrix(Uη.minus)), Ddη=Uη.minus, Dgη=Uη.plus, dξ!, dη!, J, Jηx, ρ=m.ρ, lam=m.lam,
+           mu=m.mu, M=m.lam .+ 2 .* m.mu, ρJ=m.ρ .* J, W=Tuple(zeros(Nx, Nz) for _ in 1:5), F=Dict{Tuple{Int,Int},Float64}())
     end
     nb = length(blocks)
     # time step: 0.25 h / vp (RK4 limit ≈ 0.43 h / vp for these operators), h the finer of the spacings of a block
-    dt = something(dt, minimum(B -> 0.25 * min(dx, (B.hi - B.lo) / (B.Nz - 1)) / maximum(sqrt.(B.M ./ B.ρ)), blocks))
-    inblock(η) = clamp(searchsortedlast(edges, η), 1, nb)
+    dt = something(dt, minimum(B -> 0.25 * min(dx, minimum(B.J) / (B.Nz - 1)) / maximum(sqrt.(B.M ./ B.ρ)), blocks))
+    "block and η̂ of the physical point (x, z): Lagrange interpolation of the mesh columns, bisection in η̂"
+    function locate(x, z)
+        iξ, wξ = lagrange(gξ, x)
+        for (b, B) in enumerate(blocks)
+            col = [sum(wξ[a] * B.Z[i, k] for (a, i) in enumerate(iξ)) for k in 1:B.Nz]
+            (col[1] <= z <= col[end] || (b == nb && z > col[end])) || continue
+            zof(η) = let (ik, wk) = lagrange(B.gη, η); sum(wk[c] * col[k] for (c, k) in enumerate(ik)) end
+            lo, hi = 0.0, 1.0
+            for _ in 1:60
+                mid = (lo + hi) / 2
+                zof(mid) < z ? (lo = mid) : (hi = mid)
+            end
+            return b, (lo + hi) / 2
+        end
+        error("($x, $z) is outside the mesh")
+    end
     # the forces: band-limited deltas in (ξ, η) divided by the SBP norm (J f = F δ(ξ) δ(η)); sources are far from interfaces
     n = frame(case).n
     for (p, w) in force_nodes(case)
-        ηp = eta(p[1], p[2])
-        B = blocks[inblock(ηp)]
+        b, ηp = locate(p[1], p[2])
+        B = blocks[b]
         iξ, wξ = sincw(gξ, p[1])
         iη, wη = sincw(B.gη, ηp)
-        for (a, i) in enumerate(iξ), (b, k) in enumerate(iη)
-            B.F[(i, k)] = get(B.F, (i, k), 0.0) + 1e10 * w * wξ[a] * wη[b] / (Hξ[i] * B.Hη[k])
+        for (a, i) in enumerate(iξ), (c, k) in enumerate(iη)
+            B.F[(i, k)] = get(B.F, (i, k), 0.0) + 1e10 * w * wξ[a] * wη[c] / (Hξ[i] * B.Hη[k])
         end
     end
     Fpts = [collect(B.F) for B in blocks]
@@ -226,8 +257,7 @@ function run_case(case; dx=500.0, T=9.0, dt=nothing, order=7, family=MattssonNie
     # receivers: Lagrange interpolation in (ξ, η) in their block
     rec = receivers(case)
     RW = map(rec) do (_, _, p)
-        ηp = eta(p[1], p[2])
-        b = inblock(ηp)
+        b, ηp = locate(p[1], p[2])
         b, (lagrange(gξ, p[1]), lagrange(blocks[b].gη, ηp))
     end
     sample(A, ((iξ, wξ), (iη, wη))) = sum(wξ[a] * wη[c] * A[i, k] for (a, i) in enumerate(iξ), (c, k) in enumerate(iη))
@@ -273,16 +303,111 @@ function run_case(case; dx=500.0, T=9.0, dt=nothing, order=7, family=MattssonNie
        maxJ=maximum(B -> maximum(B.J), blocks))
 end
 
+"""
+    mesh = curvilinear_mesh(x, surfaces; dz, bottom, order=7, family=MattssonNiemeläWinters2026)
+
+A plain deformed 2D `CartData` (size nx × 1 × nz, km) for the curvilinear solver: one grid line follows each surface.
+`surfaces` are functions z(x) [km], top first: the topography, then interfaces (e.g. a Moho); the bottom is flat at
+`bottom` [km]. Between two surfaces z is blended linearly. Columns are vertical, at the nodes of the SBP operator in x over
+`first(x)`…`last(x)` with `length(x)` points; between two surfaces the nodes in z are those of the operator on [0, 1],
+at least 13, with about `dz` spacing at the thickest point. Fill the material with the usual GMG tools, e.g. layers with
+`Z .< moho.(X)` and a magma chamber with `add_ellipsoid!`.
+"""
+function curvilinear_mesh(x, surfaces; dz, bottom, order=7, family=MattssonNiemeläWinters2026)
+    Nx = length(x)
+    gx = grid(upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=first(x), xmax=last(x), N=Nx).minus)
+    S = [[f.(gx) for f in surfaces]; [fill(Float64(bottom), Nx)]]       # top to bottom
+    Zs = Matrix{Float64}[]
+    for b in length(S)-1:-1:1                                           # bottom first (z increases with the index)
+        top, bot = S[b], S[b+1]
+        all(top .> bot) || error("surfaces $b and $(b+1) cross")
+        Nz = max(13, ceil(Int, maximum(top .- bot) / dz) + 1)
+        η = grid(upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=0.0, xmax=1.0, N=Nz).minus)
+        Zb = [bot[i] + (top[i] - bot[i]) * e for i in 1:Nx, e in η]
+        Zb[:, end] .= top                                               # (exactly on the surface)
+        push!(Zs, isempty(Zs) ? Zb : Zb[:, 2:end])                      # the interface row once
+    end
+    Z2 = reduce(hcat, Zs)
+    nz = size(Z2, 2)
+    X = [gx[i] for i in 1:Nx, _ in 1:1, _ in 1:nz]
+    Z = reshape(Z2, Nx, 1, nz)
+    CartData(X, zero(X), Z, (; z=copy(Z)))
+end
+
+"""
+    blocks = find_blocks(Z, vp, vs; jump=0.05)
+
+Interfaces of a deformed mesh (nx × nz, z increasing with the index) from its material: a row r is an interface if vp or
+vs jumps by more than `jump` (relative) along the full width, in every column between r - 1 and r or between r and r + 1.
+Jumps over part of the width (a magma chamber) and smooth gradients are no interfaces. If all columns jump between the
+same two rows, the mesh decides: the grid line that follows the interface separates two differently blended regions, so
+the shape of the vertical spacing (along x) changes there. If it does not (e.g. a layer parallel to the surface), the
+interface is the upper row (GMG: a node exactly on a surface is not below it). Returns the interface rows, and for every
+interface whether each column's interface node has the material below (true) or above (false).
+"""
+function find_blocks(Z, vp, vs; jump=0.05)
+    rel(a, b) = abs(a - b) / max(abs(a), abs(b))
+    nx, nz = size(vp)
+    J = [rel(vp[i, k], vp[i, k+1]) > jump || rel(vs[i, k], vs[i, k+1]) > jump for i in 1:nx, k in 1:nz-1]   # jump between k, k+1
+    cand = [r for r in 2:nz-1 if all(i -> J[i, r-1] || J[i, r], 1:nx)]
+    # the change of the shape of the vertical spacing across row k
+    shape(k) = (d = Z[:, k+1] .- Z[:, k]; d ./ sum(d))
+    kink(k) = 2 <= k <= nz - 1 ? maximum(abs, shape(k) .- shape(k - 1)) * nx : 0.0
+    rows = Int[]
+    for r in cand
+        (r in rows || r - 1 in rows) && continue
+        if r + 1 in cand && all(i -> J[i, r], 1:nx)              # every column jumps between r and r + 1: which row?
+            push!(rows, kink(r) > 3kink(r + 1) ? r : r + 1)
+        else
+            push!(rows, r)
+        end
+    end
+    rows, [[J[i, r] for i in 1:nx] for r in rows]       # J[i, r]: the jump is above node r, i.e. the node is below
+end
+
+"""
+    run_cartdata(model; case, jump=0.05, T, dt, order, family)
+
+Runs the curvilinear solver on a deformed 2D `CartData` (as from `curvilinear_mesh`, km) with the fields `rho` [kg/m³],
+`vp`, `vs` [km/s] at the nodes. The blocks are found from the material (`find_blocks`): at an interface row each block
+takes the material of its own side (the node's own, or that of the next row of its side). Sources and receivers of `case`.
+"""
+function run_cartdata(model::CartData; case, jump=0.05, kwargs...)
+    X, Z = model.x.val, model.z.val
+    size(X, 2) == 1 || error("a 2D model (nx × 1 × nz) is needed")
+    gξ = 1e3 .* X[:, 1, 1]
+    all(k -> X[:, 1, k] == X[:, 1, 1], axes(X, 3)) || error("the columns of the mesh must be vertical")
+    Zm = 1e3 .* Z[:, 1, :]
+    ρ = model.fields.rho[:, 1, :]
+    vp, vs = 1e3 .* model.fields.vp[:, 1, :], 1e3 .* model.fields.vs[:, 1, :]
+    rows, below = find_blocks(Zm, vp, vs; jump)
+    edges = [1; rows; size(Zm, 2)]
+    meshes = map(1:length(edges)-1) do b
+        r = edges[b]:edges[b+1]
+        mρ, mvp, mvs = ρ[:, r], vp[:, r], vs[:, r]
+        for (j, side, src) in ((b - 1, false, 2), (b, true, length(r) - 1))   # (interface, its node must be ..., take row)
+            (1 <= j <= length(rows)) || continue
+            k = side ? length(r) : 1                                            # the interface row in this block
+            for i in axes(mρ, 1)
+                below[j][i] == side && continue                                 # the node has this side's material
+                mρ[i, k], mvp[i, k], mvs[i, k] = mρ[i, src], mvp[i, src], mvs[i, src]
+            end
+        end
+        (; Z=Zm[:, r], ρ=mρ, mu=mρ .* mvs .^ 2, lam=mρ .* (mvp .^ 2 .- 2 .* mvs .^ 2))
+    end
+    run_blocks(gξ, meshes; case, kwargs...)
+end
+
 # SeismicWavePC on the same case (staircase of cells; free_surface = :openswpc or :corners), on its 0.01 s axis
 const TAX = 0.01:0.01:9.0
-function fd_run(case, free_surface, dx; layer=nothing)
+function fd_run(case, free_surface, dx; layer=nothing, mat=(x, z) -> material(case, layer, x, z))
     h = surface(case)
     s0, W = (-10e3, -20e3), 60e3
     c = istilt(case) ? [to_grid(case, a, b) for a in s0[1] .+ (-W, W), b in (s0[2] - W, 3dx)] :
         [(a, b) for a in s0[1] .+ (-W, W), b in (s0[2] - W, 3e3 + 3dx)]
     ax(d) = (floor(minimum(p[d] for p in c) / dx) * dx + dx / 2):dx:(ceil(maximum(p[d] for p in c) / dx) * dx)
     X, Y, Z = xyz_grid(ax(1) ./ 1e3, 0, ax(2) ./ 1e3)
-    P = [material(case, layer, 1e3X[I], 1e3Z[I]) for I in CartesianIndices(X)]
+    P = [mat(1e3X[I], 1e3Z[I]) for I in CartesianIndices(X)]
     air = 1e3 .* Z .> h.(1e3 .* X)
     model = CartData(X, Y, Z, (; rho=ifelse.(air, 1.0, getindex.(P, 3)), vp=ifelse.(air, 0.0, getindex.(P, 1) ./ 1e3),
                                  vs=ifelse.(air, 0.0, getindex.(P, 2) ./ 1e3)))
