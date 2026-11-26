@@ -223,4 +223,44 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
             @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
         end
     end
+    @testset "Born modelling: 2D with attenuation (finite differences), 3D (dot test with the gradient)" begin
+        topob(x) = 1.2 * exp(-x^2 / 12)
+        mohob(x) = -4.0 + 0.6 * sin(2π * x / 10)
+        mesh = curvilinear_mesh(range(-8, 8, length=49), [topob, mohob]; dz=0.33, bottom=-10)
+        X, Z = mesh.x.val, mesh.z.val
+        low = Z .< mohob.(X); o = ones(size(X))
+        base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=150 .* o, Qs=80 .* o)
+        srcs = [DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0), ForceSource(2.0, 0.0, -2.5; fz=1e14, trise=1.0)]
+        sts = [[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -6:3:6]; Station("d", 0.3, 0.0, -6.0)]
+        r0 = simulate(addfield(mesh, base); tmax=0.1, sources=srcs, T=Float64, verbose=false)
+        kw = (; dt=r0.t[2] - r0.t[1], tmax=3.0, sources=srcs, stations=sts, T=Float64)
+        bump(c, s) = @. exp(-((X - c[1])^2 + (Z - c[2])^2) / s)
+        δ = (; rho=50 .* bump((0.5, -2), 4), vp=0.1 .* bump((-2, -4), 3), vs=0.08 .* bump((2, 0.2), 3) .+ 0.05 .* bump((-7.5, -5), 2),
+             Qp=20 .* bump((0, -1), 4), Qs=10 .* bump((1, -3), 4))
+        b0, δd = born(addfield(mesh, base), addfield(mesh, δ); kw...)
+        @test b0.v == simulate(addfield(mesh, base); kw..., verbose=false).v
+        ε = 1e-3
+        sp(s) = simulate(addfield(mesh, map((a, b) -> a .+ s .* b, base, δ)); kw..., verbose=false)
+        P, M = sp(ε), sp(-ε)
+        @test maximum(abs, δd.v .- (P.v .- M.v) ./ 2ε) < 1e-6 * maximum(abs, δd.v)
+        @test maximum(abs, δd.stress .- (P.stress .- M.stress) ./ 2ε) < 1e-6 * maximum(abs, δd.stress)
+        # 3D
+        topob3(x, y) = 1.0 * exp(-(x^2 + y^2) / 10)
+        mohob3(x, y) = -4.0 + 0.5 * sin(2π * x / 10) * cos(2π * y / 12)
+        mesh = curvilinear_mesh(range(-6, 6, length=33), range(-5, 5, length=29), [topob3, mohob3]; dz=0.4, bottom=-8)
+        X, Y, Z = mesh.x.val, mesh.y.val, mesh.z.val
+        low = Z .< mohob3.(X, Y)
+        base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2))
+        srcs = [DoubleCoupleSource(-1.0, 0.5, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0)]
+        sts = [Station("s$x$y", Float64(x) + 0.1, Float64(y) - 0.1, 0.0; surface=true) for x in -4:2:4 for y in (-3, 0, 3)]
+        r0 = simulate(addfield(mesh, base); tmax=0.05, sources=srcs, T=Float64, verbose=false)
+        kw = (; dt=r0.t[2] - r0.t[1], tmax=2.5, sources=srcs, T=Float64)
+        bump3(c, s) = @. exp(-((X - c[1])^2 + (Y - c[2])^2 + (Z - c[3])^2) / s)
+        δ = (; rho=50 .* bump3((0.5, 0, -2), 4), vp=0.1 .* bump3((-1, 1, -4), 3), vs=0.08 .* bump3((2, -1, 0.2), 3))
+        obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* (1 .- 0.04 .* bump3((0.5, 0, -1), 3))))); kw..., stations=sts, verbose=false)
+        b0, δd = born(addfield(mesh, base), addfield(mesh, δ); kw..., stations=sts)
+        _, gr, _ = misfit_gradient(addfield(mesh, base), obs; kw...)
+        _, adj = L2Misfit()(b0.v, obs.v, obs.t)
+        @test sum(adj .* δd.v) ≈ sum(k -> sum(gr.fields[k] .* δ[k]), keys(δ)) rtol = 1e-10
+    end
 end

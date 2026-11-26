@@ -207,22 +207,22 @@ end
         d1 -= J[i, k] * S11[i, k] / (w * hξ); d2 -= J[i, k] * S12[i, k] / (w * hξ)
     end
     if k == nz
-        g1, g2 = Jx[i, k] * S11[i, k] + S12[i, k], Jx[i, k] * S12[i, k] + S22[i, k]
+        t1, t2 = Jx[i, k] * S11[i, k] + S12[i, k], Jx[i, k] * S12[i, k] + S22[i, k]
         if Bu === nothing
-            d1 -= g1 / (w * hη); d2 -= g2 / (w * hη)
+            d1 -= t1 / (w * hη); d2 -= t2 / (w * hη)
         else
-            d1 -= (g1 - (Bu.Jx[i, 1] * Bu.S11[i, 1] + Bu.S12[i, 1])) / (2w * hη)
-            d2 -= (g2 - (Bu.Jx[i, 1] * Bu.S12[i, 1] + Bu.S22[i, 1])) / (2w * hη)
+            d1 -= (t1 - (Bu.Jx[i, 1] * Bu.S11[i, 1] + Bu.S12[i, 1])) / (2w * hη)
+            d2 -= (t2 - (Bu.Jx[i, 1] * Bu.S12[i, 1] + Bu.S22[i, 1])) / (2w * hη)
         end
     end
     if k == 1
-        g1, g2 = Jx[i, k] * S11[i, k] + S12[i, k], Jx[i, k] * S12[i, k] + S22[i, k]
+        t1, t2 = Jx[i, k] * S11[i, k] + S12[i, k], Jx[i, k] * S12[i, k] + S22[i, k]
         if Bd === nothing
-            d1 += g1 / (w * hη); d2 += g2 / (w * hη)
+            d1 += t1 / (w * hη); d2 += t2 / (w * hη)
         else
             n = size(Bd.V1, 2)
-            d1 -= ((Bd.Jx[i, n] * Bd.S11[i, n] + Bd.S12[i, n]) - g1) / (2w * hη)
-            d2 -= ((Bd.Jx[i, n] * Bd.S12[i, n] + Bd.S22[i, n]) - g2) / (2w * hη)
+            d1 -= ((Bd.Jx[i, n] * Bd.S11[i, n] + Bd.S12[i, n]) - t1) / (2w * hη)
+            d2 -= ((Bd.Jx[i, n] * Bd.S12[i, n] + Bd.S22[i, n]) - t2) / (2w * hη)
         end
     end
     b1, b2 = damp ? (a1[i, k] * dt / 2, a2[i, k] * dt / 2) : (zero(T), zero(T))
@@ -563,12 +563,12 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
             foreach(B -> (fill!(B.S11, 0); fill!(B.S22, 0); fill!(B.S12, 0)), blocks)
             stress!(nothing, one(FT))
             exchange_s!()
-            nrm0 = sqrt(cv_sum(par, sum(B -> sum(abs2, owned(B.V1)) + sum(abs2, owned(B.V2)), blocks)))
+            nrm0 = sqrt(cv_sum(par, value(sum(B -> sum(abs2, owned(B.V1)) + sum(abs2, owned(B.V2)), blocks))))
             foreach(B -> (fill!(B.V1, 0); fill!(B.V2, 0)), blocks)
             momentum!(one(FT), false)
             KernelAbstractions.synchronize(backend)
             exchange_v!()
-            nrm = sqrt(cv_sum(par, sum(B -> sum(abs2, owned(B.V1)) + sum(abs2, owned(B.V2)), blocks)))
+            nrm = sqrt(cv_sum(par, value(sum(B -> sum(abs2, owned(B.V1)) + sum(abs2, owned(B.V2)), blocks))))
             λ = nrm / nrm0
             foreach(B -> (B.V1 ./= FT(nrm); B.V2 ./= FT(nrm)), blocks)
         end
@@ -688,17 +688,20 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         KernelAbstractions.synchronize(backend)
         exchange_s!()
     end
-    "the seismograms of all stations (velocity, displacement, stress, strain) on every process"
-    function all_traces()
+    "the seismograms of all stations (velocity, displacement, stress, strain) on every process (`part`: of Born numbers)"
+    function all_traces(part=identity)
         traces = zeros(nrec, 10, length(stations))
-        traces[:, :, own] .= Float64.(Array(rec))
+        traces[:, :, own] .= part.(Array(rec))
         par === nothing || MPI.Allreduce!(traces, +, par.comm)
         return traces
     end
+    seismograms(traces, wf=nothing) = Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), traces[:, 1:2, :], traces[:, 3:4, :],
+                                                  traces[:, 5:7, :], traces[:, 8:10, :], collect(stations), (:x, :z), (:xx, :zz, :xz), wf)
     # a driver (misfit gradients) takes over
     driver === nothing || return drive_curvilinear(driver, (; backend, FT, blocks, hostblocks, nb, nx, nzt, nl, no, hx, ox, xr, ia, ib,
         par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!, exchange_s!, owned, St, nst, FS, forces,
-        Hξ, hξ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, vc, own_stations=own, nsrc=length(srcs), st_all))
+        Hξ, hξ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, vc, own_stations=own, nsrc=length(srcs), st_all,
+        seismograms, ts, fq_ref, loc=A -> A[xr, :]))
     for it in 1:nt
         n = it - 1
         step!(it, true)
@@ -718,8 +721,5 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     KernelAbstractions.synchronize(backend)
     movie === nothing || movie_paraview(movie)
     verbose && @printf("  finished in %.2f s\n", time() - wall)
-    traces = all_traces()
-    return Seismograms(collect(tbeg .+ (0:nrec-1) .* (record_every * dt)), traces[:, 1:2, :], traces[:, 3:4, :],
-                       traces[:, 5:7, :], traces[:, 8:10, :], collect(stations), (:x, :z), (:xx, :zz, :xz),
-                       wavefield ? velocity_field() : nothing)
+    return seismograms(all_traces(), wavefield ? velocity_field() : nothing)
 end

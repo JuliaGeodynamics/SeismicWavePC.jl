@@ -343,3 +343,51 @@ function drive_curvilinear3(d::CurvilinearGradient, c)
                                                           Qs=zeros(nx, ny, nzt)))
     return J, g, Any[nothing for _ in 1:c.nsrc]
 end
+
+# ------------------------------------------------------------------ Born modelling (2D and 3D)
+
+"""
+Born modelling on curvilinear grids: the simulation runs with Born numbers (`T = Tan{…}`); the medium arrays of the blocks get
+the tangents of the perturbation δm (the forward chain rule of the gradient's, through `kmap`: the model row of each node).
+"""
+function born_curvilinear(d::BornDriver, c)
+    (; blocks, hostblocks, model, density_unit, attenuation, ts, fq_ref, loc, nt, backend) = c
+    F0 = typeof(value(zero(c.FT)))
+    f, δf = model.fields, d.δm.fields
+    rho_unit = density_unit === :g_cm3 ? 1e3 : 1.0
+    for (B, H) in zip(blocks, hostblocks)
+        node(I) = ndims(H.kmap) == 2 ? CartesianIndex(I[1], 1, H.kmap[I]) : CartesianIndex(I[1], I[2], H.kmap[I])
+        at(k, s, z) = haskey(δf, k) ? [s * Float64(δf[k][node(I)]) for I in CartesianIndices(H.kmap)] : fill(z, size(H.kmap))
+        δρ, δvp, δvs = at(:rho, rho_unit, 0.0), at(:vp, 1e3, 0.0), at(:vs, 1e3, 0.0)
+        δqp, δqs = at(:Qp, 1.0, 0.0), at(:Qs, 1.0, 0.0)
+        qp = haskey(f, :Qp) ? [Float64(f.Qp[node(I)]) for I in CartesianIndices(H.kmap)] : fill(Inf, size(H.kmap))
+        qs = haskey(f, :Qs) ? [Float64(f.Qs[node(I)]) for I in CartesianIndices(H.kmap)] : fill(Inf, size(H.kmap))
+        ρ, vp, vs = H.ρ, H.vp, H.vs
+        δtp = @. ifelse(isfinite(qp), -H.taup / qp * δqp, 0.0)        # tau = NM zeta / Q
+        δts = @. ifelse(isfinite(qs), -H.taus / qs * δqs, 0.0)
+        χp, χs = visco_chi.((ts,), H.taup, fq_ref), visco_chi.((ts,), H.taus, fq_ref)
+        dχp, dχs = visco_dchi.((ts,), H.taup, fq_ref), visco_dchi.((ts,), H.taus, fq_ref)
+        δmu = @. δρ * vs^2 / χs^2 + 2ρ * vs * δvs / χs^2 - 2ρ * vs^2 / χs^3 * dχs * δts
+        δlam = @. δρ * vp^2 / χp^2 + 2ρ * vp * δvp / χp^2 - 2ρ * vp^2 / χp^3 * dχp * δtp - 2δmu
+        δ = Dict(:lam => δlam, :mu => δmu, :iρJ => -δρ ./ (ρ .^ 2 .* H.J))
+        if attenuation
+            δ[:tp], δ[:ts] = δtp, δts
+        end
+        # impedance damping: 2D (a1vp, a1vs, a2vp, a2vs), 3D ((∂vp, ∂vs) per component)
+        da = H.da isa NamedTuple ? ((H.da.a1vp, H.da.a1vs), (H.da.a2vp, H.da.a2vs)) : H.da
+        for (m, (dp, ds)) in enumerate(da)
+            δ[Symbol(:a, m)] = @. dp * δvp + ds * δvs
+        end
+        for (k, δk) in δ
+            A = getfield(B, k)
+            copyto!(A, Tan.(value.(Array(A)), F0.(loc(δk))))
+        end
+    end
+    for it in 1:nt
+        c.step!(it, true)
+    end
+    KernelAbstractions.synchronize(backend)
+    return c.seismograms(c.all_traces(value)), c.seismograms(c.all_traces(tangent))
+end
+drive_curvilinear(d::BornDriver, c) = born_curvilinear(d, c)
+drive_curvilinear3(d::BornDriver, c) = born_curvilinear(d, c)
