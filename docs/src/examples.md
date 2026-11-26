@@ -98,4 +98,7 @@ noisy seismograms of one earthquake at 11 stations are inverted for the shear ve
 - [`2D_PSV_hill.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/2D_PSV_hill.jl): layered crust under a hill, with a record section ([Getting started](@ref)).
 - [`benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark.jl), [`benchmark_marmousi2.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl): the timings in
   [Performance](@ref).
+- [`topography_benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/topography_benchmark.jl),
+  [`firn_rayleigh_benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/firn_rayleigh_benchmark.jl):
+  free surface on tilted planes and a hill, and multi-mode Rayleigh waves in firn ([Validation](@ref)).
 - [`check_cuda.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/check_cuda.jl), [`check_cuda_mpi.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/check_cuda_mpi.jl): checks of NVIDIA GPUs and of MPI on GPUs.

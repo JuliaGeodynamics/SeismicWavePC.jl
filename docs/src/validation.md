@@ -80,6 +80,64 @@ surface at z = 0. The displacement in metres, without rescaling or time shifts, 
 Relative L2 differences to SeismicWavePC.jl on a 125 m grid (converged): SeismicWavePC.jl on the 500 m grid 0.8–2.4 %, OPT5
 1.1–4.3 %, OPT3 3–30 % (largest at the receivers far from the source).
 
+## Free surface on topography
+
+The same benchmark with topography (the `dev/cutCells` cases of [flexOPT.jl](https://github.com/seismobassoon/flexOPT.jl),
+also by Nobuaki Fuji): the free surface tilted by 10, 20 and 30° (source, force along the normal and receivers rotated with
+it), and a Gaussian hill (3 km high, σ = 5 km) between the source and the receivers. Two lines of five receivers, 10 km
+("deep") and 1 km ("shallow") below the surface; components along (u_t) and normal to the surface (u_n). On the 500 m grid
+(16 points per S wavelength) the surface is a staircase of cells. The references: for the tilted planes the exact answer,
+the flat case rotated (on a 62.5 m grid, where its surface lies on cell faces); for the hill `free_surface = :corners` on a
+62.5 m grid
+([`examples/topography_benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/topography_benchmark.jl),
+under a minute on a laptop):
+
+![Free surface on topography: relative errors and seismograms](assets/topography_benchmark.png)
+
+Relative L2 error of (u_t, u_n) over 0–9 s, mean (max) over the five receivers of a line:
+
+| Case | deep, default (`:openswpc`) | deep, `:corners` | shallow, default (`:openswpc`) | shallow, `:corners` |
+|---|---|---|---|---|
+| flat | 1.2 % (1.6) | 1.2 % (1.6) | 2.9 % (4.0) | 2.9 % (4.0) |
+| 10° | 4.2 % (5.3) | 3.0 % (4.1) | 31 % (38) | 21 % (25) |
+| 20° | 4.5 % (5.7) | 3.0 % (3.7) | 20 % (32) | 13 % (18) |
+| 30° | 4.0 % (5.7) | 2.7 % (3.6) | 24 % (34) | 16 % (21) |
+| hill | 2.2 % (3.5) | 1.9 % (2.8) | 18 % (25) | 11 % (16) |
+
+Away from the surface the staircase costs little (2–4.5 %). Within a fifth of an S wavelength of a sloping surface the
+errors are 20–30 %, mostly delays of the waves along the surface (u_t in the figure); `:corners` reduces them by 1.5–2. Near
+a sloping surface, use a finer grid than the 16 points per S wavelength that suffice elsewhere.
+
+## Rayleigh waves in firn
+
+Firn (compacting snow over glacial ice) has a strong velocity gradient: vs grows from about 300 m/s at the surface to
+2000 m/s at 100 m depth, and Rayleigh waves above 5 Hz come in several modes with very different, depth-sensitive particle
+motions (Chaput et al., 2022, *J. Glaciol.* 68, 785–798). Their numerical results (Figs. 8 and 9) are Rayleigh modes of 1D
+profiles; here SeismicWavePC.jl is compared with a 1D eigen-solver of the same kind (linear finite elements as RAYLEE,
+[`test/rayleigh_modes.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/test/rayleigh_modes.jl)) for
+three profiles: smooth (as their base model), with random fine layering (their Fig. 8b) and with that layering 2 m deeper
+(their Fig. 9). A vertical force (Ricker, 20 Hz) just below the surface, 501 surface stations at 100–1100 m, 0.5 m grid;
+the slant stack of the stations at each frequency gives the phase velocity, H/V and sense of the particle motion of each
+excited mode
+([`examples/firn_rayleigh_benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/firn_rayleigh_benchmark.jl)):
+
+![Rayleigh modes in firn: SeismicWavePC.jl and the eigen-solver](assets/firn_rayleigh_benchmark.png)
+
+The modes R0–R3 follow the eigen-solver: the phase velocity to 0.15–0.5 % on average
+(2.4 % at 6 Hz, where the 1 km line spans only four wavelengths), H/V to 1–6 % on average (more right at the cutoff
+frequency of a mode, where it is hardly excited), and the sense of the motion is right at all but one of 329 picks. As in the
+paper, the fundamental mode R0 is retrograde, R1 prograde with H/V ≈ 1, and R2 strongly horizontal (H/V 3–8); the 2 m
+shift of the layering moves the features of R1 and R2.
+
+The motion of these modes changes within centimetres of the surface. Surface stations record at the centre of the top
+cell (0.25 m deep here), and the eigen-solver is evaluated there too: at the surface itself the H/V of the fundamental mode
+at 45 Hz is 0.85 instead of 0.68. Field instruments in firn are usually buried by about this much.
+
+The test suite checks the fundamental mode over a smooth gradient (vs from 800 to 2000 m/s, 10 m grid) against the
+eigen-solver: phase velocity to 0.5 % and H/V to 3 % at 16–27 points per S wavelength at the surface. The error grows with
+frequency roughly as f², as expected from the 2nd-order differences next to the free surface: 0.2 % at 20 points per S wavelength,
+1 % at 10.
+
 ## Teleseismic plane waves
 
 `TeleseismicWave` (a plane wave from below, injected along a box) against the analytical solution of a homogeneous
@@ -104,6 +162,7 @@ The tests also check:
 - misfit gradients against automatic differentiation (Enzyme, agree to round-off) and finite differences of whole simulations,
   in 2D and 3D, with attenuation and waves in the PML; source gradients, misfit options and several shots against finite
   differences;
+- Rayleigh waves over a velocity gradient against the eigen-solver (see [Rayleigh waves in firn](@ref));
 - MPI runs with 4 processes against serial runs (identical; also the gradients);
 - CPU against Metal (agree to 10⁻⁶) and against CUDA on an NVIDIA A100 ([`examples/check_cuda.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/check_cuda.jl):
   forward simulations and gradients agree to 10⁻¹⁴ in double precision), and MPI on two A100 GPUs against a serial run

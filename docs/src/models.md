@@ -19,7 +19,7 @@ in x (or y) then has no shear coupling to the ground in that direction and does 
 `simulate(...; free_surface = :corners)` these inner corners (one cell of the four with μ = 0) take the harmonic mean of the
 three solid cells; flat surfaces and outer corners are unchanged. In 2D tests on stair-stepped slopes of 10–30° against
 the exact flat surface, it makes the surface seismograms 2–4 times more accurate (misfit 17 instead of 34–52 % at 20 cells
-per S wavelength, 3–4 instead of 6–12 % at 80).
+per S wavelength, 3–4 instead of 6–12 % at 80). See [Validation](@ref) for a benchmark with tilted planes and a hill.
 
 ## Anisotropy (VTI)
 
