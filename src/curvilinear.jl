@@ -25,34 +25,31 @@ end
 "Weights of the SBP norm (quadrature) on a grid of `n` points with interior spacing `h`."
 sbp_weights(n, h) = [h * (j <= SBP_NP ? SBP_W[j] : j > n - SBP_NP ? SBP_W[n+1-j] : 1.0) for j in 1:n]
 
-@assert SBP_NC == 10 && length(SBP_OM) == 8 && length(SBP_OP) == 8      # (the unrolled sums below)
+@assert length(SBP_OM) == 8 && length(SBP_OP) == 8                  # (the unrolled interior sums below)
+"h × the boundary row `i` (1…NB) of D₋ (`tab = :LM`) or D₊ (`:LP`) applied to `g`: an if-chain over the rows with the
+coefficients as literals (a runtime index into the tables would put them on the stack at every call; also for GPUs)."
+@generated function boundary_row(::Val{tab}, g::G, i, ::Type{T}) where {tab,G,T}
+    rows = tab === :LM ? SBP_LM : SBP_LP
+    ex = :(zero(T))
+    for r in length(rows):-1:1
+        terms = [:($(T(rows[r][j])) * g($j)) for j in eachindex(rows[r]) if rows[r][j] != 0]
+        ex = :(i == $r ? $(Expr(:call, :+, terms...)) : $ex)
+    end
+    return ex
+end
 "h (D₋ g)(i) on `n` points; `g(j)` is the value at node j."
 @inline function dminus(g::G, i, n) where {G}
     T = typeof(g(i))
-    s = zero(T)
-    if i <= SBP_NB
-        Base.Cartesian.@nexprs 10 j -> (s += T(SBP_LM[i][j]) * g(j))
-    elseif i > n - SBP_NB
-        r = n + 1 - i
-        Base.Cartesian.@nexprs 10 j -> (s -= T(SBP_LP[r][j]) * g(n + 1 - j))
-    else
-        Base.Cartesian.@nexprs 8 m -> (s += T(SBP_CM[m]) * g(i + SBP_OM[m]))
-    end
-    return s
+    i <= SBP_NB && return boundary_row(Val(:LM), g, i, T)
+    i > n - SBP_NB && return -boundary_row(Val(:LP), j -> g(n + 1 - j), n + 1 - i, T)
+    return dminus_int(g, i, T)
 end
 "h (D₊ g)(i) on `n` points."
 @inline function dplus(g::G, i, n) where {G}
     T = typeof(g(i))
-    s = zero(T)
-    if i <= SBP_NB
-        Base.Cartesian.@nexprs 10 j -> (s += T(SBP_LP[i][j]) * g(j))
-    elseif i > n - SBP_NB
-        r = n + 1 - i
-        Base.Cartesian.@nexprs 10 j -> (s -= T(SBP_LM[r][j]) * g(n + 1 - j))
-    else
-        Base.Cartesian.@nexprs 8 m -> (s += T(SBP_CP[m]) * g(i + SBP_OP[m]))
-    end
-    return s
+    i <= SBP_NB && return boundary_row(Val(:LP), g, i, T)
+    i > n - SBP_NB && return -boundary_row(Val(:LM), j -> g(n + 1 - j), n + 1 - i, T)
+    return dplus_int(g, i, T)
 end
 
 "h (D₋ g)(i) and h (D₊ g)(i) away from the boundaries (no branches: the interior of a block vectorizes)."
@@ -159,14 +156,17 @@ end
 # the traction removed (free surface on top; free or absorbing at the sides and bottom), half the traction mismatch at
 # interfaces (`Bd`, `Bu`: the blocks below and above, `nothing` at the bottom and top). The impedance damping `a` is
 # implicit (trapezoidal): unconditionally stable. `damp = false` leaves it out (power iteration).
-@inline Base.@propagate_inbounds function momentum_cv!(B, Bd, Bu, dt, damp, i, k)
+# `Val(true)`: a node away from the sides (interior stencils in x, no side terms): the boundary rows then vectorize.
+@inline Base.@propagate_inbounds function momentum_cv!(B, Bd, Bu, dt, damp, ::Val{xint}, i, k) where {xint}
     (; V1, V2, S11, S22, S12, J, Jx, iρJ, a1, a2, hξ, hη) = B
     nx, nz = size(V1)
     T = eltype(V1)
     w = T(SBP_W[1])
-    d1 = dminus(j -> @inbounds(J[j, k] * S11[j, k]), i, nx) / hξ + dminus(j -> @inbounds(Jx[i, j] * S11[i, j] + S12[i, j]), k, nz) / hη
-    d2 = dminus(j -> @inbounds(J[j, k] * S12[j, k]), i, nx) / hξ + dminus(j -> @inbounds(Jx[i, j] * S12[i, j] + S22[i, j]), k, nz) / hη
-    if i == 1
+    g1, g2 = j -> @inbounds(J[j, k] * S11[j, k]), j -> @inbounds(J[j, k] * S12[j, k])
+    d1 = (xint ? dminus_int(g1, i, T) : dminus(g1, i, nx)) / hξ + dminus(j -> @inbounds(Jx[i, j] * S11[i, j] + S12[i, j]), k, nz) / hη
+    d2 = (xint ? dminus_int(g2, i, T) : dminus(g2, i, nx)) / hξ + dminus(j -> @inbounds(Jx[i, j] * S12[i, j] + S22[i, j]), k, nz) / hη
+    if xint
+    elseif i == 1
         d1 += J[i, k] * S11[i, k] / (w * hξ); d2 += J[i, k] * S12[i, k] / (w * hξ)
     elseif i == nx
         d1 -= J[i, k] * S11[i, k] / (w * hξ); d2 -= J[i, k] * S12[i, k] / (w * hξ)
@@ -214,16 +214,21 @@ end
     stress_update_cv!(B, vc, dt, i, k, a, b, c, e)
 end
 
+# the interior as a region of the same kernels (one launch for all regions of a block, see foreach_region!)
+@inline Base.@propagate_inbounds momentum_cv!(B, Bd, Bu, dt, damp, ::Val{:int}, i, k) = momentum_cv_int!(B, dt, i, k)
+@inline Base.@propagate_inbounds stress_cv!(B, Bd, Bu, vc, dt, ::Val{:int}, i, k) = stress_cv_int!(B, vc, dt, i, k)
+
 # Stress: the gradient ∂x = Dξ + (Jx / J) Dη, ∂z = Dη / J with D₊ (half the velocity mismatch at interfaces added to Dη v),
 # and the stress update of the staggered solver (memory variables of the generalized Zener body if `vc !== nothing`).
-@inline Base.@propagate_inbounds function stress_cv!(B, Bd, Bu, vc, dt, i, k)
-    (; V1, V2, S11, S22, S12, J, Jx, lam, mu, hξ, hη) = B
+@inline Base.@propagate_inbounds function stress_cv!(B, Bd, Bu, vc, dt, ::Val{xint}, i, k) where {xint}
+    (; V1, V2, hξ, hη) = B
     nx, nz = size(V1)
     T = eltype(V1)
     w = T(SBP_W[1])
-    a = dplus(j -> @inbounds(V1[j, k]), i, nx) / hξ
+    g1, g2 = j -> @inbounds(V1[j, k]), j -> @inbounds(V2[j, k])
+    a = (xint ? dplus_int(g1, i, T) : dplus(g1, i, nx)) / hξ
     b = dplus(j -> @inbounds(V1[i, j]), k, nz) / hη
-    c = dplus(j -> @inbounds(V2[j, k]), i, nx) / hξ
+    c = (xint ? dplus_int(g2, i, T) : dplus(g2, i, nx)) / hξ
     e = dplus(j -> @inbounds(V2[i, j]), k, nz) / hη
     if k == nz && Bu !== nothing
         b -= (V1[i, k] - Bu.V1[i, 1]) / (2w * hη); e -= (V2[i, k] - Bu.V2[i, 1]) / (2w * hη)
@@ -420,26 +425,20 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     end)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing
-    # the interior of a block (branch-free kernels) and its boundary strips (closures, SAT terms): (lo, ndr) of each
+    # the regions of a block, each with its kernel variant: the interior (branch-free), the top and bottom rows away from
+    # the sides (closures in η only: vectorize) and the side columns (closures in both directions). All regions of a block
+    # in one parallel loop on the CPU (one launch per kernel and block: many small launches cost much on a loaded machine).
     m = SBP_NB
-    strips(nz) = ((0, 0), (nx, m)), ((0, nz - m), (nx, m)), ((0, m), (m, nz - 2m)), ((nx - m, m), (m, nz - 2m))
-    function momentum!(dtT, damp)
-        for b in 1:nb
-            nz = hostblocks[b].nz
-            foreach_cell!(backend, momentum_cv_int!, (blocks[b], dtT), (m, m), (nx - 2m, nz - 2m))
-            for (lo, ndr) in strips(nz)
-                foreach_cell!(backend, momentum_cv!, (blocks[b], below_(b), above_(b), dtT, damp), lo, ndr)
-            end
-        end
+    regions = map(hostblocks) do H
+        nz = H.nz
+        (((m, m), (nx - 2m, nz - 2m), Val(:int)), ((m, 0), (nx - 2m, m), Val(true)), ((m, nz - m), (nx - 2m, m), Val(true)),
+         ((0, 0), (m, nz), Val(false)), ((nx - m, 0), (m, nz), Val(false)))
     end
-    function stress!(vc, dtT)
-        for b in 1:nb
-            nz = hostblocks[b].nz
-            foreach_cell!(backend, stress_cv_int!, (blocks[b], vc, dtT), (m, m), (nx - 2m, nz - 2m))
-            for (lo, ndr) in strips(nz)
-                foreach_cell!(backend, stress_cv!, (blocks[b], below_(b), above_(b), vc, dtT), lo, ndr)
-            end
-        end
+    momentum!(dtT, damp) = for b in 1:nb
+        foreach_region!(backend, momentum_cv!, (blocks[b], below_(b), above_(b), dtT, damp), regions[b])
+    end
+    stress!(vc, dtT) = for b in 1:nb
+        foreach_region!(backend, stress_cv!, (blocks[b], below_(b), above_(b), vc, dtT), regions[b])
     end
     # the time step: power iteration for the largest eigenvalue λ of v -> M(S(v)); leapfrog is stable for dt < 2/√λ
     if dt === nothing
