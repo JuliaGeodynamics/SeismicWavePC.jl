@@ -32,6 +32,15 @@ for (mode, nproc, sources) in ((:p3d, (2, 2), test_source()), (:psv, 4, test_sou
         (err < 1e-6 && errV < 1e-12 * maximum(abs, serial.wavefield.fields.V[1]) + 1e-20) || error("MPI result differs for $mode")
     end
 end
+# free_surface = :corners (shear moduli at the inner corners of the topographic step)
+let model = test_model(:p3d), kw = (; dt=DT, nt=200, sources=test_source(), stations=test_stations(:p3d), verbose=false, free_surface=:corners)
+    serial, parallel = simulate(model; kw...), simulate(model; nproc=(2, 2), kw...)
+    if rank == 0
+        err = maximum(abs, serial.v .- parallel.v) / maximum(abs, serial.v)
+        println("MPI p3d nproc=(2, 2), free_surface = :corners: seismogram difference $err")
+        err < 1e-6 || error("MPI result differs with free_surface = :corners")
+    end
+end
 MPI.Barrier(MPI.COMM_WORLD)
 
 for (mode, nproc) in ((:p3d, (2, 2)), (:psv, 4), (:sh, 4))

@@ -192,3 +192,25 @@ end
     @test q.fields.vs[3, 1, end-5] ≈ m.fields.vs[3, 1, end-5] * (1 + small[1, 1, 3 - mod1(6, 3) + 1])
     @test simulate(p; dt=DT, nt=50, sources=test_source(), verbose=false) isa Seismograms
 end
+
+@testset "free surface: inner corners of the topography" begin
+    # a ridge one cell wide on the flat surface: no horizontal motion with the averages of OpenSWPC (the shear stress at the
+    # inner corners at its foot is zero), coupled to the ground with free_surface = :corners
+    m = test_model(:psv)
+    i, k = 110, findlast(>(0), m.fields.vs[110, 1, :]) + 1
+    ridge = map(m.fields) do A
+        B = copy(A); B[i, 1, k] = A[i, 1, k-1]; B
+    end
+    mr = CartData(m.x.val, m.y.val, m.z.val, ridge)
+    kw = (; dt=DT, nt=300, sources=test_source(), stations=[Station("R", m.x.val[i, 1, 1], 0.0, 0.0; surface=true)], verbose=false)
+    ro, rc = simulate(mr; kw...), simulate(mr; kw..., free_surface=:corners)
+    @test all(iszero, ro.v[:, 1, 1]) && maximum(abs, rc.v[:, 1, 1]) > 0.1 * maximum(abs, rc.v[:, 2, 1])
+    # flat free surface: identical results
+    for mode in (:psv, :p3d)
+        mf = test_model(mode; step=false)
+        kwf = (; dt=DT, nt=100, sources=test_source(), stations=test_stations(mode), verbose=false)
+        a, b = simulate(mf; kwf...), simulate(mf; kwf..., free_surface=:corners)
+        @test a.v == b.v && a.stress == b.stress
+    end
+    @test_throws ErrorException simulate(mr; kw..., free_surface=:flat)
+end

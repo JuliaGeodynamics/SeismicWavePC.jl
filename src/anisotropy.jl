@@ -68,7 +68,7 @@ Base.@propagate_inbounds function stress_update_psv!(::Val{true}, F, M, vc, dt, 
     gc = M.gx_c[i] * M.gz_c[k]
     Sxx[I] = (Sxx[I] + (wx * pe * tp1 + s13 * ts1 * dzVz + Rx) * dt) * gc
     Szz[I] = (Szz[I] + (wz * pe * tp1 + s13 * ts1 * dxVx + Rz) * dt) * gc
-    muxz = havg4(M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])          # C55
+    muxz = havg4(shear_rule(M), M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])          # C55
     Rxz = memvar!(memory(F, Val(:Rxz)), I, muxz * ts * e, vc, dt)
     Sxz[I] = (Sxz[I] + (muxz * ts1 * e + Rxz) * dt) * M.gx_b[i] * M.gz_b[k]
 end
@@ -102,9 +102,10 @@ Base.@propagate_inbounds function stress_update_3d!(::Val{true}, F, M, vc, dt, i
     Sxx[I] = (Sxx[I] + (wx * pe * tp1 + ox * ts1 + Rx) * dt) * gc
     Syy[I] = (Syy[I] + (wx * pe * tp1 + oy * ts1 + Ry) * dt) * gc
     Szz[I] = (Szz[I] + (wz * pe * tp1 + oz * ts1 + Rz) * dt) * gc
-    muxz = havg4(mu[i, j, k], mu[i, j, k+1], mu[i+1, j, k], mu[i+1, j, k+1])               # C55
-    muyz = havg4(mu[i, j, k], mu[i, j, k+1], mu[i, j+1, k], mu[i, j+1, k+1])               # C44
-    muxy = havg4(m66[i, j, k], m66[i+1, j, k], m66[i, j+1, k], m66[i+1, j+1, k])           # C66
+    r = shear_rule(M)
+    muxz = havg4(r, mu[i, j, k], mu[i, j, k+1], mu[i+1, j, k], mu[i+1, j, k+1])               # C55
+    muyz = havg4(r, mu[i, j, k], mu[i, j, k+1], mu[i, j+1, k], mu[i, j+1, k+1])               # C44
+    muxy = havg4(r, m66[i, j, k], m66[i+1, j, k], m66[i, j+1, k], m66[i+1, j+1, k])           # C66
     Ryz = memvar!(memory(F, Val(:Ryz)), I, muyz * ts * eyz, vc, dt)
     Rxz = memvar!(memory(F, Val(:Rxz)), I, muxz * ts * exz, vc, dt)
     Rxy = memvar!(memory(F, Val(:Rxy)), I, muxy * ts * exy, vc, dt)
@@ -139,7 +140,7 @@ Base.@propagate_inbounds function grad_psv!(::Val{true}, G, E, Rb, Q, Δ, Vn, Vp
     G.xz[I] += S[3] * vxz
     if Rb !== nothing
         G.tp[I] += (T[1] * wx + T[2] * wz) * pe
-        muxz = havg4(M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])
+        muxz = havg4(shear_rule(M), M.mu[i, k], M.mu[i, k+1], M.mu[i+1, k], M.mu[i+1, k+1])
         G.ts[I] += T[3] * muxz * vxz + (T[1] * dzVz + T[2] * dxVx) * s13
     end
     G.bx[I] += Q.Vx[I] * (Vn[1][I] - Vp[1][I])
@@ -194,9 +195,10 @@ Base.@propagate_inbounds function grad_3d!(::Val{true}, G, E, Rb, Q, Δ, Vn, Vp,
     G.xz[I] += S[5] * vxz
     G.xy[I] += S[6] * vxy
     if Rb !== nothing
-        muxz = havg4(mu[i, j, k], mu[i, j, k+1], mu[i+1, j, k], mu[i+1, j, k+1])
-        muyz = havg4(mu[i, j, k], mu[i, j, k+1], mu[i, j+1, k], mu[i, j+1, k+1])
-        muxy = havg4(m66[i, j, k], m66[i+1, j, k], m66[i, j+1, k], m66[i+1, j+1, k])
+        r = shear_rule(M)
+        muxz = havg4(r, mu[i, j, k], mu[i, j, k+1], mu[i+1, j, k], mu[i+1, j, k+1])
+        muyz = havg4(r, mu[i, j, k], mu[i, j, k+1], mu[i, j+1, k], mu[i, j+1, k+1])
+        muxy = havg4(r, m66[i, j, k], m66[i+1, j, k], m66[i, j+1, k], m66[i+1, j+1, k])
         G.tp[I] += ((T[1] + T[2]) * wx + T[3] * wz) * pe
         G.ts[I] += T[4] * muyz * vyz + T[5] * muxz * vxz + T[6] * muxy * vxy +
                    T[1] * (n66 * dyVy + s13 * dzVz) + T[2] * (n66 * dxVx + s13 * dzVz) + T[3] * s13 * (dxVx + dyVy)
@@ -216,7 +218,7 @@ vti_gradient_setup(::Val{:p3d}) = ((:wx, :wz, :s13, :m66, :yz, :xz, :xy, :tp, :t
 
 "Gradients with respect to the stored VTI moduli (internal arrays) from the accumulators `G` (as `assemble_gradient`)."
 function assemble_gradient_vti(G, med, mode)
-    shear = vti_gradient_setup(Val(mode))[2]
+    shear, rule = vti_gradient_setup(Val(mode))[2], shear_rule(med)
     buoy = adjoint_setup(Val(mode))[13]
     z = zero(med.mu)
     g = Dict(:mu => copy(z), :mu66 => haskey(G, :m66) ? G.m66 : copy(z), :rho => copy(z))
@@ -225,7 +227,7 @@ function assemble_gradient_vti(G, med, mode)
         all(o -> I + o in R, offs) || continue
         m = map(o -> getfield(med, field)[I+o], offs)
         for (a, o) in enumerate(offs)
-            g[field][I+o] += G[name][I] * dhavg(m, a)
+            g[field][I+o] += G[name][I] * dhavg(rule, m, a)
         end
     end
     for (name, e) in pairs(buoy), I in R

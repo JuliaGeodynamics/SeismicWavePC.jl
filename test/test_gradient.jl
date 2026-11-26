@@ -44,6 +44,22 @@ misfit(m, obs, kw) = (r = simulate(m; kw..., stations=obs.stations, verbose=fals
     @test_throws ErrorException misfit_gradient(m, obs; kw..., method=:fd)
 end
 
+@testset "misfit gradient, free_surface = :corners" begin
+    # a topographic step: the shear moduli at its inner corners are averaged over the solid cells; the gradient stays exact
+    m = test_model(:psv; step=true)
+    kw = (; dt=DT, nt=150, sources=test_source(), T=Float64, free_surface=:corners)
+    obs = observed(m, kw, :psv)
+    J, g = misfit_gradient(m, obs; kw...)
+    @test J ≈ misfit(m, obs, kw)
+    @test g.fields.vs ≈ misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=20)[2].fields.vs rtol = 1e-10
+    i = findlast(<=(1.0), m.x.val[:, 1, 1])                     # last column below the step
+    k = findlast(>(0), m.fields.vs[i, 1, :])                    # its top cell, at the inner corner of the step
+    for I in (CartesianIndex(i, 1, k), CartesianIndex(i + 1, 1, k + 1))
+        fd = (misfit(perturbed(m, :vs, I, 1e-4), obs, kw) - misfit(perturbed(m, :vs, I, -1e-4), obs, kw)) / 2e-4
+        @test g.fields.vs[I] ≈ fd rtol = 1e-4
+    end
+end
+
 @testset "misfit gradient SH, 3D" begin
     for (mode, I) in ((:sh, CartesianIndex(110, 1, 75)), (:p3d, CartesianIndex(45, 30, 40)))
         m = test_model(mode)

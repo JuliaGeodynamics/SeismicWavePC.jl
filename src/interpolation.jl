@@ -2,7 +2,8 @@
 # a cut-off radius of 4 grid points and the Kaiser shape 6.31 (as in SeismicWaves.jl). Every quantity is spread onto (or
 # sampled from) its own staggered grid. Points where the quantity is not defined are dropped and the other weights scaled to
 # the same sum: in the air (velocities, normal stresses) and where a cell of a shear stress point has μ = 0 (air, water),
-# as a stress injected there would never relax. With no shear stress point left (a source or station in water), the shear
+# as a stress injected there would never relax (with `free_surface = :corners`: at the inner corners of the surface, one such
+# cell among four, the shear stress is defined). With no shear stress point left (a source or station in water), the shear
 # stress is zero: nothing is injected or recorded.
 
 const SINC_R, SINC_B = 4, 6.31
@@ -22,7 +23,7 @@ const I0B = besseli0(SINC_B)
 kaiser_sinc(x) = abs(x) >= SINC_R ? 0.0 : sinc(x) * besseli0(SINC_B * sqrt(1 - (x / SINC_R)^2)) / I0B
 
 # The staggered grids: the cells that define a point (offsets from its index), whose mean is its position, and whether it
-# is a shear stress point (needs μ > 0 in all of them) or another quantity (needs no air cell).
+# is a shear stress point (needs μ > 0 in all of them, see `shear_point`) or another quantity (needs no air cell).
 const C2, C3 = CartesianIndex{2}, CartesianIndex{3}
 stagger(::Val{:psv}) = (velocity=((C2(0, 0), C2(1, 0)), (C2(0, 0), C2(0, 1))),                       # Vx, Vz
                         stress=((C2(0, 0),), (C2(0, 0),), (C2(0, 0), C2(0, 1), C2(1, 0), C2(1, 1))),  # Sxx, Szz, Sxz
@@ -54,12 +55,15 @@ function sinc_points(g::Grid{N}, med, pos::NTuple{N,Float64}, cells, shear::Bool
 end
 # (top-level functions, no nested closures: inferable on all Julia versions)
 
-"Is the point `J` (cells `J + cells`) defined: no air cell, or for shear stresses μ > 0 in all of them?"
+"Is the point `J` (cells `J + cells`) defined: no air cell, or for shear stresses see `shear_point`?"
 function valid_point(med, J, cells, shear)
     sz = size(med.mu)
     all(c -> all(1 .<= Tuple(J + c) .<= sz), cells) || return false
-    return shear ? all(c -> med.mu[J+c] > 0, cells) : !any(c -> med.lam[J+c] == 0 && med.mu[J+c] == 0, cells)
+    return shear ? shear_point(shear_rule(med), med.mu, J, cells) : !any(c -> med.lam[J+c] == 0 && med.mu[J+c] == 0, cells)
 end
+"Is the shear stress of the point `J` not zero by its averaged μ (`havg4`): μ > 0 in all its cells, or in three of four at an inner corner (`:corners`)?"
+shear_point(::Val{:openswpc}, mu, J, cells) = all(c -> mu[J+c] > 0, cells)
+shear_point(::Val{:corners}, mu, J, cells) = count(c -> !(mu[J+c] > 0), cells) <= (length(cells) == 4 ? 1 : 0)
 
 "Continuous index of the position `p` on the grid of points offset by `o` (in depth on a stretched grid: linear between the cell centres)."
 point_index(g::Grid{N}, p, o) where {N} =
