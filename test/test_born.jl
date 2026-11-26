@@ -51,5 +51,9 @@ end
     @test a ≈ b rtol = 1e-10
     a, b = dot_test(m3, test_perturbation(m3), (; kw..., nt=150, stations=test_stations(:p3d), free_surface=:corners))
     @test a ≈ b rtol = 1e-10
+    a, b = dot_test(m, δm, (; kw..., absorber=:mpml))              # M-PML: coefficients per cell
+    @test a ≈ b rtol = 1e-10
+    a, b = dot_test(m3, test_perturbation(m3), (; kw..., nt=150, stations=test_stations(:p3d), absorber=:mpml))
+    @test a ≈ b rtol = 1e-10
     @test_throws "callback" born(m, δm; kw..., callback=(w, t) -> nothing)   # MPI: test_mpi.jl
 end

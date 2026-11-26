@@ -214,3 +214,44 @@ end
     end
     @test_throws ErrorException simulate(mr; kw..., free_surface=:flat)
 end
+
+@testset "multiaxial PML (absorber = :mpml)" begin
+    # the reproducer of issue #6, coarse: under a soft surface layer the classical PML grows exponentially, the M-PML decays
+    # (air thicker than the z-damping of :pml at the top, na dz, which would otherwise damp the layer in the side zones too)
+    function layered(soft; dx=0.2, dz=0.1, L=10.0, depth=3.0, air=2.1)
+        X, Y, Z = xyz_grid(collect(dx/2:dx:L), 0.0, collect(-depth + dz/2:dz:air))
+        s, solid = (Z .> -soft) .& (Z .<= 0), Z .<= 0
+        CartData(X, Y, Z, (; rho=ifelse.(solid, ifelse.(s, 2000.0, 2700.0), 1.0), vp=ifelse.(solid, ifelse.(s, 1.6, 5.8), 0.0),
+                           vs=ifelse.(solid, ifelse.(s, 0.35, 3.35), 0.0)))
+    end
+    src = MomentTensorSource(5.0, 0.0, -1.0, 1e15, (1.0, 0.0, -1.0, 0.0, 1.0, 0.0); trise=1.5)
+    kw = (; dt=0.01, nt=10000, sources=src, stations=[Station("pml", 9.75, 0.0, 0.0; surface=true), Station("in", 7.0, 0.0, 0.0; surface=true)],
+          record_every=10, verbose=false, wavefield=false)
+    growth(r) = maximum(abs, r.v[r.t .>= 80, :, :]) / maximum(abs, r.v[r.t .< 20, :, :])     # last 20 s / first 20 s of 100 s
+    @test growth(simulate(layered(0.4); kw...)) > 1e3
+    @test growth(simulate(layered(0.4); kw..., absorber=:mpml)) < 0.1
+    # reflections: against a domain large enough that nothing comes back within 6 s (rock half-space, source 1 km from the
+    # left absorber); the M-PML reflects more than the PML (its reflection grows linearly with mpml_ratio)
+    halfspace(pad) = (d = layered(0.0; dx=0.1, dz=0.05, L=6.0 + 2pad, depth=3.0 + pad, air=1.05);
+                 CartData(d.x.val .- pad, d.y.val, d.z.val, d.fields))
+    kwr = (; dt=0.005, nt=1200, sources=MomentTensorSource(1.05, 0.0, -0.975, 1e15, (1.0, 0.0, -1.0, 0.0, 1.0, 0.0); trise=1.0),
+           stations=[Station("S$x", x + 0.05, 0.0, 0.0; surface=true) for x in 0.2:0.4:5.8], verbose=false, wavefield=false)
+    ref = simulate(halfspace(19.0); kwr...).v                                                    # 5.8 km/s × 6 s / 2 + 1.6 km
+    err(r) = sqrt(sum(abs2, r.v .- ref) / sum(abs2, ref))
+    e = map(kw -> err(simulate(halfspace(2.0); kwr..., kw...)), ((; na=20), (; na=20, absorber=:mpml, mpml_ratio=0.02),
+                                                                    (; na=20, absorber=:mpml)))
+    @test e[1] < 1e-3 && e[1] < e[2] < e[3] < 0.07                    # (2.2e-4, 9.3e-3, 3.5e-2)
+    # 3D: a model and a source symmetric under x <-> y give a symmetric wavefield (the profiles of every derivative's point)
+    xs = collect(range(-0.975, 0.975, length=40))
+    X, Y, Z = xyz_grid(xs, xs, collect(range(-1.45, 0.5, length=40)))
+    air = Z .> 0
+    m3 = CartData(X, Y, Z, (; rho=ifelse.(air, 1.0, 2700.0), vp=ifelse.(air, 0.0, 5.8), vs=ifelse.(air, 0.0, 3.35)))
+    r3 = simulate(m3; dt=0.004, nt=300, sources=MomentTensorSource(-0.425, -0.425, -0.5, 1e15, (1.0, 1.0, 0.5, 0.3, 0.3, 0.2); trise=0.2),
+                  absorber=:mpml, mpml_ratio=0.2, na=10, verbose=false)
+    V = r3.wavefield.fields.V
+    @test maximum(abs, V[1]) > 0 && V[1] == permutedims(V[2], (2, 1, 3)) && V[3] == permutedims(V[3], (2, 1, 3))
+    # plane waves pass the side layers of the PML only; the ratio must lie in [0, 1]
+    @test_throws "plane waves" simulate(test_model(:psv); dt=DT, nt=1, sources=PlaneWave(:p; depth=2.5, length=1.0), absorber=:mpml, verbose=false)
+    @test_throws "mpml_ratio" simulate(test_model(:psv); dt=DT, nt=1, sources=test_source(), absorber=:mpml, mpml_ratio=1.5, verbose=false)
+    @test_throws "absorber" simulate(test_model(:psv); dt=DT, nt=1, sources=test_source(), absorber=:mpl, verbose=false)
+end
