@@ -14,7 +14,7 @@ gradients for full-waveform inversion. It started as a Julia port of the finite-
 ## Features
 
 - **Physics:** P-SV and SH (2D) and 3D visco-elastic waves on a staggered grid (4th order in space, 2nd order in time);
-  constant Q (generalized Zener body); free surfaces and topography; oceans; PML or Cerjan absorbing boundaries.
+  constant Q (generalized Zener body); free surfaces and topography; oceans; PML, multiaxial PML or Cerjan absorbing boundaries.
 - **Sources and receivers:** moment tensors, double couples, forces and plane waves, in Cartesian or geographic
   coordinates; velocity, displacement, stress and strain seismograms; reciprocal Green's functions.
 - **Hardware:** Julia threads on CPUs (faster than OpenSWPC per core and in total), GPUs from NVIDIA, AMD and Apple, and MPI

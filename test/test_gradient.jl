@@ -74,6 +74,37 @@ end
     end
 end
 
+@testset "misfit gradient, absorber = :mpml" begin
+    # the coefficients of the M-PML differ per cell: forward, adjoint and AD take them from the same function. Waves in the PML;
+    # cells at the inner edge of the side and bottom layers (the layers copy them)
+    m = test_model(:psv)
+    kw = (; dt=DT, nt=500, sources=test_source(), T=Float64, absorber=:mpml, mpml_ratio=0.2)
+    obs = observed(m, kw, :psv)
+    J, g = misfit_gradient(m, obs; kw...)
+    Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=25)
+    @test J ≈ misfit(m, obs, kw) ≈ Jad
+    for f in (:rho, :vp, :vs, :Qs)
+        @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+    end
+    edge(A, i) = CartesianIndex(i, 1, argmax(abs.(A[i, 1, :])))      # the most sensitive cell of the column i
+    for (field, h, I) in ((:vp, 1e-4, CartesianIndex(94, 1, 21)), (:vs, 1e-4, edge(g.fields.vs, 21)), (:rho, 1e-1, edge(g.fields.rho, 21)))
+        fd = (misfit(perturbed(m, field, I, h), obs, kw) - misfit(perturbed(m, field, I, -h), obs, kw)) / 2h
+        @test g.fields[field][I] ≈ fd rtol = 1e-4
+    end
+    for mode in (:sh, :p3d)
+        m = test_model(mode)
+        kw = (; dt=DT, nt=mode === :sh ? 1000 : 300, sources=test_source(), T=Float64, wave=mode === :sh ? :sh : :psv, na=mode === :sh ? 20 : 8,
+              absorber=:mpml, mpml_ratio=0.2)
+        obs = observed(m, kw, mode)
+        J, g = misfit_gradient(m, obs; kw...)
+        @test J ≈ misfit(m, obs, kw)
+        i = kw.na + 1                          # the inner edge of the left layer (reached and seen by the stations), its most sensitive cell
+        I = CartesianIndex(i, Tuple(argmax(abs.(g.fields.vs[i, :, :])))...)
+        fd = (misfit(perturbed(m, :vs, I, 1e-4), obs, kw) - misfit(perturbed(m, :vs, I, -1e-4), obs, kw)) / 2e-4
+        @test g.fields.vs[I] ≈ fd rtol = 1e-4
+    end
+end
+
 @testset "source gradients, misfits, several shots" begin
     m = test_model(:psv)
     src = test_source()

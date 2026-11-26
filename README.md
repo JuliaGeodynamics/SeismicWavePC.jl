@@ -22,7 +22,7 @@ gradients for full-waveform inversion. It started as a Julia port of [OpenSWPC](
 2017), whose seismograms it reproduces to round-off, and has grown well beyond it.
 
 - **Visco-elastic waves** in 2D (P-SV, SH) and 3D, with topography, oceans, constant Q, VTI anisotropy (Thomsen
-  parameters), and PML absorbing boundaries;
+  parameters), and PML (or multiaxial PML) absorbing boundaries;
   sources and receivers at the grid cells (as OpenSWPC) or anywhere in between (sinc interpolation), grids that are
   finer near the surface (stretched in depth), and teleseismic P, SV and SH plane waves at any angle and backazimuth
   (injected exactly along a box in a layered background).

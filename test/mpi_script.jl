@@ -1,5 +1,5 @@
 # Started by test_mpi.jl with 4 MPI processes. Exits with an error if a parallel run differs from the serial one.
-# The argument selects a part (forward, gradient, born, vti, other; default all): test_mpi.jl starts each part in fresh processes, so that
+# The argument selects a part (forward, gradient, born, vti, mpml, other; default all): test_mpi.jl starts each part in fresh processes, so that
 # the code compiled for one part does not stay in memory for the next (4 processes compiling everything need ~15 GB).
 using MPI
 MPI.Init()
@@ -144,6 +144,36 @@ for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
     end
     rank == 0 && println("MPI VTI $mode nproc=$nproc: seismograms (and gradient) difference $e")
     e < 1e-10 || error("MPI result with VTI anisotropy differs for $mode on rank $rank")
+end
+MPI.Barrier(MPI.COMM_WORLD)
+end
+
+if runs("mpml")
+# M-PML (absorber = :mpml): coefficients per cell from the profiles sliced per rank; forward (CartData, DistributedModel),
+# gradient and Born as in serial
+for (mode, nproc) in ((:psv, 4), (:sh, 4), (:p3d, (2, 2)))
+    m = test_model(mode)
+    kw = (; dt=DT, nt=200, sources=test_source(), stations=test_stations(mode), wave=mode === :p3d ? :psv : mode, verbose=false, absorber=:mpml, mpml_ratio=0.2)
+    serial, parallel = simulate(m; kw...), simulate(m; nproc, kw...)
+    dist = simulate(distributed(m); nproc, kw..., wavefield=true)
+    if rank == 0
+        err = max(maximum(abs, serial.v .- parallel.v), maximum(abs, serial.v .- dist.v)) / maximum(abs, serial.v)
+        errV = maximum(i -> maximum(abs, serial.wavefield.fields.V[i] .- parallel.wavefield.fields.V[i]), 1:3)
+        println("MPI M-PML $mode nproc=$nproc: seismogram difference $err (CartData, DistributedModel), wavefield difference $errV")
+        (err < 1e-6 && errV < 1e-12 * maximum(abs, serial.wavefield.fields.V[1]) + 1e-20) || error("MPI result with the M-PML differs for $mode")
+    end
+end
+let m = test_model(:psv), nproc = 4
+    kw = (; dt=DT, nt=150, sources=test_source(), T=Float64, absorber=:mpml, mpml_ratio=0.2)
+    obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kw..., stations=test_stations(:psv), verbose=false)
+    g1, g2 = misfit_gradient(m, obs; kw...)[2], misfit_gradient(m, obs; kw..., nproc)[2]
+    X, Y, Z = m.x.val, m.y.val, m.z.val
+    b = @. exp(-((X - 0.3)^2 + (Z + 1.0)^2) / 0.4^2) * (m.fields.vp > 0)
+    δm = CartData(X, Y, Z, (; vs=0.2 .* b))
+    (_, δ1), (_, δ2) = born(m, δm; kw..., stations=test_stations(:psv)), born(m, δm; kw..., stations=test_stations(:psv), nproc)
+    e = (maximum(abs, g1.fields.vs .- g2.fields.vs) / maximum(abs, g1.fields.vs), maximum(abs, δ1.v .- δ2.v) / maximum(abs, δ1.v))
+    rank == 0 && println("MPI M-PML gradient, born psv nproc=$nproc: $e")
+    all(<(1e-10), e) || error("MPI gradient or Born modelling with the M-PML differs on rank $rank")
 end
 MPI.Barrier(MPI.COMM_WORLD)
 end
