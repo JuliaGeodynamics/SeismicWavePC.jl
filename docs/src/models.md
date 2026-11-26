@@ -60,7 +60,9 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
   discrete adjoint (`checkpoint_steps` as on the staggered grid); the gradient is per model node. Source gradients
   (location, moment tensor, force, timing, source time function) as on the staggered grid. [`born`](@ref) works as on the staggered
   grid (also with attenuation, on GPUs and with MPI).
-- **Not yet:** SH waves, plane waves, anisotropy.
+- **Anisotropy (VTI)** as on the staggered grid (fields `epsilon`, `delta`, `gamma`; the symmetry axis stays vertical on the
+  deformed mesh), also in gradients and Born modelling.
+- **Not yet:** SH waves, plane waves.
 
 ![A hill, a Moho-like interface and a magma chamber on a curvilinear grid](assets/2D_curvilinear.png)
 

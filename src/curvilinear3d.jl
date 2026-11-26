@@ -104,6 +104,10 @@ end
     eyz = z2 * iJ + y3 + qy * z3
     exz = z1 * iJ + x3 + qx * z3
     exy = y1 + qy * z1 + x2 + qx * z2
+    stress3_update_cv!(anisotropic(B), B, vc, dt, I, dxV1, dyV2, dzV3, eyz, exz, exy)
+end
+@inline Base.@propagate_inbounds function stress3_update_cv!(::Val{false}, B, vc, dt, I, dxV1, dyV2, dzV3, eyz, exz, exy)
+    (; S11, S22, S33, S23, S13, S12, lam, mu) = B
     mu2 = 2mu[I]
     l2m = lam[I] + mu2
     tp, ts = orzero(B.tp, I), orzero(B.ts, I)
@@ -122,6 +126,28 @@ end
     S23[I] += (m * ts1 * eyz + Ryz) * dt
     S13[I] += (m * ts1 * exz + Rxz) * dt
     S12[I] += (m * ts1 * exy + Rxy) * dt
+end
+# VTI: σyz with C44 = C55 (`mu`), σxy with C66 (`mu66`), C12 − C11 = −2 C66
+@inline Base.@propagate_inbounds function stress3_update_cv!(::Val{true}, B, vc, dt, I, dxV1, dyV2, dzV3, eyz, exz, exy)
+    (; S11, S22, S33, S23, S13, S12, wx, wz, s13, mu, mu66) = B
+    tp, ts = orzero(B.tp, I), orzero(B.ts, I)
+    tp1, ts1 = unrelaxed(tp, vc), unrelaxed(ts, vc)
+    w1, w3, s, n66 = wx[I], wz[I], s13[I], -2mu66[I]
+    pe = w1 * (dxV1 + dyV2) + w3 * dzV3
+    ox, oy, oz = n66 * dyV2 + s * dzV3, n66 * dxV1 + s * dzV3, s * (dxV1 + dyV2)
+    Rx = cmemvar!(memory(B, Val(:R11)), I, w1 * pe * tp + ox * ts, vc, dt)
+    Ry = cmemvar!(memory(B, Val(:R22)), I, w1 * pe * tp + oy * ts, vc, dt)
+    Rz = cmemvar!(memory(B, Val(:R33)), I, w3 * pe * tp + oz * ts, vc, dt)
+    S11[I] += (w1 * pe * tp1 + ox * ts1 + Rx) * dt
+    S22[I] += (w1 * pe * tp1 + oy * ts1 + Ry) * dt
+    S33[I] += (w3 * pe * tp1 + oz * ts1 + Rz) * dt
+    m, m6 = mu[I], mu66[I]
+    Ryz = cmemvar!(memory(B, Val(:R23)), I, m * ts * eyz, vc, dt)
+    Rxz = cmemvar!(memory(B, Val(:R13)), I, m * ts * exz, vc, dt)
+    Rxy = cmemvar!(memory(B, Val(:R12)), I, m6 * ts * exy, vc, dt)
+    S23[I] += (m * ts1 * eyz + Ryz) * dt
+    S13[I] += (m * ts1 * exz + Rxz) * dt
+    S12[I] += (m6 * ts1 * exy + Rxy) * dt
 end
 
 Base.@propagate_inbounds function force3_cv!(blocks, S, it, dt)
@@ -223,6 +249,9 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     qp = haskey(f, :Qp) ? Float64.(f.Qp) : fill(Inf, size(X))
     qs = haskey(f, :Qs) ? Float64.(f.Qs) : fill(Inf, size(X))
     attenuation = any(isfinite, qp) || any(isfinite, qs)
+    aniso = has_anisotropy(model)                               # VTI: Thomsen ε, δ, γ
+    thomsen(k) = haskey(f, k) ? Float64.(f[k]) : zeros(size(X))
+    ε, δ, γ = thomsen(:epsilon), thomsen(:delta), thomsen(:gamma)
     ts = relaxation_times(fq_min, fq_max)
     zeta = constq_zeta(fq_min, fq_max, ts)
     # blocks: from the columns (flattened)
@@ -234,7 +263,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     Hξ, Hψ = sbp_weights(nx, hξ), sbp_weights(ny, hψ)
     hostblocks = map(1:length(edges)-1) do b
         r = edges[b]:edges[b+1]
-        m = map(A -> copy(A[:, :, r]), (ρ, vp, vs, qp, qs))
+        m = map(A -> copy(A[:, :, r]), (ρ, vp, vs, qp, qs, ε, δ, γ))
         kmap = [r[k] for i in 1:nx, j in 1:ny, k in eachindex(r)]       # the model row of the material of each node
         for (q, side, src) in ((b - 1, false, 2), (b, true, length(r) - 1))
             1 <= q <= length(rows) || continue
@@ -246,7 +275,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
                 kmap[i, j, kk] = kmap[i, j, src]
             end
         end
-        bρ, bvp, bvs, bqp, bqs = m
+        bρ, bvp, bvs, bqp, bqs, bε, bδ, bγ = m
         nz = length(r)
         _, hη = sbp_grid(0.0, 1.0, nz)
         Zb = Zm[:, :, r]
@@ -257,25 +286,44 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         taup, taus = NM * zeta ./ bqp, NM * zeta ./ bqs
         mu = @. bρ * bvs^2 / visco_chi((ts,), taus, fq_ref)^2
         lam = @. bρ * bvp^2 / visco_chi((ts,), taup, fq_ref)^2 - 2mu
+        V = vti_moduli.(bρ, bvp, bvs, bε, bδ, bγ, visco_chi.((ts,), taup, fq_ref), visco_chi.((ts,), taus, fq_ref))
+        wx, wz, s13, mu55, mu66 = ntuple(q -> getindex.(V, q), 5)
         a1, a2, a3 = zeros(nx, ny, nz), zeros(nx, ny, nz), zeros(nx, ny, nz)
-        # and the derivatives of the damping with respect to vp and vs (gradients): ∂a_c/∂vp, ∂a_c/∂vs
-        da = ntuple(_ -> (zeros(nx, ny, nz), zeros(nx, ny, nz)), 3)
-        if absorber === :impedance                      # a = |J·| Z / (H ρ J): normal vp, tangential vs
+        # a = |J·| Z / (H ρ J) with the speeds of normal incidence: normal qP (sides: vp √(1+2ε)), tangential S (σxy: C66,
+        # vs √(1+2γ)); and the derivatives (gradients): da[c] = (∂vp, ∂vs, ∂ε, ∂γ) of a_c
+        da = ntuple(_ -> ntuple(_ -> zeros(nx, ny, nz), 4), 3)
+        if absorber === :impedance
+            # add h × (speed) to a_c and its derivatives: kind :p (horizontal qP), :sh (C66), :s (vs), :pv (vertical qP)
+            function add!(c, s, h, kind)
+                A, d = (a1, a2, a3)[c], da[c]
+                if kind === :p
+                    @. A[s...] += h * bvp[s...] * sqrt(1 + 2bε[s...])
+                    @. d[1][s...] += h * sqrt(1 + 2bε[s...]); @. d[3][s...] += h * bvp[s...] / sqrt(1 + 2bε[s...])
+                elseif kind === :sh
+                    @. A[s...] += h * bvs[s...] * sqrt(1 + 2bγ[s...])
+                    @. d[2][s...] += h * sqrt(1 + 2bγ[s...]); @. d[4][s...] += h * bvs[s...] / sqrt(1 + 2bγ[s...])
+                elseif kind === :s
+                    @. A[s...] += h * bvs[s...]; @. d[2][s...] += h
+                else
+                    @. A[s...] += h * bvp[s...]; @. d[1][s...] += h
+                end
+            end
             for i in (1, nx)
-                @. a1[i, :, :] += bvp[i, :, :] / Hξ[i]; @. a2[i, :, :] += bvs[i, :, :] / Hξ[i]; @. a3[i, :, :] += bvs[i, :, :] / Hξ[i]
-                da[1][1][i, :, :] .+= 1 / Hξ[i]; da[2][2][i, :, :] .+= 1 / Hξ[i]; da[3][2][i, :, :] .+= 1 / Hξ[i]
+                s = (i:i, :, :)
+                add!(1, s, 1 / Hξ[i], :p); add!(2, s, 1 / Hξ[i], :sh); add!(3, s, 1 / Hξ[i], :s)
             end
             for j in (1, ny)
-                @. a1[:, j, :] += bvs[:, j, :] / Hψ[j]; @. a2[:, j, :] += bvp[:, j, :] / Hψ[j]; @. a3[:, j, :] += bvs[:, j, :] / Hψ[j]
-                da[1][2][:, j, :] .+= 1 / Hψ[j]; da[2][1][:, j, :] .+= 1 / Hψ[j]; da[3][2][:, j, :] .+= 1 / Hψ[j]
+                s = (:, j:j, :)
+                add!(1, s, 1 / Hψ[j], :sh); add!(2, s, 1 / Hψ[j], :p); add!(3, s, 1 / Hψ[j], :s)
             end
             if b == 1
-                g = @. sqrt(Jx[:, :, 1]^2 + Jy[:, :, 1]^2 + 1) / (SBP_W[1] * hη * J[:, :, 1])
-                @. a1[:, :, 1] += g * bvs[:, :, 1]; @. a2[:, :, 1] += g * bvs[:, :, 1]; @. a3[:, :, 1] += g * bvp[:, :, 1]
-                da[1][2][:, :, 1] .+= g; da[2][2][:, :, 1] .+= g; da[3][1][:, :, 1] .+= g
+                g = @. sqrt(Jx[:, :, 1:1]^2 + Jy[:, :, 1:1]^2 + 1) / (SBP_W[1] * hη * J[:, :, 1:1])
+                s = (:, :, 1:1)
+                add!(1, s, g, :s); add!(2, s, g, :s); add!(3, s, g, :pv)
             end
         end
-        (; nz, hη, Z=Zb, J, Jx, Jy, ρ=bρ, lam, mu, taup, taus, a1, a2, a3, vp=bvp, vs=bvs, kmap, da)
+        (; nz, hη, Z=Zb, J, Jx, Jy, ρ=bρ, lam, mu, taup, taus, a1, a2, a3, vp=bvp, vs=bvs, ε=bε, δ=bδ, γ=bγ, wx, wz, s13, mu55, mu66,
+           kmap, da)
     end
     nb = length(hostblocks)
     blocks = Tuple(map(hostblocks) do H
@@ -283,10 +331,11 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         R() = KernelAbstractions.zeros(backend, FT, NM, nlx, nly, H.nz)
         loc(A) = dev(FT.(A[xr, yr, :]))
         mem = attenuation ? (; R11=R(), R22=R(), R33=R(), R23=R(), R13=R(), R12=R()) : (;)
+        vti = aniso ? (; wx=loc(H.wx), wz=loc(H.wz), s13=loc(H.s13), mu66=loc(H.mu66)) : (;)
         merge((; V1=z(), V2=z(), V3=z(), S11=z(), S22=z(), S33=z(), S23=z(), S13=z(), S12=z(), G1=z(), G2=z(), G3=z(), J=loc(H.J),
-               Jx=loc(H.Jx), Jy=loc(H.Jy), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam), mu=loc(H.mu),
+               Jx=loc(H.Jx), Jy=loc(H.Jy), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam), mu=loc(aniso ? H.mu55 : H.mu),
                tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1), a2=loc(H.a2),
-               a3=loc(H.a3), hξ=FT(hξ), hψ=FT(hψ), hη=FT(H.hη), ox, oy, nxg=nx, nyg=ny), mem)
+               a3=loc(H.a3), hξ=FT(hξ), hψ=FT(hψ), hη=FT(H.hη), ox, oy, nxg=nx, nyg=ny), mem, vti)
     end)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing

@@ -277,10 +277,13 @@ end
 end
 "The stress update from Dξ v1, Dη v1, Dξ v2, Dη v2 (as the staggered solver: generalized Zener body if `vc !== nothing`)."
 @inline Base.@propagate_inbounds function stress_update_cv!(B, vc, dt, i, k, a, b, c, e)
-    (; S11, S22, S12, J, Jx, lam, mu) = B
     I = CartesianIndex(i, k)
-    q = Jx[I] / J[I]
-    exx, ezz, exz = a + q * b, e / J[I], b / J[I] + c + q * e
+    J = B.J[I]
+    q = B.Jx[I] / J
+    stress_update_cv!(anisotropic(B), B, vc, dt, I, a + q * b, e / J, b / J + c + q * e)
+end
+@inline Base.@propagate_inbounds function stress_update_cv!(::Val{false}, B, vc, dt, I, exx, ezz, exz)
+    (; S11, S22, S12, lam, mu) = B
     mu2 = 2mu[I]
     l2m = lam[I] + mu2
     tp, ts = orzero(B.tp, I), orzero(B.ts, I)
@@ -291,6 +294,20 @@ end
     Rxz = cmemvar!(memory(B, Val(:R12)), I, mu[I] * ts * exz, vc, dt)
     S11[I] += (l2m * tp1 * div - mu2 * ts1 * ezz + Rx) * dt
     S22[I] += (l2m * tp1 * div - mu2 * ts1 * exx + Rz) * dt
+    S12[I] += (mu[I] * ts1 * exz + Rxz) * dt
+end
+# VTI (anisotropy.jl): normal stresses w (w·e) relaxing with τp and the rest (s13) with τs; σxz with C55 (`mu`)
+@inline Base.@propagate_inbounds function stress_update_cv!(::Val{true}, B, vc, dt, I, exx, ezz, exz)
+    (; S11, S22, S12, wx, wz, s13, mu) = B
+    tp, ts = orzero(B.tp, I), orzero(B.ts, I)
+    tp1, ts1 = unrelaxed(tp, vc), unrelaxed(ts, vc)
+    w1, w3, s = wx[I], wz[I], s13[I]
+    pe = w1 * exx + w3 * ezz
+    Rx = cmemvar!(memory(B, Val(:R11)), I, w1 * pe * tp + s * ts * ezz, vc, dt)
+    Rz = cmemvar!(memory(B, Val(:R22)), I, w3 * pe * tp + s * ts * exx, vc, dt)
+    Rxz = cmemvar!(memory(B, Val(:R12)), I, mu[I] * ts * exz, vc, dt)
+    S11[I] += (w1 * pe * tp1 + s * ts1 * ezz + Rx) * dt
+    S22[I] += (w3 * pe * tp1 + s * ts1 * exx + Rz) * dt
     S12[I] += (mu[I] * ts1 * exz + Rxz) * dt
 end
 
@@ -465,6 +482,9 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     qp = haskey(f, :Qp) ? Float64.(f.Qp[:, 1, :]) : fill(Inf, nx, nzt)
     qs = haskey(f, :Qs) ? Float64.(f.Qs[:, 1, :]) : fill(Inf, nx, nzt)
     attenuation = any(isfinite, qp) || any(isfinite, qs)
+    aniso = has_anisotropy(model)                               # VTI: Thomsen ε, δ, γ
+    thomsen(k) = haskey(f, k) ? Float64.(f[k][:, 1, :]) : zeros(nx, nzt)
+    ε, δ, γ = thomsen(:epsilon), thomsen(:delta), thomsen(:gamma)
     ts = relaxation_times(fq_min, fq_max)
     zeta = constq_zeta(fq_min, fq_max, ts)
     # blocks: split at the interfaces; at an interface row each block takes the material of its side
@@ -475,7 +495,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     Hξ = sbp_weights(nx, hξ)
     hostblocks = map(1:length(edges)-1) do b
         r = edges[b]:edges[b+1]
-        m = map(A -> copy(A[:, r]), (ρ, vp, vs, qp, qs))
+        m = map(A -> copy(A[:, r]), (ρ, vp, vs, qp, qs, ε, δ, γ))
         kmap = [r[k] for i in 1:nx, k in eachindex(r)]       # the model row of the material of each node (gradients)
         for (j, side, src) in ((b - 1, false, 2), (b, true, length(r) - 1))
             1 <= j <= length(rows) || continue
@@ -486,7 +506,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
                 kmap[i, kk] = kmap[i, src]
             end
         end
-        bρ, bvp, bvs, bqp, bqs = m
+        bρ, bvp, bvs, bqp, bqs, bε, bδ, bγ = m
         nz = length(r)
         _, hη = sbp_grid(0.0, 1.0, nz)
         Zb = Zm[:, r]
@@ -496,23 +516,28 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         taup, taus = NM * zeta ./ bqp, NM * zeta ./ bqs
         mu = @. bρ * bvs^2 / visco_chi((ts,), taus, fq_ref)^2
         lam = @. bρ * bvp^2 / visco_chi((ts,), taup, fq_ref)^2 - 2mu
-        # impedance damping at the sides and (bottom block) the bottom: a = |J·| Z / (H ρ J), and its derivatives
-        # with respect to vp and vs (gradients)
+        # the moduli in the VTI form (also of isotropic media: the adjoint)
+        V = vti_moduli.(bρ, bvp, bvs, bε, bδ, bγ, visco_chi.((ts,), taup, fq_ref), visco_chi.((ts,), taus, fq_ref))
+        wx, wz, s13, mu55, mu66 = ntuple(q -> getindex.(V, q), 5)
+        # impedance damping at the sides and (bottom block) the bottom: a = |J·| Z / (H ρ J) with the speeds of normal
+        # incidence (VTI: horizontal qP vp √(1+2ε)), and its derivatives (vp, vs, ε, γ) per component (gradients)
         a1, a2 = zeros(nx, nz), zeros(nx, nz)
-        da = (a1vp=zeros(nx, nz), a1vs=zeros(nx, nz), a2vp=zeros(nx, nz), a2vs=zeros(nx, nz))
+        da = ntuple(_ -> ntuple(_ -> zeros(nx, nz), 4), 2)
         if absorber === :impedance
             for i in (1, nx)
-                @. a1[i, :] += bvp[i, :] / Hξ[i]; @. a2[i, :] += bvs[i, :] / Hξ[i]
-                da.a1vp[i, :] .+= 1 / Hξ[i]; da.a2vs[i, :] .+= 1 / Hξ[i]
+                h = 1 / Hξ[i]
+                @. a1[i, :] += bvp[i, :] * sqrt(1 + 2bε[i, :]) * h; @. a2[i, :] += bvs[i, :] * h
+                @. da[1][1][i, :] += sqrt(1 + 2bε[i, :]) * h; @. da[1][3][i, :] += bvp[i, :] / sqrt(1 + 2bε[i, :]) * h
+                da[2][2][i, :] .+= h
             end
             if b == 1
                 Hη1 = SBP_W[1] * hη
                 q = @. sqrt(Jx[:, 1]^2 + 1) / (Hη1 * J[:, 1])
                 @. a1[:, 1] += q * bvs[:, 1]; @. a2[:, 1] += q * bvp[:, 1]
-                da.a1vs[:, 1] .+= q; da.a2vp[:, 1] .+= q
+                da[1][2][:, 1] .+= q; da[2][1][:, 1] .+= q
             end
         end
-        (; nz, hη, Z=Zb, J, Jx, ρ=bρ, lam, mu, taup, taus, a1, a2, vp=bvp, vs=bvs, kmap, da)
+        (; nz, hη, Z=Zb, J, Jx, ρ=bρ, lam, mu, taup, taus, a1, a2, vp=bvp, vs=bvs, ε=bε, δ=bδ, γ=bγ, wx, wz, s13, mu55, mu66, kmap, da)
     end
     nb = length(hostblocks)
     blocks = Tuple(map(hostblocks) do H
@@ -520,9 +545,10 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         loc(A) = dev(FT.(A[xr, :]))
         mem = attenuation ? (; R11=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz), R22=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz),
                                R12=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz)) : (;)
+        vti = aniso ? (; wx=loc(H.wx), wz=loc(H.wz), s13=loc(H.s13)) : (;)
         merge((; V1=z(), V2=z(), S11=z(), S22=z(), S12=z(), J=loc(H.J), Jx=loc(H.Jx), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam),
-               mu=loc(H.mu), tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1),
-               a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx), mem)
+               mu=loc(aniso ? H.mu55 : H.mu), tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1),
+               a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx), mem, vti)
     end)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing

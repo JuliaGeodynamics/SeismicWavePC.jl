@@ -40,15 +40,16 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         @test first(SW.find_blocks(Z, vc, vc ./ 1.73)) == [r]
     end
 
-    @testset "flat model: against the staggered solver" begin
+    @testset "flat model: against the staggered solver ($kind)" for kind in (:isotropic, :vti)
         # a double couple 5 km deep, Q = 50, receivers on the surface and at depth; staggered at half the spacing
         src = DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=3.0, strike=0, dip=45, rake=90, trise=1.0)
         stations = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in (2, 5, 8)]
         push!(stations, Station("d", 4.0, 0.0, -3.0))
         mat = (; vp=4.0, vs=2.3, rho=2500.0, Q=50.0)
+        th = kind === :vti ? (; epsilon=0.15, delta=0.05, gamma=0.1) : (;)        # (VTI: 84 % different waveforms)
         mesh = curvilinear_mesh(range(-20, 20, length=401), [x -> 0.0]; dz=0.1, bottom=-30)
         o = ones(size(mesh.x.val))
-        cm = addfield(mesh, (; rho=mat.rho .* o, vp=mat.vp .* o, vs=mat.vs .* o, Qp=2mat.Q .* o, Qs=mat.Q .* o))
+        cm = addfield(mesh, merge((; rho=mat.rho .* o, vp=mat.vp .* o, vs=mat.vs .* o, Qp=2mat.Q .* o, Qs=mat.Q .* o), map(v -> v .* o, th)))
         dx = 0.05
         # the staggered solver records "surface" stations at the centre of its top cell (dx/2 deep): the curvilinear one
         # there too (the horizontal motion of surface waves changes quickly with depth: ~15 % per 25 m here)
@@ -56,8 +57,8 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         rc = simulate(cm; grid=:curvilinear, tmax=8.0, sources=src, stations=cstations, T=Float64, verbose=false)
         X, Y, Z = xyz_grid(-20+dx/2:dx:20, 0, -30+dx/2:dx:2dx)
         air = Z .> 0
-        sm = CartData(X, Y, Z, (; rho=ifelse.(air, 1.0, mat.rho), vp=ifelse.(air, 0.0, mat.vp), vs=ifelse.(air, 0.0, mat.vs),
-                                  Qp=ifelse.(air, 10.0, 2mat.Q), Qs=ifelse.(air, 10.0, mat.Q)))
+        sm = CartData(X, Y, Z, merge((; rho=ifelse.(air, 1.0, mat.rho), vp=ifelse.(air, 0.0, mat.vp), vs=ifelse.(air, 0.0, mat.vs),
+                                        Qp=ifelse.(air, 10.0, 2mat.Q), Qs=ifelse.(air, 10.0, mat.Q)), map(v -> ifelse.(air, 0.0, v), th)))
         rs = simulate(sm; dt=0.004, nt=2000, sources=src, stations, interpolation=:sinc, T=Float64, verbose=false)
         @test rc.components == rs.components && size(rc.v, 2) == 2
         # on the curvilinear time axis
@@ -171,14 +172,14 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         end
     end
 
-    @testset "misfit gradient (2D, attenuation) against finite differences" begin
+    @testset "misfit gradient (2D, VTI, attenuation) against finite differences" begin
         topog(x) = 1.2 * exp(-x^2 / 12)
         mohog(x) = -4.0 + 0.6 * sin(2π * x / 10)
         mesh = curvilinear_mesh(range(-8, 8, length=49), [topog, mohog]; dz=0.33, bottom=-10)
         X, Z = mesh.x.val, mesh.z.val
         low = Z .< mohog.(X)
         base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=ifelse.(low, 300.0, 60.0),
-                Qs=ifelse.(low, 150.0, 30.0))
+                Qs=ifelse.(low, 150.0, 30.0), epsilon=ifelse.(low, 0.05, 0.15), delta=ifelse.(low, 0.02, 0.06), gamma=ifelse.(low, 0.03, 0.1))
         srcs = [DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0), ForceSource(2.0, 0.0, -2.5; fz=1e14, trise=1.0)]
         sts = [[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -6:3:6]; Station("d", 0.3, 0.0, -6.0)]
         r0 = simulate(addfield(mesh, base); tmax=0.1, sources=srcs, T=Float64, verbose=false)
@@ -186,14 +187,15 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         pert = merge(base, (; vs=base.vs .* (1 .- 0.04 .* exp.(-((X .- 0.5) .^ 2 .+ (Z .+ 1) .^ 2) ./ 3)), Qs=base.Qs .* 1.3))
         obs = simulate(addfield(mesh, pert); kw..., stations=sts, verbose=false)
         J, g, sg = misfit_gradient(addfield(mesh, base), obs; kw..., checkpoint_steps=17)
-        @test keys(g.fields) == (:rho, :vp, :vs, :Qp, :Qs)
+        @test keys(g.fields) == (:rho, :vp, :vs, :epsilon, :delta, :gamma, :Qp, :Qs)
         Jof(m) = L2Misfit()(simulate(m; kw..., stations=sts, verbose=false).v, obs.v, obs.t)[1]
         @test Jof(addfield(mesh, base)) ≈ J rtol = 1e-12
         for (f, δ) in ((:vs, 0.02 .* base.vs .* exp.(-((X .- 2) .^ 2 .+ (Z .- 0.2) .^ 2) ./ 3)),     # at the surface
                        (:vp, 0.02 .* base.vp .* exp.(-((X .+ 2) .^ 2 .+ (Z .+ 4) .^ 2) ./ 3)),     # across the interface
                        (:rho, 0.02 .* base.rho .* exp.(-((X .- 0.5) .^ 2 .+ (Z .+ 2) .^ 2) ./ 4)),
                        (:vs, 0.02 .* base.vs .* exp.(-((X .+ 7.5) .^ 2 .+ (Z .+ 5) .^ 2) ./ 2)),   # at an absorbing side
-                       (:Qs, 5 .* exp.(-((X .- 1) .^ 2 .+ (Z .+ 1) .^ 2) ./ 4)), (:Qp, 10 .* exp.(-((X .+ 1) .^ 2 .+ (Z .+ 2) .^ 2) ./ 4)))
+                       (:Qs, 5 .* exp.(-((X .- 1) .^ 2 .+ (Z .+ 1) .^ 2) ./ 4)), (:Qp, 10 .* exp.(-((X .+ 1) .^ 2 .+ (Z .+ 2) .^ 2) ./ 4)),
+                       (:epsilon, 0.05 .* exp.(-((X .+ 7.5) .^ 2 .+ (Z .+ 5) .^ 2) ./ 2)), (:delta, 0.05 .* exp.(-((X .+ 1) .^ 2 .+ (Z .+ 2) .^ 2) ./ 4)))
             ε = 1e-3
             fd = (Jof(addfield(mesh, merge(base, (; f => base[f] .+ ε .* δ)))) - Jof(addfield(mesh, merge(base, (; f => base[f] .- ε .* δ))))) / 2ε
             @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
@@ -236,20 +238,21 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
             @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
         end
     end
-    @testset "Born modelling: 2D with attenuation (finite differences), 3D (dot test with the gradient)" begin
+    @testset "Born modelling: 2D with VTI and attenuation (finite differences), 3D (dot test with the gradient)" begin
         topob(x) = 1.2 * exp(-x^2 / 12)
         mohob(x) = -4.0 + 0.6 * sin(2π * x / 10)
         mesh = curvilinear_mesh(range(-8, 8, length=49), [topob, mohob]; dz=0.33, bottom=-10)
         X, Z = mesh.x.val, mesh.z.val
         low = Z .< mohob.(X); o = ones(size(X))
-        base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=150 .* o, Qs=80 .* o)
+        base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=150 .* o, Qs=80 .* o,
+                epsilon=0.1 .* o, delta=0.05 .* o, gamma=0.0 .* o)
         srcs = [DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0), ForceSource(2.0, 0.0, -2.5; fz=1e14, trise=1.0)]
         sts = [[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -6:3:6]; Station("d", 0.3, 0.0, -6.0)]
         r0 = simulate(addfield(mesh, base); tmax=0.1, sources=srcs, T=Float64, verbose=false)
         kw = (; dt=r0.t[2] - r0.t[1], tmax=3.0, sources=srcs, stations=sts, T=Float64)
         bump(c, s) = @. exp(-((X - c[1])^2 + (Z - c[2])^2) / s)
         δ = (; rho=50 .* bump((0.5, -2), 4), vp=0.1 .* bump((-2, -4), 3), vs=0.08 .* bump((2, 0.2), 3) .+ 0.05 .* bump((-7.5, -5), 2),
-             Qp=20 .* bump((0, -1), 4), Qs=10 .* bump((1, -3), 4))
+             Qp=20 .* bump((0, -1), 4), Qs=10 .* bump((1, -3), 4), epsilon=0.05 .* bump((1, -1), 4), delta=0.05 .* bump((-1, -2), 4), gamma=zero(X))
         b0, δd = born(addfield(mesh, base), addfield(mesh, δ); kw...)
         @test b0.v == simulate(addfield(mesh, base); kw..., verbose=false).v
         ε = 1e-3

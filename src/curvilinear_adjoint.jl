@@ -133,14 +133,18 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     Adj = Tuple(NamedTuple{(vn..., sn...)}(ntuple(_ -> zero_(b), N + nS)) for b in 1:nb)
     Rb = Tuple(attenuation ? ntuple(_ -> zero_(b, NM), nS) : () for b in 1:nb)            # adjoint memory variables
     Qm = Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb)                                      # Σₘ c2ₘ R̄ₘ (0: elastic)
-    Wk = Tuple(ntuple(_ -> zero_(b), 7) for b in 1:nb)                                       # work arrays
-    Grad = Tuple((; lam=zero_(b), mu=zero_(b), tp=zero_(b), ts=zero_(b), iρJ=zero_(b), a=ntuple(_ -> zero_(b), N)) for b in 1:nb)
+    Wk = Tuple(ntuple(_ -> zero_(b), 4) for b in 1:nb)                                       # work arrays
+    Xw, Xpw = (Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb) for _ in 1:2)
+    # the moduli in the VTI form (isotropic media: wx = wz = √(λ+2μ), s13 = -2μ, mu66 = μ): one adjoint for both
+    Mv = Tuple(map(A -> dev(FT.(loc(A))), (H.wx, H.wz, H.s13, H.mu55, H.mu66)) for H in hostblocks)
+    Grad = Tuple((; wx=zero_(b), wz=zero_(b), s13=zero_(b), mu=zero_(b), m66=zero_(b), tp=zero_(b), ts=zero_(b), iρJ=zero_(b),
+                    a=ntuple(_ -> zero_(b), N)) for b in 1:nb)
     Win = Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb)        # inputs of G (velocities)
     Gout = Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb)      # its strains (normal; shear halved)
     Yin = Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb)       # inputs of A (stresses)
     Aout = Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb)       # A y
     nomem = attenuation ? NamedTuple{rn}(ntuple(_ -> nothing, nS)) : (;)
-    Gblk = Tuple(merge(blocks[b], NamedTuple{vn}(Win[b]), NamedTuple{sn}(Gout[b]), nomem,
+    Gblk = Tuple(merge(Base.structdiff(blocks[b], NamedTuple{(:wx, :wz, :s13, :mu66)}), NamedTuple{vn}(Win[b]), NamedTuple{sn}(Gout[b]), nomem,
                        (; lam=zero_(b), mu=fill_(b, 0.5), tp=nothing, ts=nothing)) for b in 1:nb)
     tractions(b) = N == 3 ? (; G1=zero_(b), G2=zero_(b), G3=zero_(b)) : (;)                 # (3D: the η tractions of A)
     Ablk = Tuple(merge(blocks[b], NamedTuple{sn}(Yin[b]), NamedTuple{vn}(Aout[b]), (; iρJ=fill_(b, 1)), tractions(b)) for b in 1:nb)
@@ -162,12 +166,15 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     L = d.illumination ? Tuple(zero_(b) for b in 1:nb) : nothing                              # Σₙ |v^{n+1/2}|²
     c1, c2, d1, d2 = attenuation ? vc : (nothing, nothing, nothing, zero(FT))
     # the transposed stress update σ^{n+1} = σⁿ + dt (C₁ e + Σₘ d1ₘ Rₘ^{n+1}), Rₘ^{n+1} = c1ₘ Rₘⁿ - c2ₘ dt Cτ e with the
-    # strains e = G v^{n+1/2} in Gout and σ̄ = P: adjoint memory variables, the gradient (λ, μ, τp, τs) and Y = (C₁ P - Cτ Q) / HJ.
-    # (C(tp, ts) e: normal c: (λ+2μ) tp div - 2μ ts (div - e_cc), shear: μ ts γ; C₁ = C(1 + τp(1+d2), 1 + τs(1+d2)), Cτ = C(τp, τs))
+    # strains e = G v^{n+1/2} in Gout (shear: γ/2) and σ̄ = P: adjoint memory variables, the gradient with respect to the
+    # moduli (VTI form) and τp, τs, and Y = (C₁ P - Cτ Q) / HJ. C(tp, ts) = tp w wᵀ + ts (the rest: s13, -2 mu66; shear
+    # mu, (mu66)), w = (wx, [wx,] wz); C₁ = C(1 + τp(1+d2), 1 + τs(1+d2)), Cτ = C(τp, τs). X = ts₁ P - τs Q, X' = (1+d2) P - Q.
     function stress_adjoint!(b)
-        B, P, e, Q, gr, Y = blocks[b], comps(Adj[b], sn), Gout[b], Qm[b], Grad[b], Yin[b]
-        dv, sP, bS, hS, sQ, bQ, hQ = Wk[b]
-        l, m = B.lam, B.mu
+        P, e, Q, gr, Y = comps(Adj[b], sn), Gout[b], Qm[b], Grad[b], Yin[b]
+        wx, wz, s13, mu, m66 = Mv[b]
+        pe, pP, pQ, Z = Wk[b]
+        X, Xp = Xw[b], Xpw[b]
+        B = blocks[b]
         τp, τs = attenuation ? (B.tp, B.ts) : (zero(FT), zero(FT))
         if attenuation
             for k in 1:nS
@@ -179,28 +186,40 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                 end
             end
         end
-        dv .= e[1]; sP .= P[1]; bS .= P[1] .* e[1]; sQ .= Q[1]; bQ .= Q[1] .* e[1]
+        w = N == 2 ? (wx, wz) : (wx, wx, wz)
+        @. pe = w[1] * e[1]; @. pP = w[1] * P[1]; @. pQ = w[1] * Q[1]
         for k in 2:N
-            dv .+= e[k]; sP .+= P[k]; bS .+= P[k] .* e[k]; sQ .+= Q[k]; bQ .+= Q[k] .* e[k]
+            @. pe += w[k] * e[k]; @. pP += w[k] * P[k]; @. pQ += w[k] * Q[k]
         end
-        @. bS = dv * sP - bS; @. bQ = dv * sQ - bQ                 # Σ_c P_c (div - e_cc)
-        fill!(hS, 0); fill!(hQ, 0)
-        for k in N+1:nS
-            @. hS += 2P[k] * e[k]; @. hQ += 2Q[k] * e[k]            # Σ P γ (e: γ / 2)
+        @. Z = (1 + τp * (1 + d2)) * pP - τp * pQ
+        for k in 1:nS
+            @. X[k] = (1 + τs * (1 + d2)) * P[k] - τs * Q[k]
+            @. Xp[k] = (1 + d2) * P[k] - Q[k]
         end
-        @. gr.lam += dtT * dv * ((1 + τp * (1 + d2)) * sP - τp * sQ)
-        @. gr.mu += dtT * (2dv * ((1 + τp * (1 + d2)) * sP - τp * sQ) - 2((1 + τs * (1 + d2)) * bS - τs * bQ) +
-                          (1 + τs * (1 + d2)) * hS - τs * hQ)
-        if attenuation
-            @. gr.tp += dtT * (l + 2m) * dv * ((1 + d2) * sP - sQ)
-            @. gr.ts += dtT * m * ((1 + d2) * (hS - 2bS) - (hQ - 2bQ))
+        if N == 2
+            @. gr.wx += dtT * (pe * ((1 + τp * (1 + d2)) * P[1] - τp * Q[1]) + e[1] * Z)
+            @. gr.wz += dtT * (pe * ((1 + τp * (1 + d2)) * P[2] - τp * Q[2]) + e[2] * Z)
+            @. gr.s13 += dtT * (X[1] * e[2] + X[2] * e[1])
+            @. gr.mu += dtT * X[3] * 2e[3]
+            attenuation && @. gr.ts += dtT * (s13 * (Xp[1] * e[2] + Xp[2] * e[1]) + mu * Xp[3] * 2e[3])
+            @. Y[1] = (wx * Z + s13 * X[2]) / HJ[b]
+            @. Y[2] = (wz * Z + s13 * X[1]) / HJ[b]
+            @. Y[3] = mu * X[3] / HJ[b]
+        else
+            @. gr.wx += dtT * (pe * ((1 + τp * (1 + d2)) * (P[1] + P[2]) - τp * (Q[1] + Q[2])) + (e[1] + e[2]) * Z)
+            @. gr.wz += dtT * (pe * ((1 + τp * (1 + d2)) * P[3] - τp * Q[3]) + e[3] * Z)
+            @. gr.s13 += dtT * (X[1] * e[3] + X[3] * e[1] + X[2] * e[3] + X[3] * e[2])
+            @. gr.m66 += dtT * (-2(X[1] * e[2] + X[2] * e[1]) + X[6] * 2e[6])
+            @. gr.mu += dtT * (X[4] * 2e[4] + X[5] * 2e[5])
+            attenuation && @. gr.ts += dtT * (s13 * (Xp[1] * e[3] + Xp[3] * e[1] + Xp[2] * e[3] + Xp[3] * e[2]) -
+                                              2m66 * (Xp[1] * e[2] + Xp[2] * e[1]) + mu * (Xp[4] * 2e[4] + Xp[5] * 2e[5]) +
+                                              m66 * Xp[6] * 2e[6])
+            @. Y[1] = (wx * Z - 2m66 * X[2] + s13 * X[3]) / HJ[b]
+            @. Y[2] = (wx * Z - 2m66 * X[1] + s13 * X[3]) / HJ[b]
+            @. Y[3] = (wz * Z + s13 * (X[1] + X[2])) / HJ[b]
+            @. Y[4] = mu * X[4] / HJ[b]; @. Y[5] = mu * X[5] / HJ[b]; @. Y[6] = m66 * X[6] / HJ[b]
         end
-        for k in 1:N
-            @. Y[k] = ((l + 2m) * ((1 + τp * (1 + d2)) * sP - τp * sQ) - 2m * ((1 + τs * (1 + d2)) * (sP - P[k]) - τs * (sQ - Q[k]))) / HJ[b]
-        end
-        for k in N+1:nS
-            @. Y[k] = m * ((1 + τs * (1 + d2)) * P[k] - τs * Q[k]) / HJ[b]
-        end
+        attenuation && @. gr.tp += dtT * pe * ((1 + d2) * pP - pQ)
     end
     # 3. backward, segment by segment
     store = [Tuple(ntuple(_ -> zero_(b), 3N) for b in 1:nb) for _ in 1:K]   # per step: v old (N), v new (N), A σ (N)
@@ -269,12 +288,13 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         end
     end
     KernelAbstractions.synchronize(backend)
-    # 4. to ρ, vp, vs [per kg/m³, km/s], Qp, Qs on the nodes of the model (owned nodes; summed over the processes)
-    gρ, gvp, gvs, gqp, gqs, gL = (zeros(nx, ny, nzt) for _ in 1:6)
+    # 4. to ρ, vp, vs [per kg/m³, km/s], (ε, δ, γ,) Qp, Qs on the nodes of the model (owned nodes; summed over the processes)
+    aniso = has_anisotropy(model)
+    gρ, gvp, gvs, gε, gδ, gγ, gqp, gqs, gL = (zeros(nx, ny, nzt) for _ in 1:9)
     f = model.fields
     for (b, H) in enumerate(hostblocks)
         g = map(x -> x isa Tuple ? map(A -> Float64.(Array(A)), x) : Float64.(Array(x)), Grad[b])     # (loop-local)
-        da = H.da isa NamedTuple ? ((H.da.a1vp, H.da.a1vs), (H.da.a2vp, H.da.a2vs)) : H.da
+        hf = (; rho=H.ρ, vp=H.vp, vs=H.vs, ε=H.ε, δ=H.δ, γ=H.γ, taup=H.taup, taus=H.taus)
         own = N == 2 ? CartesianIndices((hx+1:hx+c.no, 1:H.nz)) : CartesianIndices((hx+1:hx+c.nox, hx+1:hx+c.noy, 1:H.nz))
         off = N == 2 ? CartesianIndex(ox, 0) : CartesianIndex(ox, oy, 0)
         Lh = L === nothing ? nothing : Float64.(Array(L[b]))
@@ -282,28 +302,32 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         for Il in own
             I = Il + off
             node = N == 2 ? CartesianIndex(I[1], 1, H.kmap[I]) : CartesianIndex(I[1], I[2], H.kmap[I])
-            ρ, vp, vs, tp, ts_ = H.ρ[I], H.vp[I], H.vs[I], H.taup[I], H.taus[I]
-            χp, χs = visco_chi(ts, tp, fq_ref), visco_chi(ts, ts_, fq_ref)
-            gl, gmt = g.lam[Il], g.mu[Il] - 2g.lam[Il]                          # lam = ρ vp²/χp² - 2 mu
-            gρ[node] += gl * vp^2 / χp^2 + gmt * vs^2 / χs^2 - g.iρJ[Il] / (ρ^2 * H.J[I])
-            gvp[node] += gl * 2ρ * vp / χp^2 + sum(k -> g.a[k][Il] * da[k][1][I], 1:N)
-            gvs[node] += gmt * 2ρ * vs / χs^2 + sum(k -> g.a[k][Il] * da[k][2][I], 1:N)
+            gm = (g.wx[Il], g.wz[Il], g.s13[Il], g.mu[Il], g.m66[Il])
+            # directions (ρ, vp, vs, ε, δ, γ, τp, τs) through the moduli; the damping (vp, vs, ε, γ); 1/(ρJ)
+            dir(j) = (t = vti_tangent(hf, I, ntuple(q -> Float64(q == j), 8), ts, fq_ref); sum(gm[q] * t[q] for q in 1:5))
+            da(q) = sum(k -> g.a[k][Il] * H.da[k][q][I], 1:N)
+            gρ[node] += dir(1) - g.iρJ[Il] / (H.ρ[I]^2 * H.J[I])
+            gvp[node] += dir(2) + da(1)
+            gvs[node] += dir(3) + da(2)
+            if aniso
+                gε[node] += dir(4) + da(3); gδ[node] += dir(5); gγ[node] += dir(6) + da(4)
+            end
+            if attenuation
+                dtp, dts = g.tp[Il] + dir(7), g.ts[Il] + dir(8)
+                qp, qs = haskey(f, :Qp) ? f.Qp[node] : Inf, haskey(f, :Qs) ? f.Qs[node] : Inf
+                gqp[node] += isfinite(qp) ? -dtp * H.taup[I] / qp : 0.0       # tau = NM zeta / Q
+                gqs[node] += isfinite(qs) ? -dts * H.taus[I] / qs : 0.0
+            end
             if Lh !== nothing && (b == 1 || I[N] > 1)      # (on the mesh nodes; interface rows from the block below, as snapshots)
                 gL[CartesianIndex(Base.front(Tuple(node))..., r0 + I[N])] += Lh[Il]
             end
-            if attenuation
-                dtp = g.tp[Il] - gl * 2ρ * vp^2 / χp^3 * visco_dchi(ts, tp, fq_ref)
-                dts = g.ts[Il] - gmt * 2ρ * vs^2 / χs^3 * visco_dchi(ts, ts_, fq_ref)
-                qp, qs = haskey(f, :Qp) ? f.Qp[node] : Inf, haskey(f, :Qs) ? f.Qs[node] : Inf
-                gqp[node] += isfinite(qp) ? -dtp * tp / qp : 0.0              # tau = NM zeta / Q
-                gqs[node] += isfinite(qs) ? -dts * ts_ / qs : 0.0
-            end
         end
     end
-    par === nothing || foreach(A -> MPI.Allreduce!(A, +, par.comm), (gρ, gvp, gvs, gqp, gqs, gL))
+    par === nothing || foreach(A -> MPI.Allreduce!(A, +, par.comm), (gρ, gvp, gvs, gε, gδ, gγ, gqp, gqs, gL))
     rho_unit = density_unit === :g_cm3 ? 1e3 : 1.0
     ill = L === nothing ? (;) : (; illumination=gL)
-    grad = CartData(model.x.val, model.y.val, model.z.val, merge((; rho=gρ .* rho_unit, vp=gvp .* 1e3, vs=gvs .* 1e3, Qp=gqp, Qs=gqs), ill))
+    vti = aniso ? (; epsilon=gε, delta=gδ, gamma=gγ) : (;)
+    grad = CartData(model.x.val, model.y.val, model.z.val, merge((; rho=gρ .* rho_unit, vp=gvp .* 1e3, vs=gvs .* 1e3), vti, (; Qp=gqp, Qs=gqs), ill))
     return J, grad, curvilinear_source_gradients(c, N, AF, gmF, AM, gmM)
 end
 
@@ -381,24 +405,33 @@ function born_curvilinear(d::BornDriver, c)
         node(I) = ndims(H.kmap) == 2 ? CartesianIndex(I[1], 1, H.kmap[I]) : CartesianIndex(I[1], I[2], H.kmap[I])
         at(k, s, z) = haskey(δf, k) ? [s * Float64(δf[k][node(I)]) for I in CartesianIndices(H.kmap)] : fill(z, size(H.kmap))
         δρ, δvp, δvs = at(:rho, rho_unit, 0.0), at(:vp, 1e3, 0.0), at(:vs, 1e3, 0.0)
+        δε, δδ, δγ = at(:epsilon, 1.0, 0.0), at(:delta, 1.0, 0.0), at(:gamma, 1.0, 0.0)
         δqp, δqs = at(:Qp, 1.0, 0.0), at(:Qs, 1.0, 0.0)
         qp = haskey(f, :Qp) ? [Float64(f.Qp[node(I)]) for I in CartesianIndices(H.kmap)] : fill(Inf, size(H.kmap))
         qs = haskey(f, :Qs) ? [Float64(f.Qs[node(I)]) for I in CartesianIndices(H.kmap)] : fill(Inf, size(H.kmap))
         ρ, vp, vs = H.ρ, H.vp, H.vs
         δtp = @. ifelse(isfinite(qp), -H.taup / qp * δqp, 0.0)        # tau = NM zeta / Q
         δts = @. ifelse(isfinite(qs), -H.taus / qs * δqs, 0.0)
-        χp, χs = visco_chi.((ts,), H.taup, fq_ref), visco_chi.((ts,), H.taus, fq_ref)
-        dχp, dχs = visco_dchi.((ts,), H.taup, fq_ref), visco_dchi.((ts,), H.taus, fq_ref)
-        δmu = @. δρ * vs^2 / χs^2 + 2ρ * vs * δvs / χs^2 - 2ρ * vs^2 / χs^3 * dχs * δts
-        δlam = @. δρ * vp^2 / χp^2 + 2ρ * vp * δvp / χp^2 - 2ρ * vp^2 / χp^3 * dχp * δtp - 2δmu
-        δ = Dict(:lam => δlam, :mu => δmu, :iρJ => -δρ ./ (ρ .^ 2 .* H.J))
+        δ = Dict{Symbol,Array{Float64}}(:iρJ => -δρ ./ (ρ .^ 2 .* H.J))
+        if haskey(B, :wx)                  # VTI: the tangents of the stored moduli
+            hf = (; rho=H.ρ, vp=H.vp, vs=H.vs, ε=H.ε, δ=H.δ, γ=H.γ, taup=H.taup, taus=H.taus)
+            dx = (δρ, δvp, δvs, δε, δδ, δγ, δtp, δts)
+            T = map(I -> vti_tangent(hf, I, map(A -> A[I], dx), ts, fq_ref), CartesianIndices(H.kmap))
+            for (q, k) in enumerate((:wx, :wz, :s13, :mu, :mu66))
+                haskey(B, k) && (δ[k] = getindex.(T, q))
+            end
+        else
+            χp, χs = visco_chi.((ts,), H.taup, fq_ref), visco_chi.((ts,), H.taus, fq_ref)
+            dχp, dχs = visco_dchi.((ts,), H.taup, fq_ref), visco_dchi.((ts,), H.taus, fq_ref)
+            δ[:mu] = @. δρ * vs^2 / χs^2 + 2ρ * vs * δvs / χs^2 - 2ρ * vs^2 / χs^3 * dχs * δts
+            δ[:lam] = @. δρ * vp^2 / χp^2 + 2ρ * vp * δvp / χp^2 - 2ρ * vp^2 / χp^3 * dχp * δtp - 2δ[:mu]
+        end
         if attenuation
             δ[:tp], δ[:ts] = δtp, δts
         end
-        # impedance damping: 2D (a1vp, a1vs, a2vp, a2vs), 3D ((∂vp, ∂vs) per component)
-        da = H.da isa NamedTuple ? ((H.da.a1vp, H.da.a1vs), (H.da.a2vp, H.da.a2vs)) : H.da
-        for (m, (dp, ds)) in enumerate(da)
-            δ[Symbol(:a, m)] = @. dp * δvp + ds * δvs
+        # impedance damping: da[c] = (∂vp, ∂vs, ∂ε, ∂γ) of a_c
+        for (m, d) in enumerate(H.da)
+            δ[Symbol(:a, m)] = @. d[1] * δvp + d[2] * δvs + d[3] * δε + d[4] * δγ
         end
         for (k, δk) in δ
             A = getfield(B, k)
