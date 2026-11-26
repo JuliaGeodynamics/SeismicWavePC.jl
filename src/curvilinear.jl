@@ -108,11 +108,45 @@ function curvilinear_mesh(x, surfaces; dz, bottom)
     return CartData(X, zero(X), Z, (; z=copy(Z)))
 end
 
-"Is the 2D `CartData` a deformed (terrain-following) mesh, i.e. do its rows of nodes vary in depth along x?"
+"""
+    mesh = curvilinear_mesh(x, y, surfaces; dz, bottom)
+
+The 3D version: columns at the SBP nodes in x and y, `surfaces` functions z(x, y) [km] or surface `CartData`
+(nx × ny × 1, bilinearly interpolated).
+"""
+function curvilinear_mesh(x, y, surfaces; dz, bottom)
+    nx, ny = length(x), length(y)
+    gx, _ = sbp_grid(Float64(first(x)), Float64(last(x)), nx)
+    gy, _ = sbp_grid(Float64(first(y)), Float64(last(y)), ny)
+    surf(f::Function) = [f(a, b) for a in gx, b in gy]
+    function surf(c::CartData)                                          # bilinear interpolation of a surface CartData
+        xs, ys, zs = c.x.val[:, 1, 1], c.y.val[1, :, 1], c.z.val[:, :, 1]
+        ix(v, g) = (q = clamp(searchsortedlast(g, v), 1, length(g) - 1); (q, (v - g[q]) / (g[q+1] - g[q])))
+        return [(((p, s), (q, t)) = (ix(a, xs), ix(b, ys));
+                 (1 - s) * (1 - t) * zs[p, q] + s * (1 - t) * zs[p+1, q] + (1 - s) * t * zs[p, q+1] + s * t * zs[p+1, q+1]) for a in gx, b in gy]
+    end
+    S = [[surf(f) for f in surfaces]; [fill(Float64(bottom), nx, ny)]]
+    Zs = Array{Float64,3}[]
+    for b in length(S)-1:-1:1
+        top, bot = S[b], S[b+1]
+        all(top .> bot) || error("curvilinear_mesh: surfaces $b and $(b+1) touch or cross")
+        nz = max(SBP_NMIN, ceil(Int, maximum(top .- bot) / dz) + 1)
+        η, _ = sbp_grid(0.0, 1.0, nz)
+        Zb = [bot[i, j] + (top[i, j] - bot[i, j]) * e for i in 1:nx, j in 1:ny, e in η]
+        Zb[:, :, end] .= top
+        push!(Zs, isempty(Zs) ? Zb : Zb[:, :, 2:end])
+    end
+    Z = cat(Zs...; dims=3)
+    nz = size(Z, 3)
+    X = [gx[i] for i in 1:nx, _ in 1:ny, _ in 1:nz]
+    Y = [gy[j] for _ in 1:nx, j in 1:ny, _ in 1:nz]
+    return CartData(X, Y, Z, (; z=copy(Z)))
+end
+
+"Is the `CartData` a deformed (terrain-following) mesh, i.e. do its rows of nodes vary in depth?"
 function is_curvilinear(model::CartData)
-    size(model)[2] == 1 || return false
     Z = model.z.val
-    return any(k -> maximum(view(Z, :, 1, k)) - minimum(view(Z, :, 1, k)) > 1e-9 * (maximum(Z) - minimum(Z)), axes(Z, 3))
+    return any(k -> maximum(view(Z, :, :, k)) - minimum(view(Z, :, :, k)) > 1e-9 * (maximum(Z) - minimum(Z)), axes(Z, 3))
 end
 
 """

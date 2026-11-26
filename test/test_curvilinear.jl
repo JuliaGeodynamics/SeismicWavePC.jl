@@ -118,4 +118,56 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
                  verbose=false)
         @test length(times) > 2 && times[1] == 0
     end
+
+    @testset "3D: mesh, blocks, against the staggered solver, stability" begin
+        topo3(x, y) = 1.0 * exp(-(x^2 + (y - 1)^2) / (2 * 3.0^2))
+        moho3(x, y) = -5.0 + 0.8 * sin(2π * x / 16) * cos(2π * y / 20)
+        mesh = curvilinear_mesh(range(-10, 10, length=41), range(-8, 8, length=33), [topo3, moho3]; dz=0.5, bottom=-15)
+        X, Y, Z = mesh.x.val, mesh.y.val, mesh.z.val
+        @test SW.is_curvilinear(mesh) && size(Z)[1:2] == (41, 33)
+        @test Z[:, :, end] ≈ topo3.(X[:, :, 1], Y[:, :, 1])
+        r = findfirst(k -> Z[:, :, k] ≈ moho3.(X[:, :, 1], Y[:, :, 1]), axes(Z, 3))
+        low = Z .< moho3.(X, Y)
+        vp = ifelse.(low, 6.5, 5.5)
+        flat(A) = reshape(A, :, size(A, 3))
+        @test first(SW.find_blocks(flat(Z), flat(vp), flat(vp ./ 1.73))) == [r]
+        # stable without absorbing boundaries (energy conserved), absorbed with them; Float32
+        m = addfield(mesh, (; rho=ifelse.(low, 2900.0, 2600.0), vp, vs=ifelse.(low, 3.75, 3.2)))
+        src = DoubleCoupleSource(1.0, -2.0, -8.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.5)
+        st = [Station("a", 3.0, 2.0, 0.0; surface=true), Station("b", -4.0, -3.0, -7.0)]
+        r0 = simulate(m; tmax=30.0, sources=src, stations=st, absorber=:none, T=Float64, verbose=false)
+        v0 = vec(maximum(abs, r0.v; dims=(2, 3)))
+        @test maximum(v0[end÷2:end]) < 3maximum(v0[1:end÷2])
+        r64 = simulate(m; tmax=20.0, sources=src, stations=st, T=Float64, verbose=false)
+        r32 = simulate(m; dt=r64.t[2] - r64.t[1], tmax=20.0, sources=src, stations=st, T=Float32, verbose=false)
+        @test norm(r32.v - r64.v) / norm(r64.v) < 1e-3
+        v = vec(maximum(abs, r64.v; dims=(2, 3)))
+        @test maximum(v[end-50:end]) < 0.2maximum(v)
+        @test size(r64.wavefield.fields.V[3]) == size(Z)
+
+        # a flat 3D model (Q = 50, double couple) against the staggered solver at half the spacing
+        L, D = 6.0, 7.0
+        mat = (; vp=4.0, vs=2.3, rho=2500.0, Q=50.0)
+        src = DoubleCoupleSource(-0.5, 0.3, -3.5; Mw=3.0, strike=30, dip=60, rake=70, trise=1.5)
+        dxs, dxc = 0.1, 0.2
+        stations = [Station("s1", 1.5, -1.0, 0.0; surface=true), Station("d", 1.0, -0.5, -2.0)]
+        cst = [s.surface ? Station(s.name, s.x, s.y, -dxs / 2) : s for s in stations]
+        mesh = curvilinear_mesh(range(-L, L, length=61), range(-L, L, length=61), [(x, y) -> 0.0]; dz=dxc, bottom=-D)
+        o = ones(size(mesh.x.val))
+        cm = addfield(mesh, (; rho=mat.rho .* o, vp=mat.vp .* o, vs=mat.vs .* o, Qp=2mat.Q .* o, Qs=mat.Q .* o))
+        rc = simulate(cm; grid=:curvilinear, tmax=3.5, sources=src, stations=cst, T=Float32, verbose=false)
+        X, Y, Z = xyz_grid(-L+dxs/2:dxs:L, -L+dxs/2:dxs:L, -D+dxs/2:dxs:2dxs)
+        air = Z .> 0
+        sm = CartData(X, Y, Z, (; rho=ifelse.(air, 1.0, mat.rho), vp=ifelse.(air, 0.0, mat.vp), vs=ifelse.(air, 0.0, mat.vs),
+                                  Qp=ifelse.(air, 10.0, 2mat.Q), Qs=ifelse.(air, 10.0, mat.Q)))
+        rs = simulate(sm; dt=0.008, nt=440, sources=src, stations, interpolation=:sinc, T=Float32, verbose=false)
+        at(r, u) = [(j = clamp(searchsortedlast(r.t, τ), 1, length(r.t) - 1); u[j] + (u[j+1] - u[j]) * (τ - r.t[j]) / (r.t[j+1] - r.t[j])) for τ in 0.05:0.01:3.4]
+        rel(a, b) = norm(a - b) / norm(b)
+        for n in 1:2, c in 1:3
+            @test rel(at(rc, rc.v[:, c, n]), at(rs, rs.v[:, c, n])) < 0.07
+        end
+        for c in (1, 3)
+            @test rel(at(rc, rc.stress[:, c, 2]), at(rs, rs.stress[:, c, 2])) < 0.06
+        end
+    end
 end

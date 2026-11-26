@@ -24,7 +24,7 @@ per S wavelength, 3–4 instead of 6–12 % at 80). See [Validation](@ref) for a
 ## Topography on a curvilinear grid
 
 The staircase of cells is accurate away from the surface, but close to a sloping surface its errors reach 10–30 % at
-16 points per S wavelength (see [Validation](@ref)). A 2D model can instead be a *deformed* `CartData`: a terrain-following
+16 points per S wavelength (see [Validation](@ref)). A 2D or 3D model can instead be a *deformed* `CartData`: a terrain-following
 mesh whose top row of nodes is the topography. It is then simulated on a curvilinear grid with summation-by-parts (SBP)
 finite differences: the free surface lies exactly on the topography, and the scheme is provably stable (the discrete
 energy is conserved, or dissipated at the absorbing boundaries). The SBP operators are the boundary-optimized dual-pairing
@@ -52,13 +52,15 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
   the duration `tmax`. The sides and the bottom absorb with impedance boundary conditions (no absorbing layer).
 - **Stations** with `surface=true` record exactly on the topography. Attenuation, moment tensors and forces work as on
   the staggered grid.
-- **Not yet:** 3D, MPI, SH waves, plane waves, anisotropy, gradients.
+- **3D:** `curvilinear_mesh(x, y, surfaces; dz, bottom)` with surfaces z(x, y) (functions or surface `CartData`); columns
+  are vertical in 3D too.
+- **Not yet:** MPI, SH waves, plane waves, anisotropy, gradients.
 
 ![A hill, a Moho-like interface and a magma chamber on a curvilinear grid](assets/2D_curvilinear.png)
 
 *[`examples/2D_curvilinear.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/2D_curvilinear.jl): the
 model on its deformed mesh and the vertical velocity at stations on the topography.*
-- **Cost.** A step costs about 3–4× one on the staggered grid with as many cells. Near topography, however, the
+- **Cost.** A step costs about 1.3–2.5× one on the staggered grid with as many cells (2D and 3D, CPU and GPU). Near topography, however, the
   curvilinear grid reaches the same accuracy with about 8× coarser spacing (in 2D, 64× fewer cells, 8× fewer steps).
 
 ## Anisotropy (VTI)

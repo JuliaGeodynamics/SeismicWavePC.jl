@@ -123,8 +123,7 @@ Keyword arguments
 function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolation=:cell, free_surface=:openswpc, grid=:auto, kwargs...)
     grid in (:auto, :staggered, :curvilinear) || error("grid must be :auto, :staggered or :curvilinear, got :$grid")
     if model isa CartData && (grid === :curvilinear || (grid === :auto && is_curvilinear(model)))
-        size(model)[2] == 1 || error("curvilinear grids are 2D only (for now)")
-        return simulate_curvilinear(model; wave, kwargs...)
+        return size(model)[2] == 1 ? simulate_curvilinear(model; wave, kwargs...) : simulate_curvilinear3d(model; kwargs...)
     end
     mode = size(model)[2] == 1 ? wave : :p3d
     mode in (:psv, :sh, :p3d) || error("wave must be :psv or :sh, got :$wave")
