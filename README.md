@@ -1,10 +1,8 @@
 [![CI](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/actions/workflows/CI.yml)
 [![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/)
 
-# SeismicWavePC.jl
 
-**Seismic wave propagation and full-waveform inversion (FWI) in 2D and 3D visco-elastic media, in pure Julia, on CPUs,
-GPUs and MPI clusters.**
+**Seismic wave propagation and full-waveform inversion (FWI) in 2D and 3D visco-elastic media, in pure Julia, on CPUs, GPUs and MPI clusters.**
 
 ![Waves through the magmatic system below Unzen](docs/src/assets/Unzen_2D_waves_10m.gif)
 
@@ -26,6 +24,11 @@ gradients for full-waveform inversion. It started as a Julia port of [OpenSWPC](
   sources and receivers at the grid cells (as OpenSWPC) or anywhere in between (sinc interpolation), grids that are
   finer near the surface (stretched in depth), and teleseismic P, SV and SH plane waves at any angle and backazimuth
   (injected exactly along a box in a layered background).
+- **Topography on curvilinear grids:** a terrain-following mesh with the free surface exactly on the topography and grid
+  lines along interfaces (e.g. the Moho), simulated with provably stable summation-by-parts (SBP) finite differences (the
+  boundary-optimized upwind operators of Mattsson et al. from SummationByPartsOperators.jl, boundary and interface conditions
+  as simultaneous approximation terms); 2D and 3D, with attenuation, VTI anisotropy, PML, gradients and Born modelling, on
+  GPUs and MPI. Meshes from GMG (`curvilinear_grid`) or `curvilinear_mesh`.
 - **Fast everywhere:** Julia threads (faster than OpenSWPC), GPUs from NVIDIA, AMD and Apple, and MPI for several GPUs or nodes.
 - **Any GMG model:** geology tools, geographic data, thermal models
   ([MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl)), phase diagrams
@@ -85,5 +88,16 @@ JUDI.jl/Devito included).
 Maeda, T., Takemura, S., and Furumura, T. (2017). OpenSWPC: an open-source integrated parallel simulation code for modeling
 seismic wave propagation in 3D heterogeneous viscoelastic media. *Earth, Planets and Space*, 69, 102.
 doi:10.1186/s40623-017-0687-2
+
+The curvilinear solver (topography and interfaces on a terrain-following grid) uses summation-by-parts operators from
+SummationByPartsOperators.jl:
+
+Ranocha, H. (2021). SummationByPartsOperators.jl: A Julia library of provably stable semidiscretization techniques with
+mimetic properties. *Journal of Open Source Software*, 6(64), 3454. doi:10.21105/joss.03454
+
+Mattsson, K., Niemelä, O., and Winters, A. R. (2027). Boundary-optimized closures for diagonal-norm upwind SBP operators.
+*Journal of Computational Physics*, 568, 115399. doi:10.1016/j.jcp.2026.115399
+
+Mattsson, K. (2017). Diagonal-norm upwind SBP operators. *Journal of Computational Physics*, 335, 283–310.
 
 MIT license. The forward numerical algorithms are ported from OpenSWPC, © Takuto Maeda, MIT license.
