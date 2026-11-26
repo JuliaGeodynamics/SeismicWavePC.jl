@@ -3,7 +3,7 @@
 # simulated with the curvilinear SBP-SAT solver (summation-by-parts finite differences, simultaneous approximation terms for
 # the free surface, PML at the sides and the bottom). The solver handles solids only: partially molten mush that the
 # staggered example treats as fluid (vs = 0) has vs = 1 km/s here. Movie and record section as Unzen_2D_10m_waves.jl;
-# 4001 × 2124 nodes, 32 926 time steps: 5 minutes on an Apple M-series GPU.
+# 4001 × 2124 nodes, 32 926 time steps: 4.3 minutes on an Apple M-series GPU (the movie frames 22 s).
 #
 #   julia -t auto --project=examples/MagmaThermoKinematics examples/MagmaThermoKinematics/Unzen_2D_10m_curvilinear.jl [cpu|cuda|amdgpu|metal]
 #
@@ -47,22 +47,18 @@ kup = [τ <= 0.1 ? sin(π * τ / 0.1)^3 : 0.0 for τ in ts]
 stf = SampledSTF(ts, [sum(brune(τ - u) * w for (u, w) in zip(ts, kup)) for τ in ts] ./ sum(kup))
 source = DoubleCoupleSource(-12.0, 0.0, -10.0; Mw, strike=0, dip=60, rake=90, trise=1 / fc)
 stations = [Station(@sprintf("S%02d", i), xs, 0.0, 0.0; surface=true) for (i, xs) in enumerate(-17:1.0:17)]
-# --- the display grid (as the README movie: every s-th cell, here pixels of 40 m) and the column interpolation of mesh fields
+# --- the display grid (as the README movie: every s-th cell, here pixels of 40 m): every pixel takes the two nodes of its
+# mesh column around it (row j, weight w; j = 0 in the air), found once: a frame is then one gather
 s = 4
 xd, zd = x[1:s:end], z[1:s:end]
-Xc, Zc = X[1:s:end, 1, :], Z[1:s:end, 1, :]           # the mesh columns at the display x
-function todisplay(A)                                     # A: (nx, nz) on the mesh -> (length(xd), length(zd)), NaN in the air
-    Ac = A[1:s:end, :]
-    B = fill(NaN32, length(xd), length(zd))
-    for i in eachindex(xd), (k, zv) in enumerate(zd)
-        col = view(Zc, i, :)
-        (col[1] <= zv <= col[end]) || continue
-        j = clamp(searchsortedlast(col, zv), 1, length(col) - 1)
-        w = (zv - col[j]) / (col[j+1] - col[j])
-        B[i, k] = (1 - w) * Ac[i, j] + w * Ac[i, j+1]
-    end
-    return B
+jw = map(CartesianIndices((length(xd), length(zd)))) do I
+    col, zv = view(Z, s * (I[1] - 1) + 1, 1, :), zd[I[2]]
+    (col[1] <= zv <= col[end]) || return (0, 0.0f0)
+    j = clamp(searchsortedlast(col, zv), 1, length(col) - 1)
+    return (j, Float32((zv - col[j]) / (col[j+1] - col[j])))
 end
+todisplay(A) = [j == 0 ? NaN32 : (1 - w) * Float32(A[s*(I[1]-1)+1, j]) + w * Float32(A[s*(I[1]-1)+1, j+1])   # A: (nx, nz) on the mesh
+                for (I, (j, w)) in pairs(jw)]
 ztop = Z[:, 1, end]
 surface_x = [st.x for st in stations]
 surface_z = [surf(st.x) for st in stations]
@@ -88,15 +84,16 @@ end
 colsize!(fig.layout, 1, Aspect(1, (x[end] - x[1]) / (3 - z[1])))
 resize_to_layout!(fig)
 movie = VideoStream(fig; framerate=12)
-function frame(wavefield, t)
-    vz[] = todisplay(wavefield.fields.V[3][:, 1, :])
+tframes = Ref(0.0)
+frame(wavefield, t) = tframes[] += @elapsed begin
+    vz[] = todisplay(view(wavefield.fields.V[3], :, 1, :))
     c[] = max(0.3f0 * maximum(v -> isnan(v) ? 0.0f0 : abs(v), vz[]), 1.0f-12)
     title[] = @sprintf("vertical velocity, t = %.2f s (curvilinear grid)", t)
     recordframe!(movie)
 end
 t = @elapsed r = simulate(cm; tmax=14.0, sources=source, stations, backend, stf, verbose=false, absorber=:pml,
                           na=round(Int, 2.0 / h), snapshot_every=235, callback=frame)
-@printf("curvilinear grid on %s with movie frames: %.0f s, %d steps (dt %.3g s)\n", DEVICE, t, length(r.t), r.t[2] - r.t[1])
+@printf("curvilinear grid on %s with movie frames: %.0f s (frames %.0f s), %d steps (dt %.3g s)\n", DEVICE, t, tframes[], length(r.t), r.t[2] - r.t[1])
 save(joinpath(@__DIR__, "Unzen_2D_waves_10m_curvilinear.mp4"), movie)
 
 # --- record section ----------------------------------------------------------------------------------------------------
