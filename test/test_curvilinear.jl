@@ -435,4 +435,27 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         end
         @test_throws "have size" simulate(DistributedModel((ix, iy) -> (; Z=Z[ix, iy, 1:end-1], rho=m.fields.rho[ix, iy, 1:end-1]), X[:, 1, 1], [0.0], size(m)[3]); kw...)
     end
+    @testset "snapshots of divergence and rotation (:ps)" begin
+        # 2D, a hill and an interface: against centred differences of the velocity on the plane (away from the interface)
+        topop(x) = 1.0 * exp(-x^2 / 8)
+        mohop(x) = -6.0 + 0.5 * sin(2π * x / 12)
+        mesh = curvilinear_mesh(range(-15, 15, length=301), [topop, mohop]; dz=0.1, bottom=-15)
+        X, Z = mesh.x.val, mesh.z.val
+        low = Z .< mohop.(X)
+        m = addfield(mesh, (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 4.0), vs=ifelse.(low, 3.75, 2.3)))
+        dir = mktempdir()
+        simulate(m; tmax=3.6, sources=DoubleCoupleSource(2.0, 0.0, -4.0; Mw=3.0, strike=0, dip=45, rake=90, trise=1.0), T=Float64,
+                 verbose=false, absorber=:pml, snapshot_every=200, snapshot_dir=dir, snapshots=Snapshots(xz=true, quantities=(:v, :ps)))
+        v, p = read_snapshots(joinpath(dir, "swpc.psv.xz.v.nc")), read_snapshots(joinpath(dir, "swpc.psv.xz.ps.nc"))
+        @test p.variables ⊇ ["divergence", "rotation"]
+        x, d = v.axes[1][2], v.axes[2][2]
+        k = length(v.t)
+        Vx, Vz, D, R = v["Vx", k], v["Vz", k], p["divergence", k], p["rotation", k]
+        I = [(i, j) for i in 20:length(x)-20, j in 2:length(d)-1 if !iszero(Vx[i, j-1]) && -d[j] < topop(x[i]) - 0.5 && abs(-d[j] - mohop(x[i])) > 0.5]
+        ∂x(A, i, j) = (A[i+1, j] - A[i-1, j]) / (1e3 * (x[i+1] - x[i-1]))
+        ∂z(A, i, j) = -(A[i, j+1] - A[i, j-1]) / (1e3 * (d[j+1] - d[j-1]))             # (z up; the axis is depth)
+        dfd, rfd = [∂x(Vx, i, j) + ∂z(Vz, i, j) for (i, j) in I], [∂z(Vx, i, j) - ∂x(Vz, i, j) for (i, j) in I]
+        @test norm([D[i, j] for (i, j) in I] - dfd) < 0.03norm(dfd)                       # (2 %: the error of the differences)
+        @test norm([R[i, j] for (i, j) in I] - rfd) < 0.03norm(rfd)
+    end
 end

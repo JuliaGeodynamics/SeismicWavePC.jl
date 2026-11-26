@@ -22,7 +22,8 @@ the peak values `max-V` (vertical), `max-H` (horizontal) and `max-A` (vector) ov
 components are at the cell centres with x east, y north and z up, and `t` is the time of the snapshot.
 
 On curvilinear grids the points are the nodes of the mesh columns: `fs` is the topography, `xy` planes and the sections are
-interpolated at regular heights (zero, and medium NaN, above the topography); quantities `:v` and `:u`.
+interpolated at regular heights (zero, and medium NaN, above the topography); the divergence and rotation (`:ps`) from the
+SBP operators at the nodes.
 """
 struct Snapshots
     xy::Union{Nothing,Float64}

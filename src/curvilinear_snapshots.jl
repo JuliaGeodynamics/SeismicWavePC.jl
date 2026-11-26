@@ -4,8 +4,12 @@
 # heights, and are zero above the topography (medium: NaN). Every step a kernel accumulates the displacement and the peak
 # values; the files are written as on the staggered grid (by rank 0, or in pieces by every process: `write_planes`).
 
-"Velocity (Lagrange in η), displacement and peaks at plane point `n`; the row of `B` at snapshot steps."
-Base.@propagate_inbounds function plane_cv!(B, U, PK, blocks, P, dt, store, ::Val{N}, n) where {N}
+"""
+Velocity (Lagrange in η), displacement and peaks at plane point `n`; the row of `B` at snapshot steps, with the divergence and
+rotation of the node fields `D` (per block: div, rot (2D) or div, rot_x, rot_y, rot_z; `nothing` without `:ps`). (They are
+stored × 1e3: the writer of the staggered grid converts its 1/km to 1/s.)
+"""
+Base.@propagate_inbounds function plane_cv!(B, U, PK, blocks, D, P, dt, store, ::Val{N}, n) where {N}
     b = P.b[n]
     T = eltype(U)
     v = ntuple(_ -> zero(T), Val(N))
@@ -24,7 +28,68 @@ Base.@propagate_inbounds function plane_cv!(B, U, PK, blocks, P, dt, store, ::Va
     end
     vh = N == 3 ? sqrt(v[1]^2 + v[2]^2) : abs(v[1])
     peaks!(PK, n, v[N], vh, sqrt(sum(abs2, v)))
-    store && store_row!(B, n, (v..., u...))
+    if store
+        if D === nothing
+            store_row!(B, n, (v..., u...))
+        else
+            T = eltype(U)
+            q = ntuple(_ -> zero(T), Val(2N - 2))
+            if b > 0
+                for c in 1:6
+                    w = P.w[c, n]
+                    I = N == 2 ? CartesianIndex(P.i[n], P.k0[n] + c - 1) : CartesianIndex(P.i[n], P.j[n], P.k0[n] + c - 1)
+                    q = q .+ map(A -> w * A[I], D[b])
+                end
+            end
+            store_row!(B, n, (v..., u..., (q .* T(1e3))...))
+        end
+    end
+end
+
+"""
+The divergence and rotation of the velocities at the nodes, for `:ps` snapshots: the strain operator of the adjoint (the
+stress kernel with λ = 0, μ = ½) on the velocities with one component negated turns a shear strain into a rotation:
+2D (vx, -vz): div = e₁₁ - e₂₂, rot = ∂z vx - ∂x vz = 2e₁₂; 3D (vx, vy, -vz): div = e₁₁ + e₂₂ - e₃₃, rot_x = -2e₂₃,
+rot_y = 2e₁₃, and (vx, -vy, vz): rot_z = -2e₁₂. Returns (the fields per block, a function that computes them).
+"""
+function divrot_cv(blocks, stress!, N, backend, FT)
+    zero_(B) = KernelAbstractions.zeros(backend, FT, size(B.J))
+    half(B) = (A = zero_(B); fill!(A, FT(0.5)); A)
+    vn, sn = N == 2 ? ((:V1, :V2), (:S11, :S22, :S12)) : ((:V1, :V2, :V3), (:S11, :S22, :S33, :S23, :S13, :S12))
+    rn = N == 2 ? (:R11, :R22, :R12) : (:R11, :R22, :R33, :R23, :R13, :R12)
+    plain(B, V, S) = merge(Base.structdiff(B, NamedTuple{(:wx, :wz, :s13, :mu66)}), NamedTuple{vn}(V), NamedTuple{sn}(S),
+                           NamedTuple{rn}(ntuple(_ -> nothing, length(rn))), (; lam=zero_(B), mu=half(B), tp=nothing, ts=nothing, pml=nothing))
+    neg = Tuple(zero_(B) for B in blocks)
+    SA = Tuple(ntuple(_ -> zero_(B), length(sn)) for B in blocks)
+    SB = N == 3 ? Tuple(ntuple(_ -> zero_(B), 6) for B in blocks) : nothing
+    opA = Tuple(plain(B, N == 2 ? (B.V1, neg[b]) : (B.V1, B.V2, neg[b]), SA[b]) for (b, B) in enumerate(blocks))
+    opB = N == 3 ? Tuple(plain(B, (B.V1, neg[b], B.V3), SB[b]) for (b, B) in enumerate(blocks)) : nothing
+    D = Tuple(ntuple(_ -> zero_(B), 2N - 2) for B in blocks)
+    function compute!()
+        for (b, B) in enumerate(blocks)
+            neg[b] .= .-(N == 2 ? B.V2 : B.V3)
+            foreach(A -> fill!(A, 0), SA[b])
+        end
+        stress!(nothing, one(FT), opA)
+        for b in eachindex(blocks)
+            S = SA[b]
+            if N == 2
+                @. D[b][1] = S[1] - S[2]; @. D[b][2] = 2S[3]
+            else
+                @. D[b][1] = S[1] + S[2] - S[3]; @. D[b][2] = -2S[4]; @. D[b][3] = 2S[5]
+            end
+        end
+        if N == 3
+            for (b, B) in enumerate(blocks)
+                neg[b] .= .-B.V2
+                foreach(A -> fill!(A, 0), SB[b])
+            end
+            stress!(nothing, one(FT), opB)
+            foreach(b -> (@. D[b][4] = -2SB[b][6]), eachindex(blocks))
+        end
+        KernelAbstractions.synchronize(backend)
+    end
+    return D, compute!
 end
 
 """
@@ -35,7 +100,6 @@ process and their offsets).
 function setup_planes_cv(s::Snapshots, N, c)
     (; hostblocks, nx, ny, gx, gy, Zm, ia, ib, ja, jb, ox, oy, dev, backend, FT, dir, me, parallel, par, ow, owy) = c
     # (host arrays: the columns of the window of this process, index - (ow, owy); the points of other processes: theirs)
-    :ps in s.quantities && error("curvilinear grids: snapshot quantities :v and :u (not yet :ps)")
     N == 2 && (s.xy !== nothing || s.yz !== nothing || s.fs || s.ob) && error("2D snapshots: only xz")
     s.ob && error("curvilinear grids: no ocean bottom (solids only)")
     solver = N == 3 ? "3d" : "psv"
@@ -133,7 +197,7 @@ function setup_planes_cv(s::Snapshots, N, c)
             end
         end
         (; name, own, npoints=length(pairs), shape, pts=P, files, pieces=s.pieces,
-           B=KernelAbstractions.zeros(backend, FT, m, 2nc), U=KernelAbstractions.zeros(backend, FT, m, nc),
+           B=KernelAbstractions.zeros(backend, FT, m, 2nc + (:ps in s.quantities) * (2nc - 2)), U=KernelAbstractions.zeros(backend, FT, m, nc),
            PK=KernelAbstractions.zeros(backend, FT, m, 3))
     end
 end

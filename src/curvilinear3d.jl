@@ -581,6 +581,7 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
     planes = snapshots === nothing ? nothing :
              setup_planes_cv(snapshots, 3, (; hostblocks, nx, ny=ny, gx, gy=gy, Zm, ia, ib, ja=ja, jb, oy, ox, dev, backend, FT, dir=snapshot_dir,
                                               me, parallel=par !== nothing, par, ow, owy))
+    Dps, divrot! = planes !== nothing && :ps in snapshots.quantities ? divrot_cv(blocks, stress!, 3, backend, FT) : (nothing, nothing)
     movie = (snapshot_every > 0 && callback === nothing && snapshots === nothing && me == 0) ?
             movie_paraview(name=joinpath(mkpath(snapshot_dir), "wavefield")) : nothing
     verbose &= me == 0
@@ -634,8 +635,10 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
         end
         if planes !== nothing                          # netCDF planes: displacement and peaks every step
             store = snapshot_every > 0 && n % snapshot_every == 0
+            store && Dps !== nothing && divrot!()
             for p in planes
-                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, lite, p.pts, dtT, store, Val(3)), length(p.own))
+                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, lite, store ? Dps : nothing, p.pts, dtT, store, Val(3)),
+                                                length(p.own))
             end
             if store
                 KernelAbstractions.synchronize(backend)

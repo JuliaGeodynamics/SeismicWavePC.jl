@@ -240,7 +240,7 @@ if runs("curvilinear")
     snapdirs = MPI.bcast(rank == 0 ? (mktempdir(), mktempdir(), mktempdir()) : nothing, 0, MPI.COMM_WORLD)
     for (dir, nproc, pieces) in zip(snapdirs, (1, (2, 2), (2, 2)), (false, false, true))
         (nproc == 1 && rank > 0) || simulate(m; kw..., tmax=1.0, nproc, snapshot_every=25, snapshot_dir=dir,
-                                             snapshots=Snapshots(; xy=-1.0, xz=0.4, yz=-0.3, fs=true, quantities=(:v, :u), pieces))
+                                             snapshots=Snapshots(; xy=-1.0, xz=0.4, yz=-0.3, fs=true, quantities=(:v, :u, :ps), pieces))
         MPI.Barrier(MPI.COMM_WORLD)
     end
     if rank == 0
