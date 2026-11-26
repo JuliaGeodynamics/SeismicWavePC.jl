@@ -74,11 +74,12 @@ The cases of the benchmark on a mapping z = η + h(ξ) w(η) (see the top), mate
 of each node. Blocks stacked in η: the block boundaries `interfaces` (η values, e.g. material interfaces that follow the
 surface) are grid lines. Builds the meshes and runs them with `run_blocks`.
 """
-function run_case(case; dx=500.0, T=9.0, dt=nothing, order=7, family=MattssonNiemeläWinters2026, flatten=nothing,
-                  flatten_from=0.0, interfaces=Float64[], layer=nothing)
+function run_case(case; dx=500.0, T=9.0, order=7, family=MattssonNiemeläWinters2026, flatten=nothing,
+                  flatten_from=0.0, interfaces=Float64[], layer=nothing, xlim=nothing, bottom=-80e3, kwargs...)
     h = surface(case)
     s = source(case)
-    ξ0, ξ1, η0 = s[1] - 62e3, s[1] + 62e3, -80e3
+    ξ0, ξ1 = something(xlim, (s[1] - 62e3, s[1] + 62e3))
+    η0 = bottom
     Nx = round(Int, (ξ1 - ξ0) / dx) + 1
     gξ = collect(grid(upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=ξ0, xmax=ξ1, N=Nx).minus))
     zmap(ξ, η) = η + h(ξ) * wflat(η, flatten, flatten_from)
@@ -109,7 +110,7 @@ function run_case(case; dx=500.0, T=9.0, dt=nothing, order=7, family=MattssonNie
         end
         (; Z=[zmap(ξ, η) for ξ in gξ, η in gη], ρ, lam, mu)
     end
-    run_blocks(gξ, meshes; case, T, dt, order, family)
+    run_blocks(gξ, meshes; case, T, order, family, kwargs...)
 end
 
 """
@@ -123,12 +124,14 @@ traction, energy-neutral: half of the traction mismatch on the momentum, half of
 each side). Metric terms from `Z` with the divergence operators. Each block needs ≥ 13 points in η; the time step follows
 from the finest block. The top of the top block is the free surface.
 """
-function run_blocks(gξ, meshes; case, T=9.0, dt=nothing, order=7, family=MattssonNiemeläWinters2026)
+function run_blocks(gξ, meshes; case, T=9.0, dt=nothing, cfl=:auto, order=7, family=MattssonNiemeläWinters2026,
+                    integrator=:rk4, absorbing=:none, nsponge=20, FT=Float64, tmax=9.0)
     Nx = length(gξ)
-    Uξ = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=gξ[1], xmax=gξ[end], N=Nx)
+    Uξ = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=gξ[1], xmax=gξ[end], N=Nx)   # (metric, Float64)
     maximum(abs, grid(Uξ.minus) .- gξ) < 1e-6 * (gξ[end] - gξ[1]) || error("x is not the grid of the SBP operator")
-    Ddξ, Dgξ = Uξ.minus, Uξ.plus                                        # divergence, gradient
-    Hξ = diag(mass_matrix(Ddξ))
+    UξT = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=FT(gξ[1]), xmax=FT(gξ[end]), N=Nx)
+    Ddξ, Dgξ = UξT.minus, UξT.plus                                      # divergence, gradient (in FT)
+    Hξ = FT.(diag(mass_matrix(Uξ.minus)))
     dx = gξ[Nx÷2+1] - gξ[Nx÷2]
     for b in 1:length(meshes)-1
         maximum(abs, meshes[b].Z[:, end] .- meshes[b+1].Z[:, 1]) < 1e-6 * dx || error("blocks $b and $(b+1) do not share their interface")
@@ -136,6 +139,7 @@ function run_blocks(gξ, meshes; case, T=9.0, dt=nothing, order=7, family=Mattss
     blocks = map(meshes) do m
         Nz = size(m.Z, 2)
         Uη = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=0.0, xmax=1.0, N=Nz)
+        UηT = upwind_operators(family, derivative_order=1, accuracy_order=order, xmin=zero(FT), xmax=one(FT), N=Nz)
         gη = collect(grid(Uη.minus))
         dξ!(out, A, D) = Threads.@threads for k in 1:Nz
             mul!(view(out, :, k), D, view(A, :, k))
@@ -143,18 +147,48 @@ function run_blocks(gξ, meshes; case, T=9.0, dt=nothing, order=7, family=Mattss
         dη!(out, A, D) = Threads.@threads for i in 1:Nx
             mul!(view(out, i, :), D, view(A, i, :))
         end
-        # metric: x = ξ, J = z_η, Jξ = (z_η, 0), Jη = (-z_ξ, 1), with the divergence operators
+        # metric: x = ξ, J = z_η, Jξ = (z_η, 0), Jη = (-z_ξ, 1), with the divergence operators (in Float64)
         J, Jηx = similar(m.Z), similar(m.Z)
         dη!(J, m.Z, Uη.minus)
-        dξ!(Jηx, m.Z, Ddξ)
+        dξ!(Jηx, m.Z, Uξ.minus)
         Jηx .*= -1
         minimum(J) > 0 || error("the mesh folds (min J = $(minimum(J)))")
-        (; Nz, gη, Z=m.Z, Hη=diag(mass_matrix(Uη.minus)), Ddη=Uη.minus, Dgη=Uη.plus, dξ!, dη!, J, Jηx, ρ=m.ρ, lam=m.lam,
-           mu=m.mu, M=m.lam .+ 2 .* m.mu, ρJ=m.ρ .* J, W=Tuple(zeros(Nx, Nz) for _ in 1:5), F=Dict{Tuple{Int,Int},Float64}())
+        ρ, lam, mu = FT.(m.ρ), FT.(m.lam), FT.(m.mu)
+        (; Nz, gη, Z=m.Z, Hη=FT.(diag(mass_matrix(Uη.minus))), Ddη=UηT.minus, Dgη=UηT.plus, dξ!, dη!, J=FT.(J), Jηx=FT.(Jηx),
+           ρ, lam, mu, M=lam .+ 2 .* mu, ρJ=ρ .* FT.(J), W=Tuple(zeros(FT, Nx, Nz) for _ in 1:5), F=Dict{Tuple{Int,Int},Float64}())
     end
     nb = length(blocks)
-    # time step: 0.25 h / vp (RK4 limit ≈ 0.43 h / vp for these operators), h the finer of the spacings of a block
-    dt = something(dt, minimum(B -> 0.25 * min(dx, minimum(B.J) / (B.Nz - 1)) / maximum(sqrt.(B.M ./ B.ρ)), blocks))
+    # time step: cfl h / vp (h the finer of the spacings of a block), or (cfl = :auto) from the spectral radius below
+    cfl isa Number && (dt = something(dt, minimum(B -> cfl * min(dx, minimum(B.J) / (B.Nz - 1)) / maximum(sqrt.(B.M ./ B.ρ)), blocks)))
+    # absorbing boundaries (sides and bottom): impedance SAT (σ·n = -Z v, Z = ρ vp normal, ρ vs tangential; dissipates
+    # energy) and/or a Cerjan sponge (fields × exp(-(0.3 (n - d) / n)²) within n points of the boundary, every step)
+    sat_abs = absorbing in (:sat, :both)
+    sponge = map(enumerate(blocks)) do (b, B)
+        f = ones(FT, Nx, B.Nz)
+        absorbing in (:sponge, :both) || return f
+        g(d) = d < nsponge ? exp(-(0.3 * (nsponge - d) / nsponge)^2) : 1.0
+        for k in 1:B.Nz, i in 1:Nx
+            f[i, k] = g(i - 1) * g(Nx - i) * (b == 1 ? g(k - 1) : 1.0)
+        end
+        f
+    end
+    VP = [sqrt.(B.M ./ B.ρ) for B in blocks]
+    VS = [sqrt.(B.mu ./ B.ρ) for B in blocks]
+    # the impedance SAT is a damping -a v at the boundary nodes, a = |J·| Z / (H ρ J) (normal: vp, tangential: vs); it is
+    # stiff (a dt > 2 at corners), so leapfrog treats it implicitly (trapezoidal: unconditionally stable for damping)
+    AD = map(enumerate(blocks)) do (b, B)
+        a1, a2 = zeros(FT, Nx, B.Nz), zeros(FT, Nx, B.Nz)
+        if sat_abs
+            for i in (1, Nx)
+                @. a1[i, :] += VP[b][i, :] / Hξ[i]; @. a2[i, :] += VS[b][i, :] / Hξ[i]
+            end
+            if b == 1
+                @. a1[:, 1] += sqrt(B.Jηx[:, 1]^2 + 1) * VS[b][:, 1] / (B.Hη[1] * B.J[:, 1])
+                @. a2[:, 1] += sqrt(B.Jηx[:, 1]^2 + 1) * VP[b][:, 1] / (B.Hη[1] * B.J[:, 1])
+            end
+        end
+        (a1, a2)
+    end
     "block and η̂ of the physical point (x, z): Lagrange interpolation of the mesh columns, bisection in η̂"
     function locate(x, z)
         iξ, wξ = lagrange(gξ, x)
@@ -183,10 +217,10 @@ function run_blocks(gξ, meshes; case, T=9.0, dt=nothing, order=7, family=Mattss
         end
     end
     Fpts = [collect(B.F) for B in blocks]
-    newstate() = [Tuple(zeros(Nx, B.Nz) for _ in 1:5) for B in blocks]
+    newstate() = [Tuple(zeros(FT, Nx, B.Nz) for _ in 1:5) for B in blocks]
     U, Utmp = newstate(), newstate()
     K = [newstate() for _ in 1:4]
-    function rhs!(dU, U, t)
+    function momentum!(dU, U, t)
         r = ricker(t)
         # momentum: ρ J ∂t v_i = Dξ(Jξ_j σ_ij) + Dη(Jη_j σ_ij) (+ SAT, force)
         for (b, B) in enumerate(blocks)
@@ -213,6 +247,10 @@ function run_blocks(gξ, meshes; case, T=9.0, dt=nothing, order=7, family=Mattss
                     @. dv1[:, 1] += Gη1[:, 1] / (Hη[1] * ρJ[:, 1]); @. dv2[:, 1] += Gη2[:, 1] / (Hη[1] * ρJ[:, 1])
                 end
             end
+            if sat_abs && integrator === :rk4       # impedance damping (explicit; implicit for leapfrog, see the time loop)
+                @. dv1 -= AD[b][1] * U[b][1]
+                @. dv2 -= AD[b][2] * U[b][2]
+            end
             for ((i, k), a) in Fpts[b]
                 dv1[i, k] += a * r * n[1] / ρJ[i, k]
                 dv2[i, k] += a * r * n[2] / ρJ[i, k]
@@ -228,6 +266,9 @@ function run_blocks(gξ, meshes; case, T=9.0, dt=nothing, order=7, family=Mattss
                 dU[b+1][c][:, 1] .-= ΔG ./ (2 .* R.Hη[1] .* R.ρJ[:, 1])
             end
         end
+        dU
+    end
+    function stress!(dU, U)
         # the gradients Dξ v, Dη v; velocity mismatch at the interfaces added to Dη v
         for (b, B) in enumerate(blocks)
             v1, v2 = U[b]
@@ -254,6 +295,27 @@ function run_blocks(gξ, meshes; case, T=9.0, dt=nothing, order=7, family=Mattss
         end
         dU
     end
+    rhs!(dU, U, t) = (momentum!(dU, U, t); stress!(dU, U))
+    if dt === nothing
+        # power iteration for the largest eigenvalue |λ| of v -> M(S(v)) (stress from velocity, then momentum; with SAT,
+        # metric and interfaces): leapfrog is stable for dt < 2 / √|λ|, RK4 for dt < 2.83 / √|λ|; 90 % of that
+        X, Y = newstate(), newstate()
+        foreach(b -> (X[b][1] .= randn.(FT); X[b][2] .= randn.(FT)), 1:nb)
+        λ = 0.0
+        for _ in 1:200
+            stress!(K[1], X)
+            for b in 1:nb, c in 1:5
+                Y[b][c] .= c <= 2 ? 0 : K[1][b][c]
+            end
+            momentum!(K[2], Y, -1e9)                            # (no source)
+            nrm = sqrt(sum(b -> sum(abs2, K[2][b][1]) + sum(abs2, K[2][b][2]), 1:nb))
+            λ = nrm / sqrt(sum(b -> sum(abs2, X[b][1]) + sum(abs2, X[b][2]), 1:nb))
+            for b in 1:nb
+                X[b][1] .= K[2][b][1] ./ nrm; X[b][2] .= K[2][b][2] ./ nrm
+            end
+        end
+        dt = 0.9 * (integrator === :leapfrog ? 2.0 : 2.83) / sqrt(λ)
+    end
     # receivers: Lagrange interpolation in (ξ, η) in their block
     rec = receivers(case)
     RW = map(rec) do (_, _, p)
@@ -266,24 +328,47 @@ function run_blocks(gξ, meshes; case, T=9.0, dt=nothing, order=7, family=Mattss
     energy = zeros(nt + 1)
     S = [(Hξ * B.Hη') .* B.J for B in blocks]
     axpy(X, Y, a, Z) = foreach((x, y, z) -> foreach((xx, yy, zz) -> (@. xx = yy + a * zz), x, y, z), X, Y, Z)
+    Esum(b, B, w1, w2, s11, s22, s12) = sum(S[b] .* (B.ρ ./ 2 .* w1 .+ B.ρ ./ 2 .* w2 .+ (B.M .* (s11 .^ 2 .+ s22 .^ 2) .-
+                                     2 .* B.lam .* s11 .* s22) ./ (8 .* B.mu .* (B.lam .+ B.mu)) .+ s12 .^ 2 ./ (2 .* B.mu)))
+    vold = [(zeros(FT, Nx, B.Nz), zeros(FT, Nx, B.Nz)) for B in blocks]
     t0 = time()
     for it in 1:nt
         t = (it - 1) * dt
-        rhs!(K[1], U, t)
-        axpy(Utmp, U, dt / 2, K[1]); rhs!(K[2], Utmp, t + dt / 2)
-        axpy(Utmp, U, dt / 2, K[2]); rhs!(K[3], Utmp, t + dt / 2)
-        axpy(Utmp, U, dt, K[3]); rhs!(K[4], Utmp, t + dt)
-        for b in 1:nb, c in 1:5
-            @. U[b][c] += dt / 6 * (K[1][b][c] + 2K[2][b][c] + 2K[3][b][c] + K[4][b][c])
+        if integrator === :rk4
+            rhs!(K[1], U, t)
+            axpy(Utmp, U, dt / 2, K[1]); rhs!(K[2], Utmp, t + dt / 2)
+            axpy(Utmp, U, dt / 2, K[2]); rhs!(K[3], Utmp, t + dt / 2)
+            axpy(Utmp, U, dt, K[3]); rhs!(K[4], Utmp, t + dt)
+            for b in 1:nb, c in 1:5
+                @. U[b][c] += dt / 6 * (K[1][b][c] + 2K[2][b][c] + 2K[3][b][c] + K[4][b][c])
+            end
+        else                        # leapfrog: v^{n+1/2} = v^{n-1/2} + dt M(σ^n, t_n), σ^{n+1} = σ^n + dt S(v^{n+1/2})
+            for b in 1:nb
+                vold[b][1] .= U[b][1]; vold[b][2] .= U[b][2]
+            end
+            momentum!(K[1], U, t)
+            for b in 1:nb, c in 1:2
+                a = AD[b][c]
+                @. U[b][c] = ((1 - a * dt / 2) * U[b][c] + dt * K[1][b][c]) / (1 + a * dt / 2)
+            end
+        end
+        if integrator === :leapfrog  # the energy conserved by leapfrog: ½ρ v^{n-1/2}·v^{n+1/2} + strain energy of σ^n
+            energy[it+1] = sum(b -> Esum(b, blocks[b], vold[b][1] .* U[b][1], vold[b][2] .* U[b][2], U[b][3], U[b][4], U[b][5]), 1:nb)
+            stress!(K[1], U)
+            for b in 1:nb, c in 3:5
+                @. U[b][c] += dt * K[1][b][c]
+            end
+        else
+            energy[it+1] = sum(b -> Esum(b, blocks[b], U[b][1] .^ 2, U[b][2] .^ 2, U[b][3], U[b][4], U[b][5]), 1:nb)
+        end
+        if absorbing in (:sponge, :both)
+            for b in 1:nb, c in 1:5
+                U[b][c] .*= sponge[b]
+            end
         end
         for (m, (b, w)) in enumerate(RW)
             vrec[it+1, 1, m] = sample(U[b][1], w)
             vrec[it+1, 2, m] = sample(U[b][2], w)
-        end
-        energy[it+1] = sum(enumerate(blocks)) do (b, B)
-            v1, v2, s11, s22, s12 = U[b]
-            sum(S[b] .* (B.ρ ./ 2 .* (v1 .^ 2 .+ v2 .^ 2) .+ (B.M .* (s11 .^ 2 .+ s22 .^ 2) .- 2 .* B.lam .* s11 .* s22) ./
-                                                        (8 .* B.mu .* (B.lam .+ B.mu)) .+ s12 .^ 2 ./ (2 .* B.mu)))
         end
         isfinite(energy[it+1]) || error("blew up at t = $(it * dt)")
     end
@@ -291,15 +376,20 @@ function run_blocks(gξ, meshes; case, T=9.0, dt=nothing, order=7, family=Mattss
     # displacement (trapezoid) on the 0.01 s axis, rotated to (u_t, u_n)
     tt = (0:nt) .* dt
     f = frame(case)
-    tax = 0.01:0.01:min(T, 9.0)
+    tax = 0.01:0.01:min(T, tmax)
     at(u) = [(j = min(searchsortedlast(tt, τ), nt); u[j] + (u[j+1] - u[j]) * (τ - tt[j]) / dt) for τ in tax]
     traces = Dict{Tuple{Symbol,Int},NTuple{2,Vector{Float64}}}()
     for (m, (line, i, _)) in enumerate(rec)
-        ux = [0.0; cumsum((vrec[1:end-1, 1, m] .+ vrec[2:end, 1, m]) ./ 2 .* dt)]
-        uz = [0.0; cumsum((vrec[1:end-1, 2, m] .+ vrec[2:end, 2, m]) ./ 2 .* dt)]
+        if integrator === :rk4
+            ux = [0.0; cumsum((vrec[1:end-1, 1, m] .+ vrec[2:end, 1, m]) ./ 2 .* dt)]
+            uz = [0.0; cumsum((vrec[1:end-1, 2, m] .+ vrec[2:end, 2, m]) ./ 2 .* dt)]
+        else                                                    # v^{n+1/2} recorded at step n + 1: midpoint rule
+            ux = [0.0; cumsum(vrec[2:end, 1, m] .* dt)]
+            uz = [0.0; cumsum(vrec[2:end, 2, m] .* dt)]
+        end
         traces[(line, i)] = (at(ux .* f.t[1] .+ uz .* f.t[2]), at(ux .* f.n[1] .+ uz .* f.n[2]))
     end
-    (; traces, energy, tt, wall, Nx, Nz=sum(B -> B.Nz, blocks), nt, minJ=minimum(B -> minimum(B.J), blocks),
+    (; traces, energy, tt, wall, dt, Nx, Nz=sum(B -> B.Nz, blocks), nt, minJ=minimum(B -> minimum(B.J), blocks),
        maxJ=maximum(B -> maximum(B.J), blocks))
 end
 
@@ -400,11 +490,12 @@ end
 
 # SeismicWavePC on the same case (staircase of cells; free_surface = :openswpc or :corners), on its 0.01 s axis
 const TAX = 0.01:0.01:9.0
-function fd_run(case, free_surface, dx; layer=nothing, mat=(x, z) -> material(case, layer, x, z))
+function fd_run(case, free_surface, dx; layer=nothing, mat=(x, z) -> material(case, layer, x, z), xlim=nothing, bottom=nothing,
+                absorber=:pml, T=9.0)
     h = surface(case)
     s0, W = (-10e3, -20e3), 60e3
     c = istilt(case) ? [to_grid(case, a, b) for a in s0[1] .+ (-W, W), b in (s0[2] - W, 3dx)] :
-        [(a, b) for a in s0[1] .+ (-W, W), b in (s0[2] - W, 3e3 + 3dx)]
+        [(a, b) for a in something(xlim, s0[1] .+ (-W, W)), b in (something(bottom, s0[2] - W), 3e3 + 3dx)]
     ax(d) = (floor(minimum(p[d] for p in c) / dx) * dx + dx / 2):dx:(ceil(maximum(p[d] for p in c) / dx) * dx)
     X, Y, Z = xyz_grid(ax(1) ./ 1e3, 0, ax(2) ./ 1e3)
     P = [mat(1e3X[I], 1e3Z[I]) for I in CartesianIndices(X)]
@@ -417,10 +508,10 @@ function fd_run(case, free_surface, dx; layer=nothing, mat=(x, z) -> material(ca
     rec = receivers(case)
     stations = [Station("$(line)_$i", p[1] / 1e3, 0.0, p[2] / 1e3) for (line, i, p) in rec]
     dt = 0.04dx / 1e3
-    r = simulate(model; dt, nt=round(Int, 9.0 / dt), sources, stations, stf=:ricker, interpolation=:sinc, free_surface,
-                 T=Float64, verbose=false)
+    r = simulate(model; dt, nt=round(Int, T / dt), sources, stations, stf=:ricker, interpolation=:sinc, free_surface,
+                 absorber, T=Float64, verbose=false)
     t, f = r.t .+ dt, frame(case)
-    at(u) = [τ >= t[end] ? u[end] : (j = searchsortedlast(t, τ); j == 0 ? 0.0 : u[j] + (u[j+1] - u[j]) * (τ - t[j]) / dt) for τ in TAX]
+    at(u) = [τ >= t[end] ? u[end] : (j = searchsortedlast(t, τ); j == 0 ? 0.0 : u[j] + (u[j+1] - u[j]) * (τ - t[j]) / dt) for τ in 0.01:0.01:T]
     Dict((line, i) => (at(r.u[:, 1, k] .* f.t[1] .+ r.u[:, 2, k] .* f.t[2]), at(r.u[:, 1, k] .* f.n[1] .+ r.u[:, 2, k] .* f.n[2]))
          for (k, (line, i, _)) in enumerate(rec))
 end

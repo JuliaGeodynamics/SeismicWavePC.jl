@@ -153,12 +153,52 @@ edges).
 
 ![single CartData](cartdata_example.png)
 
+## 7. Before production: time stepping, absorbing boundaries, cost
+
+[`stepA.jl`](stepA.jl), [`bench.jl`](bench.jl).
+
+**Leapfrog** (v at half steps, as the staggered code):
+- **Time step:** from the spectral radius of the operator (power iteration over stress → momentum, including SAT, metric
+  and interfaces): dt = 0.9 × 2/√λmax (RK4: 0.9 × 2.83/√λmax). A fixed CFL factor is not safe: the sheared 45° grid
+  blows up at 0.25.
+- **Energy:** conserved to rounding (Float64 10⁻¹⁶, Float32 10⁻⁷).
+
+500 m grid, all stable over 40 s:
+
+| case | RK4: dt (CFL) | leapfrog: dt (CFL) | leapfrog error deep / shallow | Float32 |
+|---|---|---|---|---|
+| hill, D = 10 km | 0.036 s (0.43) | 0.025 s (0.30) | 0.96 / 1.26 % | same errors |
+| 45°, sheared | 0.023 s (0.28) | 0.017 s (0.20) | 3.27 / 1.04 % | same |
+| 20° + layer, 2 blocks | 0.026 s (0.31) | 0.018 s (0.22) | 1.87 / 1.28 % | same |
+
+Leapfrog needs 1.4× more steps than RK4 but 1/4 of the work per step.
+
+**Absorbing boundaries.** A small domain (sides 12 km from the outer receivers, bottom 12 km below the source) against a
+large one, 0–12 s, deep / shallow:
+
+| boundary | error |
+|---|---|
+| none | 44 / 51 % |
+| **impedance SAT (σ·n = −Z v), no layer** | **1.8 / 1.4 %** |
+| Cerjan sponge, 10 / 20 points | 8.8 / 9.7 %, 4.9 / 3.2 % |
+| SAT + sponge, 10 / 20 points | 3.4 / 1.6 %, 4.6 / 2.8 % |
+| staggered SeismicWavePC: PML / Cerjan, 20 cells | 2.8 / 4.5 %, 5.4 / 3.4 % |
+
+- **The impedance SAT alone is best** and dissipates energy by construction.
+- **It is a stiff damping at the boundary nodes** (a·dt ≈ 3 at the corners), so leapfrog treats it implicitly
+  (trapezoidal; explicit, it blew up).
+
+**Cost per step** (2000 × 1000 points, 12 threads): a fused order-7 leapfrog step (interior, metric terms, elastic) needs
+2.1 ns/point, against 0.81 for SeismicWavePC (Float64): 2.6×. In Float32 the quick kernel does not vectorize yet
+(2.5 against 0.66 ns).
+- **Per simulated second** at the same grid: ≈ 3–4× the staggered code.
+- **At equal accuracy near topography:** ≈ 8× coarser in 2D (64× fewer points, 8× fewer steps), i.e. ≈ 100× cheaper.
+
 ## Not done
 
-- absorbing boundaries;
+- PML for SBP (Duru & Kreiss), for grazing incidence;
 - attenuation;
 - 3D;
-- leapfrog time stepping (instead of RK4: the cost per step here is not representative);
 - gradients.
 
 ## Run
@@ -168,4 +208,6 @@ edges).
     julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/experiments.jl    # sections 3, 4 (~6 min)
     julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/interface_order.jl  # section 5 (~4 min)
     julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/cartdata_example.jl # section 6 (~4 min)
+    julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/stepA.jl            # section 7 (~4 min)
+    julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/bench.jl
     FAMILY=Mattsson2017 ORDER=5 julia -t auto --project=prototypes/curvilinear prototypes/curvilinear/curvi.jl hill 500 40 10000
