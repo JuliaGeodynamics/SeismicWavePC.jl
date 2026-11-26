@@ -454,15 +454,15 @@ end
     S2[I] += (mu[I] * ts1 * eyz + R2) * dt
 end
 "Sources of SH: forces fy on vy, moment tensors (Mxy, Myz) on (σxy, σyz)."
-Base.@propagate_inbounds function force_sh_cv!(blocks, S, it, dt)
-    for m in 1:length(S.i)
+Base.@propagate_inbounds function force_sh_cv!(blocks, S, it, dt, u)
+    for m in S.seg[u]:S.seg[u+1]-1
         B = blocks[S.b[m]]
         i, k, n = S.i[m], S.k[m], S.n[m]
         B.V1[i, k] += S.F[n, 1] * dt * S.c[m] * S.s[n, it] * B.iρJ[i, k]
     end
 end
-Base.@propagate_inbounds function moment_sh_cv!(blocks, S, it)
-    for m in 1:length(S.i)
+Base.@propagate_inbounds function moment_sh_cv!(blocks, S, it, u)
+    for m in S.seg[u]:S.seg[u+1]-1
         B = blocks[S.b[m]]
         i, k, n = S.i[m], S.k[m], S.n[m]
         s = S.c[m] * S.s[n, it]
@@ -522,10 +522,21 @@ end
     S12[I] += (mu[I] * ts1 * exz + Rxz) * dt
 end
 
-# Sources (lists of the nodes they reach: block, node, weight, source): forces on the velocities after the momentum
-# update, moment tensors (stress glut) on the stresses after the stress update. Sequential: sources may share nodes.
-Base.@propagate_inbounds function force_cv!(blocks, S, it, dt)
-    for m in 1:length(S.i)
+# Sources (lists of the nodes they reach: block, node, weight, source; sorted by node, `seg[u]:seg[u+1]-1` the entries of
+# node `u`): forces on the velocities after the momentum update, moment tensors (stress glut) on the stresses after the
+# stress update. One thread per node (sources may share nodes); per node in the order of the sources.
+"""
+The source entries `t` (NamedTuple of vectors: b, i, [j,] k, ...) sorted by node (stable), with `seg`: the first entry of
+every node and one past the last.
+"""
+function by_node(t)
+    key = :j in keys(t) ? collect(zip(t.b, t.i, t.j, t.k)) : collect(zip(t.b, t.i, t.k))
+    p = sortperm(key; alg=Base.Sort.DEFAULT_STABLE)
+    seg = Int32[[m for m in eachindex(p) if m == 1 || key[p[m]] != key[p[m-1]]]; length(p) + 1]
+    return merge(map(v -> v[p], t), (; seg))
+end
+Base.@propagate_inbounds function force_cv!(blocks, S, it, dt, u)
+    for m in S.seg[u]:S.seg[u+1]-1
         B = blocks[S.b[m]]
         i, k, n = S.i[m], S.k[m], S.n[m]
         s = dt * S.c[m] * S.s[n, it] * B.iρJ[i, k]
@@ -533,8 +544,8 @@ Base.@propagate_inbounds function force_cv!(blocks, S, it, dt)
         B.V2[i, k] += S.F[n, 2] * s
     end
 end
-Base.@propagate_inbounds function moment_cv!(blocks, S, it)
-    for m in 1:length(S.i)
+Base.@propagate_inbounds function moment_cv!(blocks, S, it, u)
+    for m in S.seg[u]:S.seg[u+1]-1
         B = blocks[S.b[m]]
         i, k, n = S.i[m], S.k[m], S.n[m]
         s = S.c[m] * S.s[n, it]
@@ -944,14 +955,14 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     forces = filter(s -> s isa ForceSource, srcs)
     moments = filter(s -> s isa MomentTensorSource, srcs)
     # the nodes of this process, in local indices
-    mine(t) = (q = findall(i -> ia <= i <= ib, t.i); (b=t.b[q], i=t.i[q] .- ox, k=t.k[q], c=t.c[q], n=t.n[q]))
+    mine(t) = (q = findall(i -> ia <= i <= ib, t.i); by_node((b=t.b[q], i=t.i[q] .- ox, k=t.k[q], c=t.c[q], n=t.n[q])))
     fcoef, mcoef = (H, i, k) -> 1.0, (H, i, k) -> 1 / H.J[i-ow, k]
     tables(δ) = (mine(source_table(forces, fcoef, δ)), mine(source_table(moments, mcoef, δ)))
     ft, mt = tables((0.0, 0.0))
-    FS = (; b=dev(ft.b), i=dev(ft.i), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n),
+    FS = (; b=dev(ft.b), i=dev(ft.i), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n), seg=dev(ft.seg),
           F=dev(FT[s.F[c] for s in forces, c in (sh ? (2,) : (1, 3))]),
           s=dev(FT[moment_rate(stf, tbeg + (it - 1) * dt, s.t0, s.trise) for s in forces, it in 1:nt]))
-    MS = (; b=dev(mt.b), i=dev(mt.i), k=dev(mt.k), c=dev(FT.(mt.c)), n=dev(mt.n),
+    MS = (; b=dev(mt.b), i=dev(mt.i), k=dev(mt.k), c=dev(FT.(mt.c)), n=dev(mt.n), seg=dev(mt.seg),
           M=dev(FT[s.M0 * s.M[c] for s in moments, c in (sh ? (6, 4) : (1, 3, 5))]),        # (SH: σxy, σyz)
           s=dev(FT[moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt for s in moments, it in 1:nt]))
     # stations
@@ -1021,15 +1032,15 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
         momentum!(dtT, true)
         ntw > 0 && foreach_item!(backend, sh ? tf_momentum_sh! : tf_momentum_psv!, (lite, TW, FT(tbeg + n * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(V -> V .*= B.gs, vel(B)), blocks)
-        length(forces) > 0 && run_once!(backend, sh ? force_sh_cv! : force_cv!, (lite, FS, it, dtT))
-        KernelAbstractions.synchronize(backend)
+        length(FS.seg) > 1 && foreach_item!(backend, sh ? force_sh_cv! : force_cv!, (lite, FS, it, dtT), length(FS.seg) - 1)
+        par === nothing || KernelAbstractions.synchronize(backend)     # (the halos: MPI reads finished fields)
         exchange_v!()
         record && nst > 0 && foreach_item!(backend, sh ? record_sh_cv! : record_cv!, (rec, acc, prev, lite, St, itw, dtT), nst)
         stress!(vc, dtT)
         ntw > 0 && foreach_item!(backend, sh ? tf_stress_sh! : tf_stress_psv!, (lite, TW, vc, FT(tbeg + (n + 0.5) * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(S -> S .*= B.gs, str(B)), blocks)
-        length(moments) > 0 && run_once!(backend, sh ? moment_sh_cv! : moment_cv!, (lite, MS, it))
-        KernelAbstractions.synchronize(backend)
+        length(MS.seg) > 1 && foreach_item!(backend, sh ? moment_sh_cv! : moment_cv!, (lite, MS, it), length(MS.seg) - 1)
+        par === nothing || KernelAbstractions.synchronize(backend)
         exchange_s!()
     end
     "the seismograms of all stations (velocity, displacement, stress, strain) on every process (`part`: of Born numbers)"

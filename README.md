@@ -11,7 +11,7 @@
 *A Mw 3 earthquake (Brune source, frequencies up to ~20 Hz) below Unzen, through the temperature field of a
 [MagmaThermoKinematics.jl](https://github.com/boriskaus/MagmaThermoKinematics.jl) model with MAGEMin velocities (white lines:
 more than 10 % melt). Stations above the partially molten region (shaded) record weaker S waves and a longer coda. The
-waves are computed on a 10 m grid (10 million cells, 23 400 time steps) in 2.5 minutes on a laptop GPU (Apple Metal); the
+waves are computed on a 10 m grid (10 million cells, 23 400 time steps) in 2.2 minutes on a laptop GPU (Apple Metal); the
 [example](examples/MagmaThermoKinematics/Unzen_2D.jl) runs the same setup on a 100 m grid.*
 
 ### The same model with the curvilinear SBP-SAT solver
@@ -23,7 +23,7 @@ waves are computed on a 10 m grid (10 million cells, 23 400 time steps) in 2.5 m
 *The Unzen model above, computed with the curvilinear solver: a terrain-following mesh whose top row is the free surface of
 the MTK model, and summation-by-parts (SBP) finite differences with simultaneous approximation terms (SAT) for the free
 surface and the PML boundaries. The topography is resolved at the 10 m node spacing instead of as a staircase of cells
-(4001 × 2124 nodes, 32 926 time steps, 4.3 minutes on Apple Metal). The solver handles solids only: the partially molten
+(4001 × 2124 nodes, 32 926 time steps, 3.7 minutes on Apple Metal). The solver handles solids only: the partially molten
 mush that the staggered run above treats as fluid has an S-wave velocity of 1 km/s here, which changes mainly the coda
 above the magmatic system ([example](examples/MagmaThermoKinematics/Unzen_2D_10m_curvilinear.jl)).*
 

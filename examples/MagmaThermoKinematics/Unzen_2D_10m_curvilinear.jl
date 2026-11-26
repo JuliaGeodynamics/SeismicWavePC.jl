@@ -3,7 +3,7 @@
 # simulated with the curvilinear SBP-SAT solver (summation-by-parts finite differences, simultaneous approximation terms for
 # the free surface, PML at the sides and the bottom). The solver handles solids only: partially molten mush that the
 # staggered example treats as fluid (vs = 0) has vs = 1 km/s here. Movie and record section as Unzen_2D_10m_waves.jl;
-# 4001 × 2124 nodes, 32 926 time steps: 4.3 minutes on an Apple M-series GPU (the movie frames 22 s).
+# 4001 × 2124 nodes, 32 926 time steps: 3.7 minutes on an Apple M-series GPU (the movie frames 22 s).
 #
 #   julia -t auto --project=examples/MagmaThermoKinematics examples/MagmaThermoKinematics/Unzen_2D_10m_curvilinear.jl [cpu|cuda|amdgpu|metal]
 #

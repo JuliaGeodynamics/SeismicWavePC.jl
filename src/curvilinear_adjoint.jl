@@ -344,7 +344,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             end
             if forcedamp
                 foreach(F -> foreach(A -> fill!(A, 0), F), Finc)
-                run_once!(backend, sh ? force_sh_cv! : N == 2 ? force_cv! : force3_cv!, (Fblk, FS, it, dtT))
+                foreach_item!(backend, sh ? force_sh_cv! : N == 2 ? force_cv! : force3_cv!, (Fblk, FS, it, dtT), length(FS.seg) - 1)
                 for b in 1:nb, k in 1:nV
                     q[b][3nV+k] .= q[b][nV+k] .- Finc[b][k]
                 end

@@ -198,16 +198,16 @@ end
     S12[I] += (m6 * ts1 * exy + Rxy) * dt
 end
 
-Base.@propagate_inbounds function force3_cv!(blocks, S, it, dt)
-    for m in 1:length(S.i)
+Base.@propagate_inbounds function force3_cv!(blocks, S, it, dt, u)
+    for m in S.seg[u]:S.seg[u+1]-1
         B = blocks[S.b[m]]
         i, j, k, n = S.i[m], S.j[m], S.k[m], S.n[m]
         s = dt * S.c[m] * S.s[n, it] * B.iρJ[i, j, k]
         B.V1[i, j, k] += S.F[n, 1] * s; B.V2[i, j, k] += S.F[n, 2] * s; B.V3[i, j, k] += S.F[n, 3] * s
     end
 end
-Base.@propagate_inbounds function moment3_cv!(blocks, S, it)
-    for m in 1:length(S.i)
+Base.@propagate_inbounds function moment3_cv!(blocks, S, it, u)
+    for m in S.seg[u]:S.seg[u+1]-1
         B = blocks[S.b[m]]
         i, j, k, n = S.i[m], S.j[m], S.k[m], S.n[m]
         s = S.c[m] * S.s[n, it]
@@ -544,13 +544,13 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
     forces = filter(s -> s isa ForceSource, srcs)
     moments = filter(s -> s isa MomentTensorSource, srcs)
     mine(t) = (q = findall(n -> ia <= t.i[n] <= ib && ja <= t.j[n] <= jb, eachindex(t.i));
-               (b=t.b[q], i=t.i[q] .- ox, j=t.j[q] .- oy, k=t.k[q], c=t.c[q], n=t.n[q]))
+               by_node((b=t.b[q], i=t.i[q] .- ox, j=t.j[q] .- oy, k=t.k[q], c=t.c[q], n=t.n[q])))
     fcoef, mcoef = (H, i, j, k) -> 1.0, (H, i, j, k) -> 1 / H.J[i-ow, j-owy, k]
     tables(δ) = (mine(source_table(forces, fcoef, δ)), mine(source_table(moments, mcoef, δ)))
     ft, mt = tables((0.0, 0.0, 0.0))
-    FS = (; b=dev(ft.b), i=dev(ft.i), j=dev(ft.j), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n), F=dev(FT[s.F[c] for s in forces, c in 1:3]),
+    FS = (; b=dev(ft.b), i=dev(ft.i), j=dev(ft.j), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n), seg=dev(ft.seg), F=dev(FT[s.F[c] for s in forces, c in 1:3]),
           s=dev(FT[moment_rate(stf, tbeg + (it - 1) * dt, s.t0, s.trise) for s in forces, it in 1:nt]))
-    MS = (; b=dev(mt.b), i=dev(mt.i), j=dev(mt.j), k=dev(mt.k), c=dev(FT.(mt.c)), n=dev(mt.n), M=dev(FT[s.M0 * s.M[c] for s in moments, c in 1:6]),
+    MS = (; b=dev(mt.b), i=dev(mt.i), j=dev(mt.j), k=dev(mt.k), c=dev(FT.(mt.c)), n=dev(mt.n), seg=dev(mt.seg), M=dev(FT[s.M0 * s.M[c] for s in moments, c in 1:6]),
           s=dev(FT[moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt for s in moments, it in 1:nt]))
     nst = length(stations)
     st = map(stations) do s
@@ -607,15 +607,15 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
         momentum!(dtT, true)
         ntw > 0 && foreach_item!(backend, tf_momentum3!, (lite, TW, FT(tbeg + n * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> (B.V1 .*= B.gs; B.V2 .*= B.gs; B.V3 .*= B.gs), blocks)
-        length(forces) > 0 && run_once!(backend, force3_cv!, (lite, FS, it, dtT))
-        KernelAbstractions.synchronize(backend)
+        length(FS.seg) > 1 && foreach_item!(backend, force3_cv!, (lite, FS, it, dtT), length(FS.seg) - 1)
+        par === nothing || KernelAbstractions.synchronize(backend)
         exchange_v!()
         record && nst > 0 && foreach_item!(backend, record3_cv!, (rec, acc, prev, lite, St, itw, dtT), nst)
         stress!(vc, dtT)
         ntw > 0 && foreach_item!(backend, tf_stress3!, (lite, TW, vc, FT(tbeg + (n + 0.5) * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(S -> S .*= B.gs, (B.S11, B.S22, B.S33, B.S23, B.S13, B.S12)), blocks)
-        length(moments) > 0 && run_once!(backend, moment3_cv!, (lite, MS, it))
-        KernelAbstractions.synchronize(backend)
+        length(MS.seg) > 1 && foreach_item!(backend, moment3_cv!, (lite, MS, it), length(MS.seg) - 1)
+        par === nothing || KernelAbstractions.synchronize(backend)
         exchange_s!()
     end
     function all_traces(part=identity)

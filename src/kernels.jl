@@ -526,9 +526,56 @@ end
 
 """
 Apply `f(front..., P, i, [j,] k)` to the cells of all `regions = ((lo, ndr, P), …)`: on the CPU in one parallel loop (every
-thread takes its part of every region; one launch per kernel instead of one per region), on GPUs one kernel per region.
+thread takes its part of every region; one launch per kernel instead of one per region), on GPUs the large regions in a
+kernel each and the small ones (thin edges, the PML layers of small models) together: a launch costs ~10 µs (Metal), more
+than the work of a small region.
 """
-foreach_region!(backend, f, front, regions) = (map(((lo, ndr, P),) -> foreach_cell!(backend, f, (front..., P), lo, ndr), regions); nothing)
+function foreach_region!(backend, f, front, regions)
+    # large regions (the interior, the PML layers of large models) in kernels of their own (2D tiles: cache), small together
+    for (lo, ndr, P) in regions
+        prod(ndr) >= MERGE_MAX && foreach_cell!(backend, f, (front..., P), lo, ndr)
+    end
+    # (all regions, the large ones with no cells: the kernel type does not depend on the sizes, no compilation per model)
+    rest = map(((lo, ndr, P),) -> (lo, prod(ndr) < MERGE_MAX ? ndr : zero.(ndr), P), regions)
+    strips_launch!(backend, f, front, rest)
+    return nothing
+end
+"Regions of at least this many cells get a kernel of their own on GPUs (`foreach_region!`)."
+const MERGE_MAX = 1 << 15
+function strips_launch!(backend, f, front, rest)
+    k = strips!(backend, 256)
+    # groups within the size limit of kernel arguments (Metal: 4 kB; the PML regions carry their memory arrays)
+    room = 3500 - sizeof(KernelAbstractions.argconvert(k, front))
+    sz = map(r -> sizeof(KernelAbstractions.argconvert(k, r)), rest)
+    a = 1
+    while a <= length(rest)
+        b, used = a, sz[a]
+        while b < length(rest) && used + sz[b+1] <= room
+            b += 1; used += sz[b]
+        end
+        group = rest[a:b]
+        n = sum(r -> prod(r[2]), group)
+        n > 0 && k(f, front, group; ndrange=n)
+        a = b + 1
+    end
+    return nothing
+end
+"The cells of several regions in one launch: thread `t` takes cell `t` of the regions one after the other."
+@kernel inbounds = true function strips!(f, front, regions)
+    strip_cell(f, front, regions, @index(Global))
+end
+@inline strip_cell(f, front, ::Tuple{}, t) = nothing
+@inline function strip_cell(f, front, regions::Tuple, t)
+    lo, ndr, P = first(regions)
+    n = prod(ndr)
+    if t <= n
+        I = Tuple(CartesianIndices(ndr)[t])
+        f(front..., P, (I .+ lo)...)
+    else
+        strip_cell(f, front, Base.tail(regions), t - n)
+    end
+    return nothing
+end
 function foreach_region!(::CPU, f::F, front, regions) where {F}
     N = length(regions[1][2])
     nt = clamp(sum(r -> prod(r[2]), regions) ÷ MINWORK[N-1], 1, Threads.nthreads())

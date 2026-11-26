@@ -211,9 +211,9 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
                                 s=dev(FT[1e3 / M0 * moment_rate(stf, tbeg + it * dt, s.t0, s.trise) * dt / volume(s) for s in FS, it in 1:nt])))
     # between grid points: the weights of the points around the sources (Kaiser-windowed sinc)
     Src = sinc ? merge(Src0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in S], spec_s, off, nl, dev, FT; derivatives=Val(true),
-                                                items=collect(eachindex(S))))) : Src0
+                                                items=collect(eachindex(S)), nodes=Val(true)))) : Src0
     FSrc = sinc ? merge(FSrc0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in FS], spec_v, off, nl, dev, FT; derivatives=Val(true),
-                                                  items=collect(eachindex(FS))))) : FSrc0
+                                                  items=collect(eachindex(FS)), nodes=Val(true)))) : FSrc0
     fcut = max(maximum((1 / s.trise for s in moments); init=0.0), maximum((1 / s.trise for s in forces); init=0.0),
                maximum((plane_wave_fcut(p, med, g) for p in planewaves); init=0.0), maximum((1 / w.trise for w in teleseismic); init=0.0))
 
@@ -511,12 +511,12 @@ function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, in
         end
         pw_edges && extrapolate_sides!(V, edges)
         foreach_region!(backend, stress!, (F, M, c, vc, dtT), cells)
-        nosource || run_once!(backend, inject!, (F, Src, it))
+        nosource || inject_sources!(backend, inject!, (F, Src, it), Src)
         inject_wave!(tw, Val(:stress), F, M, c, vc, dtT, eltype(dtT)(tbeg + (it - 0.5) * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, Σ...))
         pw_edges && extrapolate_sides!(Σ, edges)
         foreach_region!(backend, vel!, (F, M, c, dtT), cells)
-        noforce || run_once!(backend, force!, (F, M, FSrc, it))
+        noforce || inject_sources!(backend, force!, (F, M, FSrc, it), FSrc)
         inject_wave!(tw, Val(:velocity), F, M, c, vc, dtT, eltype(dtT)(tbeg + it * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, V...))
         if verbose && it % report == 0

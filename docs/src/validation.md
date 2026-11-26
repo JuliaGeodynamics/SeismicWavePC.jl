@@ -127,10 +127,10 @@ shallow line of the sloping cases (10°, 20°, 30°, hill):
 
 On the same grid a curvilinear run costs about twice a staggered one (as many time steps here, but more work per node:
 7th-order collocated stencils instead of 4th-order staggered ones), but it reaches the accuracy that the staggered grid needs 4×
-finer cells for (`:corners` at 125 m), about 10× faster. On a laptop GPU (Apple Metal, Float32, the same errors) these small 2D models are
-slower than on the CPU (0.5–0.8 s at 500 m, 2.4–3.7 s at 125 m: each time step costs about 1–2 ms regardless of size),
-and both solvers cost about the same per run; the curvilinear solver at 500 m is still about 4× faster than `:corners` at
-125 m. GPUs pay off for large models, such as the 10 m Unzen model of the README (8.5 million nodes). Near a sloping surface on the staggered grid, use a finer grid
+finer cells for (`:corners` at 125 m), about 10× faster. On a laptop GPU (Apple Metal, Float32, the same errors) these small 2D models run
+about as fast as on the CPU (0.06–0.4 s at 500 m, 0.65–1.5 s at 125 m; a time step costs at least ~0.15 ms there, mostly
+kernel launches), and the curvilinear solver at 500 m is about 3× faster than `:corners` at 125 m. GPUs pay off most for
+large models, such as the 10 m Unzen model of the README (8.5 million nodes). Near a sloping surface on the staggered grid, use a finer grid
 than the 16 points per S wavelength that suffice elsewhere, or the curvilinear solver.
 
 ## Rayleigh waves in firn

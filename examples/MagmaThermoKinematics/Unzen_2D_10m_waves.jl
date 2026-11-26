@@ -1,7 +1,7 @@
 # Step 2 of the high-resolution Unzen example (README movie): waves through the 10 m model of Unzen_2D_10m_model.jl, from an
 # Mw 3 volcano-tectonic earthquake with a Brune (ω⁻²) source time function; movie and record section. The corner frequency
 # follows from Brune (1970) for a stress drop of 3 MPa (~7 Hz); the 10 m grid resolves up to ~20 Hz in rock with
-# vs ≥ 1 km/s (5 cells per wavelength). 10 million cells and 23 400 time steps: 2.5 minutes on an Apple M-series GPU.
+# vs ≥ 1 km/s (5 cells per wavelength). 10 million cells and 23 400 time steps: 2.2 minutes on an Apple M-series GPU.
 #
 #   julia -t auto --project=examples examples/MagmaThermoKinematics/Unzen_2D_10m_waves.jl [cpu|cuda|amdgpu|metal] [dx in m, default 10]
 #
