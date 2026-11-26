@@ -64,6 +64,7 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
   deformed mesh), also in gradients and Born modelling.
 - **Snapshots:** ParaView files and callbacks of the whole wavefield, and netCDF planes ([`Snapshots`](@ref): the free
   surface `fs` on the topography, `xy` planes and sections resampled at regular heights; `:v`, `:u`, also in pieces).
+- **Checkpoints** (`checkpoint`, `checkpoint_every`, `restart`) as on the staggered grid.
 - **Not yet:** SH waves, plane waves, a PML (the sides and the bottom absorb with impedance conditions), snapshots of
   divergence and rotation (`:ps`).
 

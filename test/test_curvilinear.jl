@@ -322,4 +322,18 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         s = read_snapshots(joinpath(dir, "swpc.psv.xz.v.nc"))
         @test first.(s.axes) == ("x", "z") && maximum(abs, s["Vz", length(s.t)]) > 0
     end
+    @testset "checkpoint and restart" begin
+        topoc(x) = 1.2 * exp(-x^2 / 12)
+        mesh = curvilinear_mesh(range(-8, 8, length=49), [topoc]; dz=0.33, bottom=-10)
+        o = ones(size(mesh.x.val))
+        m = addfield(mesh, (; rho=2600 .* o, vp=5.5 .* o, vs=3.2 .* o, Qp=100 .* o, Qs=50 .* o))
+        kw = (; tmax=2.0, sources=[DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0)],
+              stations=[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -6:3:6], verbose=false)
+        ref = simulate(m; kw...)
+        f = joinpath(mktempdir(), "ck")
+        @test_throws ErrorException simulate(m; kw..., checkpoint=f, checkpoint_every=30, snapshot_every=70,
+                                             callback=(w, t) -> t > 0.5 && error("interrupted"))
+        r = simulate(m; kw..., checkpoint=f, checkpoint_every=30, restart=true)
+        @test r.v == ref.v && r.u == ref.u && r.stress == ref.stress
+    end
 end

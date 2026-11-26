@@ -445,7 +445,8 @@ limit), `tmax` (duration) instead of `nt`, `absorber = :impedance` (or `:none`: 
 """
 function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=nothing, sources, stations=Station[], stf=:kupper,
                               tbeg=0.0, absorber=:impedance, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
-                              density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, snapshots=nothing, backend=CPU(),
+                              density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, snapshots=nothing, checkpoint=nothing, checkpoint_every=0,
+                              restart=false, backend=CPU(),
                               T::Type{FT}=Float32, verbose=true, wavefield=true, jump=0.05, wave=:psv, interpolation=:sinc,
                               free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
@@ -735,9 +736,21 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!, exchange_s!, owned, St, nst, FS, forces,
         Hξ, hξ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, vc, own_stations=own, nsrc=length(srcs), st_all,
         seismograms, ts, fq_ref, loc=A -> A[xr, :], ftab=ft, mtab=mt, MS, moments, srcs, stf, tables))
-    for it in 1:nt
+    # checkpoints (one file per process): the wavefield and memory variables, the recording and the plane accumulators
+    ckp = checkpoint === nothing ? nothing : par !== nothing ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
+    restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")
+    fields_of(B) = Tuple(getfield(B, k) for k in keys(B) if occursin(r"^[VSR][0-9]+$", string(k)))
+    state = (Iterators.flatten(map(fields_of, blocks))..., rec, acc, prev,
+             (planes === nothing ? () : Iterators.flatten((p.U, p.PK) for p in planes))...)
+    it0 = restart ? load_state!(state, ckp, nt) + 1 : 1
+    restart && verbose && @printf("  restart from step %d\n", it0 - 1)
+    for it in it0:nt
         n = it - 1
         step!(it, true)
+        if ckp !== nothing && checkpoint_every > 0 && it % checkpoint_every == 0 && it < nt
+            KernelAbstractions.synchronize(backend)
+            save_state(ckp, it, nt, state)
+        end
         if planes !== nothing                          # netCDF planes: displacement and peaks every step
             store = snapshot_every > 0 && n % snapshot_every == 0
             for p in planes
