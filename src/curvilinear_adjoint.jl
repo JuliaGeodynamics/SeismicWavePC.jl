@@ -222,7 +222,14 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         attenuation && @. gr.tp += dtT * pe * ((1 + d2) * pP - pQ)
     end
     # 3. backward, segment by segment
-    store = [Tuple(ntuple(_ -> zero_(b), 3N) for b in 1:nb) for _ in 1:K]   # per step: v old (N), v new (N), A σ (N)
+    # forces at damped (boundary) nodes: the damping gradient needs v^{n+1/2} without the force (v new - its increment)
+    damped(m) = (H = hostblocks[c.ftab.b[m]]; I = N == 2 ? CartesianIndex(c.ftab.i[m] + ox, c.ftab.k[m]) :
+                                                         CartesianIndex(c.ftab.i[m] + ox, c.ftab.j[m] + oy, c.ftab.k[m]);
+                 any(k -> getfield(H, an[k])[I] != 0, 1:N))
+    forcedamp = any(damped, eachindex(c.ftab.b))
+    Finc = forcedamp ? Tuple(ntuple(_ -> zero_(b), N) for b in 1:nb) : nothing
+    Fblk = forcedamp ? Tuple(merge(blocks[b], NamedTuple{vn}(Finc[b])) for b in 1:nb) : nothing
+    store = [Tuple(ntuple(_ -> zero_(b), (3 + forcedamp)N) for b in 1:nb) for _ in 1:K]   # per step: v old, v new, A σ, (v new without forces)
     for s0 in sort!(collect(keys(ckpt)); rev=true)
         s1 = min(s0 + K - 1, nt)
         for (b, B) in enumerate(blocks), (A, h) in zip(fields(B), ckpt[s0][b])
@@ -238,6 +245,13 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             for b in 1:nb, k in 1:N
                 copyto!(q[b][N+k], comps(blocks[b], vn)[k])
             end
+            if forcedamp
+                foreach(F -> foreach(A -> fill!(A, 0), F), Finc)
+                run_once!(backend, N == 2 ? force_cv! : force3_cv!, (Fblk, FS, it, dtT))
+                for b in 1:nb, k in 1:N
+                    q[b][3N+k] .= q[b][N+k] .- Finc[b][k]
+                end
+            end
         end
         for it in s1:-1:s0
             n = it - 1
@@ -245,6 +259,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             q = store[it-s0+1]
             # moment tensors (stress glut, after the stress update)
             nM > 0 && run_once!(backend, moment_sens_cv!, (AM, gmM, Adj, MS, it, dtT, Val(sn)))
+            c.sponge && foreach(b -> foreach(S -> S .*= blocks[b].gs, comps(Adj[b], sn)), 1:nb)      # (the sponge is diagonal)
             # stress update: gradient (λ, μ, τ) and v̄ += dt Gᵀ (C₁ σ̄ - Cτ Q)
             for b in 1:nb, k in 1:N
                 copyto!(Win[b][k], q[b][N+k])
@@ -264,12 +279,18 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
                 run_once!(backend, force_grad!, (Grad, Adj, FS, it, dtT))
                 run_once!(backend, force_sens_cv!, (AF, gmF, Adj, blocks, FS, it, dtT, Val(vn)))
             end
+            c.sponge && foreach(b -> foreach(V -> V .*= blocks[b].gs, comps(Adj[b], vn)), 1:nb)
             for b in 1:nb
                 g, B = Grad[b], blocks[b]
                 for (k, ab) in enumerate(comps(B, an))
                     V = comps(Adj[b], vn)[k]
                     @. g.iρJ += dtT * V * q[b][2N+k] / (1 + ab * dtT / 2)
-                    @. g.a[k] -= dtT / 2 * V * (q[b][k] + q[b][N+k]) / (1 + ab * dtT / 2)
+                    vn1 = q[b][(forcedamp ? 3N : N)+k]          # v^{n+1/2} of the momentum update: without forces,
+                    if c.sponge                                # before the sponge factor
+                        @. g.a[k] -= dtT / 2 * V * (q[b][k] + vn1 / B.gs) / (1 + ab * dtT / 2)
+                    else
+                        @. g.a[k] -= dtT / 2 * V * (q[b][k] + vn1) / (1 + ab * dtT / 2)
+                    end
                     @. Win[b][k] = dtT * B.iρJ * V / ((1 + ab * dtT / 2) * Hw[b])
                 end
             end

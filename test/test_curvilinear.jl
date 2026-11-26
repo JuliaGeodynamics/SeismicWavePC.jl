@@ -336,4 +336,22 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         r = simulate(m; kw..., checkpoint=f, checkpoint_every=30, restart=true)
         @test r.v == ref.v && r.u == ref.u && r.stress == ref.stress
     end
+    @testset "Cerjan sponge: misfit gradient against finite differences" begin
+        mesh = curvilinear_mesh(range(-8, 8, length=49), [x -> 1.2 * exp(-x^2 / 12)]; dz=0.33, bottom=-10)
+        X, Z = mesh.x.val, mesh.z.val
+        o = ones(size(X))
+        base = (; rho=2600 .* o, vp=5.5 .* o, vs=3.2 .* o, Qp=100 .* o, Qs=50 .* o)
+        srcs = [ForceSource(7.8, 0.0, -9.7; fz=1e14, fx=5e13, trise=1.0)]          # (its stencil reaches the damped nodes)
+        sts = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -6:3:6]
+        r0 = simulate(addfield(mesh, base); tmax=0.05, sources=srcs, T=Float64, verbose=false)
+        kw = (; dt=r0.t[2] - r0.t[1], tmax=3.0, sources=srcs, T=Float64, absorber=:cerjan, na=6)
+        obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* 0.97))); kw..., stations=sts, verbose=false)
+        J, g, _ = misfit_gradient(addfield(mesh, base), obs; kw...)
+        Jof(m) = L2Misfit()(simulate(m; kw..., stations=sts, verbose=false).v, obs.v, obs.t)[1]
+        δ = 0.05 .* exp.(-((X .- 7.5) .^ 2 .+ (Z .+ 9) .^ 2) ./ 2)                   # in the sponge
+        for f in (:vs, :vp)
+            fd = (Jof(addfield(mesh, merge(base, (; f => base[f] .+ 1e-3 .* δ)))) - Jof(addfield(mesh, merge(base, (; f => base[f] .- 1e-3 .* δ))))) / 2e-3
+            @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
+        end
+    end
 end

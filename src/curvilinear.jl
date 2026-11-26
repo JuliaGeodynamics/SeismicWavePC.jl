@@ -373,6 +373,14 @@ function lagrange_weights(g, x0; np=6)
     i0 = clamp(searchsortedlast(g, x0) - np ÷ 2 + 1, 1, length(g) - np + 1)
     return i0, [prod((x0 - g[m]) / (g[j] - g[m]) for m in i0:i0+np-1 if m != j) for j in i0:i0+np-1]
 end
+"""
+The Cerjan sponge factor (as OpenSWPC: exp(-α (1 - d/na)²), α = 0.09, per step) of the node `i` of `n` (sides: both ends;
+`n = typemax(Int)`: the bottom only) at the node distance d = i - 1 or n - i from the boundary.
+"""
+function cerjan_factor(i, n, na)
+    d = min(i - 1, n - i)
+    return d < na ? exp(-0.09 * (1 - d / na)^2) : 1.0
+end
 "A discrete delta at `x0` on the grid `g` with the norm `H`: Kaiser-windowed sinc where the grid is uniform around it,
 otherwise Lagrange weights (moments up to degree 5). Returns (nodes, weights / H)."
 function delta_weights(g, H, h, x0)
@@ -439,19 +447,20 @@ cv_max(par, x) = par === nothing ? x : MPI.Allreduce(x, max, par.comm)
 
 2D P-SV on a deformed (terrain-following) `CartData` (see [`curvilinear_mesh`](@ref)); called by `simulate` for such a
 model. Keywords as in `simulate`, and: `dt = nothing` (from the spectral radius of the operator: 90 % of the leapfrog
-limit), `tmax` (duration) instead of `nt`, `absorber = :impedance` (or `:none`: free sides and bottom), `jump = 0.05`
+limit), `tmax` (duration) instead of `nt`, `absorber = :impedance` (or `:cerjan`: also a sponge of `na = 20` nodes, or
+`:none`: free sides and bottom), `jump = 0.05`
 (relative jump of vp or vs that makes a grid row an interface, see `find_blocks`), `nproc` MPI processes along x (2D) or
 `(npx, npy)` (3D): start julia with `mpiexec`; the columns are not split.
 """
 function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=nothing, sources, stations=Station[], stf=:kupper,
-                              tbeg=0.0, absorber=:impedance, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
+                              tbeg=0.0, absorber=:impedance, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                               density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, snapshots=nothing, checkpoint=nothing, checkpoint_every=0,
                               restart=false, backend=CPU(),
                               T::Type{FT}=Float32, verbose=true, wavefield=true, jump=0.05, wave=:psv, interpolation=:sinc,
                               free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
     wave === :psv || error("curvilinear grids: P-SV only (wave = :psv)")
-    absorber in (:impedance, :none) || error("curvilinear grids absorb with impedance boundary conditions: absorber = :impedance (or :none)")
+    absorber in (:impedance, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :cerjan (with a sponge) or :none")
     srcs = sources isa AbstractVector ? sources : [sources]
     all(s -> s isa Union{MomentTensorSource,ForceSource}, srcs) || error("curvilinear grids: MomentTensorSource and ForceSource only")
     wall = time()
@@ -524,7 +533,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         # incidence (VTI: horizontal qP vp √(1+2ε)), and its derivatives (vp, vs, ε, γ) per component (gradients)
         a1, a2 = zeros(nx, nz), zeros(nx, nz)
         da = ntuple(_ -> ntuple(_ -> zeros(nx, nz), 4), 2)
-        if absorber === :impedance
+        if absorber !== :none
             for i in (1, nx)
                 h = 1 / Hξ[i]
                 @. a1[i, :] += bvp[i, :] * sqrt(1 + 2bε[i, :]) * h; @. a2[i, :] += bvs[i, :] * h
@@ -547,9 +556,11 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         mem = attenuation ? (; R11=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz), R22=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz),
                                R12=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz)) : (;)
         vti = aniso ? (; wx=loc(H.wx), wz=loc(H.wz), s13=loc(H.s13)) : (;)
+        r0 = H.kmap[1, 2] - 2                                       # (the mesh row of node k: r0 + k)
+        sponge = absorber === :cerjan ? (; gs=loc([cerjan_factor(i, nx, na) * cerjan_factor(r0 + k, typemax(Int), na) for i in 1:nx, k in 1:H.nz])) : (;)
         merge((; V1=z(), V2=z(), S11=z(), S22=z(), S12=z(), J=loc(H.J), Jx=loc(H.Jx), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam),
                mu=loc(aniso ? H.mu55 : H.mu), tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1),
-               a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx), mem, vti)
+               a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx), mem, vti, sponge)
     end)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing
@@ -705,7 +716,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     if verbose
         @printf("SeismicWavePC: PSV on a curvilinear grid, %d × %d nodes in %d block(s) (interfaces at rows %s), %d steps of %.4g s%s%s\n",
                 nx, nzt, nb, isempty(rows) ? "–" : join(rows, ", "), nt, dt, attenuation ? ", attenuation" : "",
-                absorber === :impedance ? ", absorbing sides and bottom" : "")
+                absorber === :none ? "" : absorber === :cerjan ? ", absorbing sides and bottom (sponge of $na nodes)" : ", absorbing sides and bottom")
     end
     # one step: v^{n+1/2} = v^{n-1/2} + dt M(σⁿ, tₙ), σ^{n+1} = σⁿ + dt S(v^{n+1/2}) (n = it - 1); recording if `record`
     function step!(it, record)
@@ -713,11 +724,13 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
         itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
         itw > 0 && nst > 0 && foreach_item!(backend, vprev_cv!, (prev, blocks, St), nst)
         momentum!(dtT, true)
+        absorber === :cerjan && foreach(B -> (B.V1 .*= B.gs; B.V2 .*= B.gs), blocks)
         length(forces) > 0 && run_once!(backend, force_cv!, (blocks, FS, it, dtT))
         KernelAbstractions.synchronize(backend)
         exchange_v!()
         record && nst > 0 && foreach_item!(backend, record_cv!, (rec, acc, prev, blocks, St, itw, dtT), nst)
         stress!(vc, dtT)
+        absorber === :cerjan && foreach(B -> (B.S11 .*= B.gs; B.S22 .*= B.gs; B.S12 .*= B.gs), blocks)
         length(moments) > 0 && run_once!(backend, moment_cv!, (blocks, MS, it))
         KernelAbstractions.synchronize(backend)
         exchange_s!()
@@ -734,7 +747,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     # a driver (misfit gradients) takes over
     driver === nothing || return drive_curvilinear(driver, (; backend, FT, blocks, hostblocks, nb, nx, nzt, nl, no, hx, ox, xr, ia, ib,
         par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!, exchange_s!, owned, St, nst, FS, forces,
-        Hξ, hξ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, vc, own_stations=own, nsrc=length(srcs), st_all,
+        Hξ, hξ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, vc, own_stations=own, sponge=absorber === :cerjan, nsrc=length(srcs), st_all,
         seismograms, ts, fq_ref, loc=A -> A[xr, :], ftab=ft, mtab=mt, MS, moments, srcs, stf, tables))
     # checkpoints (one file per process): the wavefield and memory variables, the recording and the plane accumulators
     ckp = checkpoint === nothing ? nothing : par !== nothing ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"

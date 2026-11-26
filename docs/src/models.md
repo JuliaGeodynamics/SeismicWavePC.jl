@@ -49,7 +49,8 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
 - **Blocks.** The mesh is split into blocks at grid rows where the material jumps along the full width. Their interfaces
   are grid lines, so the jump stays sharp. Other heterogeneity (a magma chamber, gradients) is sampled at the nodes.
 - **Time step and boundaries.** The time step follows from the spectral radius of the operator: `dt` is not needed, give
-  the duration `tmax`. The sides and the bottom absorb with impedance boundary conditions (no absorbing layer).
+  the duration `tmax`. The sides and the bottom absorb with impedance boundary conditions; `absorber = :cerjan` adds a
+  sponge of `na = 20` nodes (fewer reflections of oblique and surface waves; no PML yet).
 - **Stations** with `surface=true` record exactly on the topography. Attenuation, moment tensors and forces work as on
   the staggered grid.
 - **3D:** `curvilinear_mesh(x, y, surfaces; dz, bottom)` with surfaces z(x, y) (functions or surface `CartData`); columns
@@ -65,7 +66,7 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
 - **Snapshots:** ParaView files and callbacks of the whole wavefield, and netCDF planes ([`Snapshots`](@ref): the free
   surface `fs` on the topography, `xy` planes and sections resampled at regular heights; `:v`, `:u`, also in pieces).
 - **Checkpoints** (`checkpoint`, `checkpoint_every`, `restart`) as on the staggered grid.
-- **Not yet:** SH waves, plane waves, a PML (the sides and the bottom absorb with impedance conditions), snapshots of
+- **Not yet:** SH waves, plane waves, a PML, snapshots of
   divergence and rotation (`:ps`).
 
 ![A hill, a Moho-like interface and a magma chamber on a curvilinear grid](assets/2D_curvilinear.png)

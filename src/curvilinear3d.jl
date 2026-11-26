@@ -208,13 +208,13 @@ end
 Keywords as [`SeismicWavePC.simulate_curvilinear`](@ref).
 """
 function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=nothing, sources, stations=Station[], stf=:kupper,
-                                tbeg=0.0, absorber=:impedance, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
+                                tbeg=0.0, absorber=:impedance, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                                 density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, snapshots=nothing, checkpoint=nothing, checkpoint_every=0,
                               restart=false, backend=CPU(),
                                 T::Type{FT}=Float32, verbose=true, wavefield=true, jump=0.05, wave=:psv, interpolation=:sinc,
                                 free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
-    absorber in (:impedance, :none) || error("curvilinear grids absorb with impedance boundary conditions: absorber = :impedance (or :none)")
+    absorber in (:impedance, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :cerjan (with a sponge) or :none")
     srcs = sources isa AbstractVector ? sources : [sources]
     all(s -> s isa Union{MomentTensorSource,ForceSource}, srcs) || error("curvilinear grids: MomentTensorSource and ForceSource only")
     wall = time()
@@ -293,7 +293,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         # a = |J·| Z / (H ρ J) with the speeds of normal incidence: normal qP (sides: vp √(1+2ε)), tangential S (σxy: C66,
         # vs √(1+2γ)); and the derivatives (gradients): da[c] = (∂vp, ∂vs, ∂ε, ∂γ) of a_c
         da = ntuple(_ -> ntuple(_ -> zeros(nx, ny, nz), 4), 3)
-        if absorber === :impedance
+        if absorber !== :none
             # add h × (speed) to a_c and its derivatives: kind :p (horizontal qP), :sh (C66), :s (vs), :pv (vertical qP)
             function add!(c, s, h, kind)
                 A, d = (a1, a2, a3)[c], da[c]
@@ -333,10 +333,13 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
         loc(A) = dev(FT.(A[xr, yr, :]))
         mem = attenuation ? (; R11=R(), R22=R(), R33=R(), R23=R(), R13=R(), R12=R()) : (;)
         vti = aniso ? (; wx=loc(H.wx), wz=loc(H.wz), s13=loc(H.s13), mu66=loc(H.mu66)) : (;)
+        r0 = H.kmap[1, 1, 2] - 2                                    # (the mesh row of node k: r0 + k)
+        sponge = absorber === :cerjan ? (; gs=loc([cerjan_factor(i, nx, na) * cerjan_factor(j, ny, na) * cerjan_factor(r0 + k, typemax(Int), na)
+                                                   for i in 1:nx, j in 1:ny, k in 1:H.nz])) : (;)
         merge((; V1=z(), V2=z(), V3=z(), S11=z(), S22=z(), S33=z(), S23=z(), S13=z(), S12=z(), G1=z(), G2=z(), G3=z(), J=loc(H.J),
                Jx=loc(H.Jx), Jy=loc(H.Jy), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam), mu=loc(aniso ? H.mu55 : H.mu),
                tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1), a2=loc(H.a2),
-               a3=loc(H.a3), hξ=FT(hξ), hψ=FT(hψ), hη=FT(H.hη), ox, oy, nxg=nx, nyg=ny), mem, vti)
+               a3=loc(H.a3), hξ=FT(hξ), hψ=FT(hψ), hη=FT(H.hη), ox, oy, nxg=nx, nyg=ny), mem, vti, sponge)
     end)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing
@@ -486,18 +489,20 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
     verbose &= me == 0
     verbose && @printf("SeismicWavePC: 3D on a curvilinear grid, %d × %d × %d nodes in %d block(s) (interfaces at rows %s), %d steps of %.4g s%s%s\n",
                        nx, ny, nzt, nb, isempty(rows) ? "–" : join(rows, ", "), nt, dt, attenuation ? ", attenuation" : "",
-                       absorber === :impedance ? ", absorbing sides and bottom" : "")
+                       absorber === :none ? "" : absorber === :cerjan ? ", absorbing sides and bottom (sponge of $na nodes)" : ", absorbing sides and bottom")
     # one step (n = it - 1); recording if `record`
     function step!(it, record)
         n = it - 1
         itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
         itw > 0 && nst > 0 && foreach_item!(backend, vprev3_cv!, (prev, blocks, St), nst)
         momentum!(dtT, true)
+        absorber === :cerjan && foreach(B -> (B.V1 .*= B.gs; B.V2 .*= B.gs; B.V3 .*= B.gs), blocks)
         length(forces) > 0 && run_once!(backend, force3_cv!, (blocks, FS, it, dtT))
         KernelAbstractions.synchronize(backend)
         exchange_v!()
         record && nst > 0 && foreach_item!(backend, record3_cv!, (rec, acc, prev, blocks, St, itw, dtT), nst)
         stress!(vc, dtT)
+        absorber === :cerjan && foreach(B -> foreach(S -> S .*= B.gs, (B.S11, B.S22, B.S33, B.S23, B.S13, B.S12)), blocks)
         length(moments) > 0 && run_once!(backend, moment3_cv!, (blocks, MS, it))
         KernelAbstractions.synchronize(backend)
         exchange_s!()
@@ -513,7 +518,7 @@ function simulate_curvilinear3d(model::CartData; dt=nothing, nt=nothing, tmax=no
                                                   (:xx, :yy, :zz, :yz, :xz, :xy), wf)
     driver === nothing || return drive_curvilinear3(driver, (; backend, FT, blocks, hostblocks, nb, nx, ny, nzt, nlx, nly, nox, noy,
         hx, ox, oy, xr, yr, ia, ib, ja, jb, par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!,
-        exchange_s!, FS, forces, Hξ, Hψ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, nsrc=length(srcs), st_all,
+        exchange_s!, FS, forces, Hξ, Hψ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, nsrc=length(srcs), st_all, sponge=absorber === :cerjan,
         seismograms, ts, fq_ref, vc, loc=A -> A[xr, yr, :], ftab=ft, mtab=mt, MS, moments, srcs, stf, tables))
     # checkpoints (one file per process): the wavefield and memory variables, the recording and the plane accumulators
     ckp = checkpoint === nothing ? nothing : par !== nothing ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
