@@ -1,7 +1,8 @@
 # 2D P-SV on a terrain-following (curvilinear) grid: summation-by-parts (SBP) finite differences with simultaneous
 # approximation terms (SAT). A deformed 2D CartData (vertical columns, a grid line along the surface and along every
 # major interface) is split into blocks at the interfaces (found from the material). In every block: collocated
-# velocity-stress, dual-pairing upwind SBP operators (sbp_coefficients.jl): the divergence (momentum) with D-, the gradient
+# velocity-stress, dual-pairing upwind SBP operators (SummationByPartsOperators.jl, see sbp_coefficients.jl): the
+# divergence (momentum) with D-, the gradient
 # (stress) with D+, which are adjoint in the SBP norm, so that the semi-discrete energy changes only through the boundary
 # terms; SAT terms make the top a free surface, couple the blocks (continuity of velocity and traction, energy-neutral)
 # and absorb at the sides and the bottom (impedance, σ·n = -Z v). Leapfrog in time (velocities at half steps), the time

@@ -28,7 +28,8 @@ The staircase of cells is accurate away from the surface, but close to a sloping
 mesh whose top row of nodes is the topography. It is then simulated on a curvilinear grid with summation-by-parts (SBP)
 finite differences: the free surface lies exactly on the topography, and the scheme is provably stable (the discrete
 energy is conserved, or dissipated at the absorbing boundaries). The SBP operators are the boundary-optimized dual-pairing
-operators of Mattsson, Niemelä & Winters (2026, order 7), from [SummationByPartsOperators.jl](https://github.com/ranocha/SummationByPartsOperators.jl).
+operators of Mattsson, Niemelä & Winters (2026, order 7), from [SummationByPartsOperators.jl](https://github.com/ranocha/SummationByPartsOperators.jl)
+(Ranocha, 2021, *J. Open Source Softw.* 6(64), 3454).
 
 ```julia
 topo(x) = 3.0 * exp(-x^2 / 50)                                   # [km]

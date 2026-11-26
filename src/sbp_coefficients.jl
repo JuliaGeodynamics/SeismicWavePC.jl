@@ -1,25 +1,43 @@
-# Dual-pairing upwind SBP operators (Mattsson, Niemelä & Winters, 2026: boundary-optimized closures; order 7), from
-# SummationByPartsOperators.jl (H. Ranocha), extracted by prototypes/curvilinear/gen/sbp_coefficients.jl. Coefficients are
-# multiplied by the interior spacing h. D- (divergence) and D+ (gradient) satisfy H D+ + (H D-)ᵀ = B.
-# Rows 1…NB use the boundary blocks LM, LP (columns 1…NC); the last rows the mirrored ones: D-[N+1-i, N+1-j] = -D+[i, j].
-# The first NP nodes are not equidistant: x_j = h P[j] (and mirrored), with the norm weights H_j = h W[j]; elsewhere h.
-const SBP_OM = (-4, -3, -2, -1, 0, 1, 2, 3)
-const SBP_CM = (0.007142857142857143, -0.06666666666666667, 0.3, -1.0, 0.25, 0.6, -0.1, 0.009523809523809525)
-const SBP_OP = (-3, -2, -1, 0, 1, 2, 3, 4)
-const SBP_CP = (-0.009523809523809525, 0.1, -0.6, -0.25, 1.0, -0.3, 0.06666666666666667, -0.007142857142857143)
-const SBP_LM = ((-3.54212104561152, 4.708502023508651, -1.6012915414204059, 0.527073633296072, -0.09494902518080484, 0.0027859554080079947, 0.0, 0.0, 0.0, 0.0),
-                (-0.8985330734567815, 0.021028659504376962, 1.152660076088573, -0.3373930097400764, 0.06625836560622388, -0.004021018002314992, 0.0, 0.0, 0.0, 0.0),
-                (0.24091615795668356, -0.9249155555294142, 0.0544502125388789, 0.7743852952548026, -0.1630747929677027, 0.018238682746750966, 0.0, 0.0, 0.0, 0.0),
-                (-0.08283333231815285, 0.3000577410716385, -0.9089121599590213, 0.13649831868869575, 0.6567569520622127, -0.1110771685601608, 0.009509649014787982, 0.0, 0.0, 0.0),
-                (0.01689313936692797, -0.07555771485722985, 0.2752661208884415, -0.9529406758706013, 0.21955021452639162, 0.6072792470829149, -0.10001562915124981, 0.009525298014404982, 0.0, 0.0),
-                (-0.0009647862736619981, 0.008706528496339985, -0.06348661769528989, 0.2913382314127174, -0.9933455168996183, 0.24823327238367354, 0.5999942052388398, -0.09999903420647283, 0.009523717543473982, 0.0))
-const SBP_LP = ((-3.5745979215699624, 4.786324846066814, -1.6887675200491228, 0.5903793548023439, -0.12020493833623577, 0.006866179086162987, 0.0, 0.0, 0.0, 0.0),
-                (-0.8839234549734624, -0.021028659504376962, 1.2171326686821016, -0.40147893291720926, 0.10093055387011081, -0.011632175157162979, 0.0, 0.0, 0.0, 0.0),
-                (0.2284370118133956, -0.8759219615445983, -0.0544502125388789, 0.9241532682242624, -0.2794221105820675, 0.06445583841654287, -0.007251833788655986, 0.0, 0.0, 0.0),
-                (-0.07395120623343386, 0.2521611373736656, -0.7616141559537776, -0.13649831868869575, 0.9513751008881502, -0.29090786372833044, 0.06656754310351387, -0.007132236761090987, 0.0, 0.0),
-                (0.013343770541661975, -0.049601736079085905, 0.16064929715617873, -0.6578377058603099, -0.21955021452639162, 0.9935103636316661, -0.30004688745374947, 0.06667708610083288, -0.007143973510803987, 0.0),
-                (-0.00039146248633399925, 0.0030096785294619942, -0.017964428161273964, 0.11124149558524979, -0.6071784851754539, -0.24823327238367354, 0.9999903420647321, -0.2999971026194194, 0.06666602280431587, -0.007142788157604987))
-const SBP_P = (0.0, 0.4796891391869102, 1.3753231251827358, 2.3753231251827374, 3.3753231251827396, 4.375323125182741)
-const SBP_W = (0.14051418984105826, 0.7484939374282873, 0.9849725395017349, 1.0014890674723949, 0.9998437329107228, 1.0000096580285438)
-const SBP_NB, SBP_NC, SBP_NP = 6, 10, 6
+# The SBP operators of the curvilinear solver: dual-pairing upwind operators (Mattsson, Niemelä & Winters, 2026: boundary-
+# optimized closures; order 7) of SummationByPartsOperators.jl (H. Ranocha, https://github.com/ranocha/SummationByPartsOperators.jl).
+# At precompile time the operators are built and turned into the tables the kernels use (compile-time constants):
+# interior stencils, boundary blocks, the non-equidistant boundary nodes and the norm weights, scaled by the interior
+# spacing h. D- (divergence) and D+ (gradient) satisfy H D+ + (H D-)ᵀ = B; the structure assumed by the kernels is checked.
+import SummationByPartsOperators as SBPO
+
+function sbp_tables(source, order)
+    N0 = 60
+    U = SBPO.upwind_operators(source, derivative_order=1, accuracy_order=order, xmin=0.0, xmax=1.0, N=N0)
+    Dm, Dp = Matrix(U.minus), Matrix(U.plus)
+    x = collect(SBPO.grid(U.minus))
+    h = x[N0÷2+1] - x[N0÷2]
+    H = LinearAlgebra.diag(Matrix(SBPO.mass_matrix(U.minus)))
+    r = N0 ÷ 2
+    offs(M) = [j - r for j in 1:N0 if abs(M[r, j]) > 1e-14]
+    OM, OP = offs(Dm), offs(Dp)
+    CM = Float64.(rationalize.(Dm[r, r.+OM] .* h; tol=1e-11))           # exact fractions (1/140, …)
+    CP = Float64.(rationalize.(Dp[r, r.+OP] .* h; tol=1e-11))
+    interior(M, O, C, i) = all(abs(M[i, i+o] * h - c) < 1e-10 for (o, c) in zip(O, C)) && count(abs.(M[i, :]) .> 1e-14) == length(O)
+    nb(M, O, C) = findfirst(i -> 1 - minimum(O) <= i <= N0 - maximum(O) && interior(M, O, C, i), 1:N0) - 1
+    NB = max(nb(Dm, OM, CM), nb(Dp, OP, CP))
+    NC = maximum(i -> maximum(j for j in 1:N0 if abs(Dm[i, j]) > 1e-14 || abs(Dp[i, j]) > 1e-14), 1:NB)
+    LM, LP = Dm[1:NB, 1:NC] .* h, Dp[1:NB, 1:NC] .* h
+    # the kernels assume: the right boundary mirrors the left one (D-[N+1-i, N+1-j] = -D+[i, j]), interior stencils
+    # elsewhere, and a grid of NP non-equidistant nodes at either end, uniform in between
+    maximum(abs, Dm[N0:-1:N0-NB+1, N0:-1:N0-NC+1] .+ Dp[1:NB, 1:NC]) < 1e-11 || error("SBP operators: no mirror symmetry")
+    maximum(abs, Dp[N0:-1:N0-NB+1, N0:-1:N0-NC+1] .+ Dm[1:NB, 1:NC]) < 1e-11 || error("SBP operators: no mirror symmetry")
+    all(i -> interior(Dm, OM, CM, i) && interior(Dp, OP, CP, i), NB+1:N0-NB) || error("SBP operators: unexpected interior")
+    NP = findfirst(j -> abs((x[j+1] - x[j]) / h - 1) < 1e-12 && abs(H[j+1] / h - 1) < 1e-12, 1:N0)
+    P, W = (x[1:NP] .- x[1]) ./ h, H[1:NP] ./ h
+    Bd = zeros(N0, N0); Bd[1, 1] = -1; Bd[N0, N0] = 1
+    maximum(abs, LinearAlgebra.Diagonal(H) * Dp + (LinearAlgebra.Diagonal(H) * Dm)' - Bd) < 1e-10 || error("SBP operators: not dual-pairing")
+    return (; OM=Tuple(OM), CM=Tuple(CM), OP=Tuple(OP), CP=Tuple(CP), LM=Tuple(Tuple(LM[i, :]) for i in 1:NB),
+            LP=Tuple(Tuple(LP[i, :]) for i in 1:NB), P=Tuple(P), W=Tuple(W), NB, NC, NP)
+end
+
+const SBP_TABLES = sbp_tables(SBPO.MattssonNiemeläWinters2026, 7)
+const SBP_OM, SBP_CM, SBP_OP, SBP_CP = SBP_TABLES.OM, SBP_TABLES.CM, SBP_TABLES.OP, SBP_TABLES.CP
+const SBP_LM, SBP_LP = SBP_TABLES.LM, SBP_TABLES.LP
+const SBP_P, SBP_W = SBP_TABLES.P, SBP_TABLES.W
+const SBP_NB, SBP_NC, SBP_NP = SBP_TABLES.NB, SBP_TABLES.NC, SBP_TABLES.NP
 const SBP_NMIN = 13                     # the fewest points of a block
