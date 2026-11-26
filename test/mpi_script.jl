@@ -233,10 +233,10 @@ if runs("curvilinear")
     sts = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -9:3:9]
     kw = (; dt=stable_dt(addfield(mesh, base), srcs), tmax=4.0, sources=srcs, T=Float64)
     obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* (1 .+ 0.03 .* exp.(-(X .^ 2 .+ (Z .+ 2) .^ 2) ./ 4))))); kw..., stations=sts, verbose=false)
-    J1, g1, sg1 = misfit_gradient(addfield(mesh, base), obs; kw...)
-    J2, g2, sg2 = misfit_gradient(addfield(mesh, base), obs; kw..., nproc=4)
+    J1, g1, sg1 = misfit_gradient(addfield(mesh, base), obs; kw..., illumination=true)
+    J2, g2, sg2 = misfit_gradient(addfield(mesh, base), obs; kw..., nproc=4, illumination=true)
     srcdiff(a, b) = maximum(k -> maximum(abs, collect(a[k]) .- collect(b[k])) / maximum(abs, collect(a[k])), (:x, :z, :M, :t0, :stf))
-    e = (abs(J1 / J2 - 1), maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs, :Qp, :Qs)),
+    e = (abs(J1 / J2 - 1), maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs, :Qp, :Qs, :illumination)),
          srcdiff(sg1[1], sg2[1]))
     rank == 0 && println("MPI curvilinear gradient (attenuation) nproc=4: misfit, gradient $e")
     all(<(1e-10), e) || error("MPI curvilinear gradient differs on rank $rank")

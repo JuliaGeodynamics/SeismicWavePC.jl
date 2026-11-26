@@ -12,6 +12,7 @@ struct CurvilinearGradient{O,M}
     observed::O
     misfit::M
     checkpoint_steps::Union{Int,Nothing}
+    illumination::Bool
 end
 
 "Add the residual (∂J/∂v at the recorded samples) × `s` to the adjoint velocities at the stations (transposed interpolation)."
@@ -158,6 +159,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     MS, nF, nM = c.MS, length(forces), length(c.moments)
     AF, gmF = KernelAbstractions.zeros(backend, FT, length(c.ftab.i), N), KernelAbstractions.zeros(backend, FT, nF, nt)
     AM, gmM = KernelAbstractions.zeros(backend, FT, length(c.mtab.i), nS), KernelAbstractions.zeros(backend, FT, nM, nt)
+    L = d.illumination ? Tuple(zero_(b) for b in 1:nb) : nothing                              # Σₙ |v^{n+1/2}|²
     c1, c2, d1, d2 = attenuation ? vc : (nothing, nothing, nothing, zero(FT))
     # the transposed stress update σ^{n+1} = σⁿ + dt (C₁ e + Σₘ d1ₘ Rₘ^{n+1}), Rₘ^{n+1} = c1ₘ Rₘⁿ - c2ₘ dt Cτ e with the
     # strains e = G v^{n+1/2} in Gout and σ̄ = P: adjoint memory variables, the gradient (λ, μ, τp, τs) and Y = (C₁ P - Cτ Q) / HJ.
@@ -227,6 +229,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             # stress update: gradient (λ, μ, τ) and v̄ += dt Gᵀ (C₁ σ̄ - Cτ Q)
             for b in 1:nb, k in 1:N
                 copyto!(Win[b][k], q[b][N+k])
+                L === nothing || (L[b] .+= q[b][N+k] .^ 2)
             end
             Gop!()
             foreach(stress_adjoint!, 1:nb)
@@ -267,13 +270,15 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     end
     KernelAbstractions.synchronize(backend)
     # 4. to ρ, vp, vs [per kg/m³, km/s], Qp, Qs on the nodes of the model (owned nodes; summed over the processes)
-    gρ, gvp, gvs, gqp, gqs = (zeros(nx, ny, nzt) for _ in 1:5)
+    gρ, gvp, gvs, gqp, gqs, gL = (zeros(nx, ny, nzt) for _ in 1:6)
     f = model.fields
     for (b, H) in enumerate(hostblocks)
         g = map(x -> x isa Tuple ? map(A -> Float64.(Array(A)), x) : Float64.(Array(x)), Grad[b])     # (loop-local)
         da = H.da isa NamedTuple ? ((H.da.a1vp, H.da.a1vs), (H.da.a2vp, H.da.a2vs)) : H.da
         own = N == 2 ? CartesianIndices((hx+1:hx+c.no, 1:H.nz)) : CartesianIndices((hx+1:hx+c.nox, hx+1:hx+c.noy, 1:H.nz))
         off = N == 2 ? CartesianIndex(ox, 0) : CartesianIndex(ox, oy, 0)
+        Lh = L === nothing ? nothing : Float64.(Array(L[b]))
+        r0 = H.kmap[CartesianIndex(ntuple(_ -> 1, N - 1)..., 2)] - 2           # the mesh row of the block's node k: r0 + k
         for Il in own
             I = Il + off
             node = N == 2 ? CartesianIndex(I[1], 1, H.kmap[I]) : CartesianIndex(I[1], I[2], H.kmap[I])
@@ -283,6 +288,9 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             gρ[node] += gl * vp^2 / χp^2 + gmt * vs^2 / χs^2 - g.iρJ[Il] / (ρ^2 * H.J[I])
             gvp[node] += gl * 2ρ * vp / χp^2 + sum(k -> g.a[k][Il] * da[k][1][I], 1:N)
             gvs[node] += gmt * 2ρ * vs / χs^2 + sum(k -> g.a[k][Il] * da[k][2][I], 1:N)
+            if Lh !== nothing && (b == 1 || I[N] > 1)      # (on the mesh nodes; interface rows from the block below, as snapshots)
+                gL[CartesianIndex(Base.front(Tuple(node))..., r0 + I[N])] += Lh[Il]
+            end
             if attenuation
                 dtp = g.tp[Il] - gl * 2ρ * vp^2 / χp^3 * visco_dchi(ts, tp, fq_ref)
                 dts = g.ts[Il] - gmt * 2ρ * vs^2 / χs^3 * visco_dchi(ts, ts_, fq_ref)
@@ -292,9 +300,10 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             end
         end
     end
-    par === nothing || foreach(A -> MPI.Allreduce!(A, +, par.comm), (gρ, gvp, gvs, gqp, gqs))
+    par === nothing || foreach(A -> MPI.Allreduce!(A, +, par.comm), (gρ, gvp, gvs, gqp, gqs, gL))
     rho_unit = density_unit === :g_cm3 ? 1e3 : 1.0
-    grad = CartData(model.x.val, model.y.val, model.z.val, (; rho=gρ .* rho_unit, vp=gvp .* 1e3, vs=gvs .* 1e3, Qp=gqp, Qs=gqs))
+    ill = L === nothing ? (;) : (; illumination=gL)
+    grad = CartData(model.x.val, model.y.val, model.z.val, merge((; rho=gρ .* rho_unit, vp=gvp .* 1e3, vs=gvs .* 1e3, Qp=gqp, Qs=gqs), ill))
     return J, grad, curvilinear_source_gradients(c, N, AF, gmF, AM, gmM)
 end
 

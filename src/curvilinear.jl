@@ -652,7 +652,7 @@ function simulate_curvilinear(model::CartData; dt=nothing, nt=nothing, tmax=noth
     rec = KernelAbstractions.zeros(backend, FT, nrec, 10, nst)
     acc = KernelAbstractions.zeros(backend, FT, 2, nst)
     prev = KernelAbstractions.zeros(backend, FT, 2, nst)
-    # the wavefield on the mesh (the shared interface rows from the block above)
+    # the wavefield on the mesh (the shared interface rows from the block below)
     # (with MPI: gathered on rank 0, `nothing` elsewhere)
     function velocity_field()
         cols = [k == 1 ? (1:H.nz) : (2:H.nz) for (k, H) in enumerate(hostblocks)]

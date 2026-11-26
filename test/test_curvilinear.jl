@@ -276,4 +276,19 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         _, adj = L2Misfit()(b0.v, obs.v, obs.t)
         @test sum(adj .* δd.v) ≈ sum(k -> sum(gr.fields[k] .* δ[k]), keys(δ)) rtol = 1e-10
     end
+    @testset "illumination: Σ |v|² of the forward wavefield" begin
+        topoi(x) = 1.2 * exp(-x^2 / 12)
+        mohoi(x) = -4.0 + 0.6 * sin(2π * x / 10)
+        mesh = curvilinear_mesh(range(-8, 8, length=49), [topoi, mohoi]; dz=0.33, bottom=-10)
+        X, Z = mesh.x.val, mesh.z.val
+        low = Z .< mohoi.(X)
+        m = addfield(mesh, (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2)))
+        kw = (; dt=0.01, tmax=2.0, sources=[DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0)], T=Float64)
+        sts = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -6:3:6]
+        obs = simulate(addfield(mesh, merge(m.fields, (; vs=m.fields.vs .* 0.98))); kw..., stations=sts, verbose=false)
+        g = misfit_gradient(m, obs; kw..., illumination=true, mute=(sources=1.0,))[2]
+        L = zeros(size(X))
+        simulate(m; kw..., stations=sts, verbose=false, snapshot_every=1, callback=(w, t) -> (L .+= w.fields.V[1] .^ 2 .+ w.fields.V[3] .^ 2))
+        @test g.fields.illumination ≈ L rtol = 1e-12
+    end
 end
