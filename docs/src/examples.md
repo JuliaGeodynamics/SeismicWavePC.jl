@@ -96,6 +96,7 @@ noisy seismograms of one earthquake at 11 stations are inverted for the shear ve
 ## Others
 
 - [`2D_PSV_hill.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/2D_PSV_hill.jl): layered crust under a hill, with a record section ([Getting started](@ref)).
+- [`2D_curvilinear.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/2D_curvilinear.jl): a hill, a Moho-like interface and a magma chamber on a curvilinear grid ([Topography on a curvilinear grid](@ref)).
 - [`benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark.jl), [`benchmark_marmousi2.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/benchmark_marmousi2.jl): the timings in
   [Performance](@ref).
 - [`topography_benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/topography_benchmark.jl),

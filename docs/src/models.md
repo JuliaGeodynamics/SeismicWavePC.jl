@@ -21,6 +21,79 @@ three solid cells; flat surfaces and outer corners are unchanged. In 2D tests on
 the exact flat surface, it makes the surface seismograms 2–4 times more accurate (misfit 17 instead of 34–52 % at 20 cells
 per S wavelength, 3–4 instead of 6–12 % at 80). See [Validation](@ref) for a benchmark with tilted planes and a hill.
 
+## Topography on a curvilinear grid
+
+The staircase of cells is accurate away from the surface, but close to a sloping surface its errors reach 10–30 % at
+16 points per S wavelength (see [Validation](@ref)). A 2D or 3D model can instead be a *deformed* `CartData`: a terrain-following
+mesh whose top row of nodes is the topography. It is then simulated on a curvilinear grid with summation-by-parts (SBP)
+finite differences: the free surface lies exactly on the topography, and the scheme is provably stable (the discrete
+energy is conserved, or dissipated at the absorbing boundaries). The SBP operators are the boundary-optimized dual-pairing
+operators of Mattsson, Niemelä & Winters (2027, *J. Comput. Phys.* 568, 115399; order 7), from [SummationByPartsOperators.jl](https://github.com/ranocha/SummationByPartsOperators.jl)
+(Ranocha, 2021, *J. Open Source Softw.* 6(64), 3454). The method and its relation to published SBP-SAT schemes for
+seismic waves: [Curvilinear solver: method and related work](@ref).
+
+```julia
+topo(x) = 3.0 * exp(-x^2 / 50)                                   # [km]
+moho(x) = -7.0 + 1.5 * sin(2π * x / 40)
+mesh = curvilinear_mesh(range(-72, 52, length=249), [topo, moho]; dz=0.5, bottom=-80)
+X, Z = mesh.x.val, mesh.z.val
+Phase = ifelse.(Z .< moho.(X), 2, 1)                              # layers
+add_ellipsoid!(Phase, zeros(size(Phase)), mesh; cen=(0, 0, -3), axes=(3, 3, 1.5), phase=ConstantPhase(3))   # a magma chamber
+vp_, vs_, rho_ = (5.5, 6.5, 3.8), (3.2, 3.75, 2.0), (2600.0, 2900.0, 2400.0)
+model = addfield(mesh, (; rho=getindex.(Ref(rho_), Phase), vp=getindex.(Ref(vp_), Phase), vs=getindex.(Ref(vs_), Phase)))
+result = simulate(model; tmax=20.0, sources, stations)           # dt from the stability limit
+```
+
+- **The mesh.** [`curvilinear_mesh`](@ref) makes the mesh from surfaces (functions or surface `CartData`): a grid line
+  follows the topography and every interface with a large jump in the material (e.g. a Moho). Columns are vertical. Fill
+  the material at the nodes with the usual GMG tools. GMG ≥ 0.10.2 makes the same mesh, with all its model tools working
+  on it (`add_layer!`, `add_box!`, `add_ellipsoid!`, interpolation of data onto it):
+  `curvilinear_grid(sbp_nodes(-72, 52, 249), 0, (topo, moho, -80.0); dz=0.5, spacing=:sbp)`.
+- **Blocks.** The mesh is split into blocks at grid rows where the material jumps along the full width. Their interfaces
+  are grid lines, so the jump stays sharp. Other heterogeneity (a magma chamber, gradients) is sampled at the nodes.
+  Give the nodes on an interface the material above it (`z >= interface`): where the node spacing does not change at the
+  interface (e.g. a flat mesh), the interface is taken at the upper row of the jump, so the material below would shift it
+  up by one row (a first-order error).
+- **Oceans** (fluids, `vs = 0`): a fluid layer is a block of its own, between two surfaces of the mesh (e.g. sea level
+  and the bathymetry), and must span the whole width (no coastlines). At the seafloor the normal velocity and the
+  normal traction are continuous and the tangential traction vanishes: the fluid slips along the solid (SAT terms on the
+  normal components only), stable as all interfaces. Against the staggered grid with a flat seafloor (exact there) below 1 %
+  at 100 m; with a sloping seafloor the staggered grid converges towards it. SH waves see the seafloor as a free surface.
+  Strains at stations in the fluid: the volumetric strain, split equally between the normal components.
+- **Time step and boundaries.** The time step follows from the spectral radius of the operator: `dt` is not needed, give
+  the duration `tmax`. The sides and the bottom absorb with impedance boundary conditions; `absorber = :pml` adds a
+  perfectly matched layer of `na = 20` nodes (at least 6; the CFS-PML of OpenSWPC on the ξ and η parts of the SBP operators: about
+  20 times fewer reflections, ~1.5× the cost per step with layers on all sides), `:mpml` the multiaxial PML (as on the
+  staggered grid, `mpml_ratio = 0.1`: stable under soft surface layers, where the PML can grow exponentially; 2–3 times
+  the reflections of the PML), `:cerjan` a sponge.
+- **Stations** with `surface=true` record exactly on the topography. Attenuation, moment tensors and forces work as on
+  the staggered grid.
+- **3D:** `curvilinear_mesh(x, y, surfaces; dz, bottom)` with surfaces z(x, y) (functions or surface `CartData`); columns
+  are vertical in 3D too.
+- **MPI and GPUs** as on the staggered grid: `nproc` processes along x (2D) or `(npx, npy)` (3D); the columns are not
+  split. Results are identical to a run on one process.
+- **Gradients and Born modelling:** [`misfit_gradient`](@ref) (2D and 3D, attenuation, MPI, GPUs) uses the exact
+  discrete adjoint (`checkpoint_steps` as on the staggered grid); the gradient is per model node. Source gradients
+  (location, moment tensor, force, timing, source time function) as on the staggered grid. [`born`](@ref) works as on the staggered
+  grid (also with attenuation, on GPUs and with MPI).
+- **Anisotropy (VTI)** as on the staggered grid (fields `epsilon`, `delta`, `gamma`; the symmetry axis stays vertical on the
+  deformed mesh), also in gradients and Born modelling.
+- **Snapshots:** ParaView files and callbacks of the whole wavefield, and netCDF planes ([`Snapshots`](@ref): the free
+  surface `fs` on the topography, `xy` planes and sections resampled at regular heights; `:v`, `:u`, `:ps`, also in pieces).
+- **Checkpoints** (`checkpoint`, `checkpoint_every`, `restart`) as on the staggered grid.
+- **SH waves** in 2D (`wave = :sh`), with everything above (attenuation, VTI with γ, PML, gradients, Born, MPI, GPUs).
+- **Teleseismic waves** ([`TeleseismicWave`](@ref)) as on the staggered grid: total-field / scattered-field injection
+  along a box (the box reaches up to the topography; the model must be horizontally layered and elastic along its sides
+  and bottom, where the topography must be flat), with the exact gradient. `PlaneWave` (OpenSWPC's initial plane wave)
+  is not available on curvilinear grids: use `TeleseismicWave`.
+
+![A hill, a Moho-like interface and a magma chamber on a curvilinear grid](assets/2D_curvilinear.png)
+
+*[`examples/2D_curvilinear.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/2D_curvilinear.jl): the
+model on its deformed mesh and the vertical velocity at stations on the topography.*
+- **Cost.** A step costs about 1.3–2.5× one on the staggered grid with as many cells (2D and 3D, CPU and GPU). Near topography, however, the
+  curvilinear grid reaches the same accuracy with about 8× coarser spacing (in 2D, 64× fewer cells, 8× fewer steps).
+
 ## Anisotropy (VTI)
 
 With any of the fields `epsilon`, `delta`, `gamma` (Thomsen parameters; missing ones are 0) the model is transversely
@@ -105,6 +178,21 @@ a `CartData` model (with `DistributedModel(...; anisotropy = true)` also `epsilo
 then grows with its subdomain, not with the model. Moment tensor and force sources at their cells (`interpolation = :cell`),
 stations, snapshots, checkpoints, GPUs and stretched grids work as usual; plane and teleseismic waves, sources between grid
 points, misfit gradients and Born modelling need a `CartData`. The wavefield at the end is not collected (`wavefield = true` does).
+
+A curvilinear model is built per process in the same way, column by column: `DistributedModel(f, x, y, nz)` with the SBP
+nodes `x`, `y` of the columns and `nz` nodes per column; `f(ix, iy)` returns the deformed grid of these columns with its
+material, for example from GMG with a fixed number of cells per layer (so that all pieces have the same rows):
+
+```julia
+xs, ys = sbp_nodes(-100, 100, 2001), sbp_nodes(-80, 80, 1601)
+model = DistributedModel(xs, ys, 1 + 60 + 140) do ix, iy
+    g = curvilinear_grid(xs[ix], ys[iy], (topo, moho, -60.0), (60, 140); spacing=:sbp)
+    low = g.z.val .< moho.(g.x.val, g.y.val)
+    addfield(g, (; rho=ifelse.(low, 3300.0, 2700.0), vp=ifelse.(low, 8.0, 6.0), vs=ifelse.(low, 4.5, 3.5)))
+end
+result = simulate(model; nproc=(4, 4), tmax, sources, stations, absorber=:pml)
+```
+Every process then holds the mesh and the material of its own columns only (and a few more around them).
 
 ## Geographic coordinates
 

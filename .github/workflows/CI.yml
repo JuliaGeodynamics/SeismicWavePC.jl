@@ -10,20 +10,41 @@ concurrency:
   cancel-in-progress: true
 jobs:
   test:
-    name: Julia ${{ matrix.version }} - ${{ matrix.os }}
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.group }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 180                # macOS with Julia 1 takes ~1.5 h (Enzyme compilation)
+    timeout-minutes: 45                # (the groups take 15-30 min)
     strategy:
       fail-fast: false
+      # the tests in groups (test/runtests.jl), as parallel jobs; Julia 1 on all systems, the LTS 1.10 on Linux
       matrix:
-        version: ['1.10', '1']
+        version: ['1']
         os: [ubuntu-latest, macos-latest, windows-latest]
+        group: [mpi1, mpi2, mpi3, mpi4, gradient, curvilinear1, curvilinear2, other]
+        # MPI on Linux only: Windows runners have no working mpiexec, macOS runners (3 cores, 7 GB) swap with 4 processes
+        exclude:
+          - {os: windows-latest, group: mpi1}
+          - {os: windows-latest, group: mpi2}
+          - {os: windows-latest, group: mpi3}
+          - {os: windows-latest, group: mpi4}
+          - {os: macos-latest, group: mpi1}
+          - {os: macos-latest, group: mpi2}
+          - {os: macos-latest, group: mpi3}
+          - {os: macos-latest, group: mpi4}
+        include:
+          - {version: '1.10', os: ubuntu-latest, group: mpi1}
+          - {version: '1.10', os: ubuntu-latest, group: mpi2}
+          - {version: '1.10', os: ubuntu-latest, group: mpi3}
+          - {version: '1.10', os: ubuntu-latest, group: mpi4}
+          - {version: '1.10', os: ubuntu-latest, group: gradient}
+          - {version: '1.10', os: ubuntu-latest, group: curvilinear1}
+          - {version: '1.10', os: ubuntu-latest, group: curvilinear2}
+          - {version: '1.10', os: ubuntu-latest, group: other}
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v2   # (a cache per job: shared ones missed the test dependencies of other groups)
       - name: Swap file (Linux runners have 16 GB; the MPI test runs 4 Julia processes of ~3 GB each)
         if: runner.os == 'Linux'
         run: |
@@ -39,3 +60,7 @@ jobs:
           coverage: false               # not uploaded; code coverage makes the tests (Enzyme) several times slower
         env:
           JULIA_NUM_THREADS: 2
+          SWPC_TEST_GROUP: ${{ matrix.group }}
+          # no precompilation of the whole test environment (~400 packages, 5-7 min when the cache does not match the
+          # resolved versions): each package compiles when a test first loads it (most groups never load Enzyme or JET)
+          JULIA_PKG_PRECOMPILE_AUTO: 0

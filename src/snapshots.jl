@@ -20,6 +20,10 @@ Files are named `<title>.<solver>.<plane>.<quantity>.nc` (e.g. `swpc.3d.fs.v.nc`
 z positive down as in OpenSWPC], time `t` and the medium `rho`, `lambda`, `mu`; velocity files of horizontal planes also get
 the peak values `max-V` (vertical), `max-H` (horizontal) and `max-A` (vector) over all time steps. Unlike OpenSWPC, the
 components are at the cell centres with x east, y north and z up, and `t` is the time of the snapshot.
+
+On curvilinear grids the points are the nodes of the mesh columns: `fs` is the topography, `xy` planes and the sections are
+interpolated at regular heights (zero, and medium NaN, above the topography); the divergence and rotation (`:ps`) from the
+SBP operators at the nodes.
 """
 struct Snapshots
     xy::Union{Nothing,Float64}

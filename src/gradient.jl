@@ -52,6 +52,13 @@ function misfit_gradient(model::CartData, observed::Seismograms; method=:adjoint
     method in (:adjoint, :ad) || error("method must be :adjoint or :ad, got :$method")
     K = checkpoint_steps === nothing ? nothing : Int(checkpoint_steps)
     illumination && method === :ad && error("illumination = true needs method = :adjoint")
+    if is_curvilinear(model) || get(kwargs, :grid, :auto) === :curvilinear       # curvilinear grids: the SBP adjoint
+        method === :adjoint || error("curvilinear grids: method = :adjoint")
+        res = simulate(model; kwargs..., grid=:curvilinear, stations=observed.stations, verbose=false,
+                       driver=CurvilinearGradient(observed, misfit, K, illumination))
+        mute === nothing || mute_gradient!(res[2], mute, kwargs[:sources], observed.stations)
+        return res
+    end
     driver = method === :adjoint ? AdjointDriver(observed, K, misfit, illumination) : ad_driver(observed, K, misfit)
     res = simulate(model; kwargs..., stations=observed.stations, verbose=false, driver)
     mute === nothing || mute_gradient!(res[2], mute, kwargs[:sources], observed.stations)

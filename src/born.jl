@@ -43,6 +43,7 @@ Base.:<=(a::Tan, b::Tan) = a.v <= b.v
 Base.isfinite(a::Tan) = isfinite(a.v) && isfinite(a.d)
 @inline Base.sqrt(a::Tan) = (r = sqrt(a.v); Tan(r, ifelse(r > 0, a.d / 2r, zero(r))))     # 0 at 0 (air)
 value(x::Tan) = x.v
+value(x::Real) = x
 tangent(x::Tan) = x.d
 
 """
@@ -72,14 +73,14 @@ Jacobian of the seismograms with respect to the model), and the seismograms `bac
 It is the exact derivative of the discrete simulation, the transpose of the gradient of [`misfit_gradient`](@ref): for the
 L2 misfit, `misfit_gradient` gives Jᵀ r for the residuals r, and ⟨J δm, r⟩ = ⟨δm, Jᵀ r⟩. Together they give Gauss-Newton
 Hessian-vector products JᵀJ δm, and least-squares migration. It costs about 2.5 forward simulations on GPUs and 4.5 on CPU
-threads, on one or several MPI processes (`nproc`). Not (yet) for teleseismic waves (plane waves are not differentiated, as in
+threads, on one or several MPI processes (`nproc`), on the staggered and on curvilinear grids. Not (yet) for teleseismic waves (plane waves are not differentiated, as in
 `misfit_gradient`).
 """
 function born(model::CartData, δm::CartData; T::Type{<:AbstractFloat}=Float32, kwargs...)
     bad = intersect(keys(kwargs), (:snapshots, :callback, :checkpoint, :restart, :driver))
     isempty(bad) || error("born does not take the keywords $(join(bad, ", "))")
     size(δm) == size(model) || error("δm must be on the grid of the model (size $(size(model)), got $(size(δm)))")
-    keys(δm.fields) ⊆ (:rho, :vp, :vs, :Qp, :Qs, :epsilon, :delta, :gamma) ||
+    keys(δm.fields) ⊆ (:rho, :vp, :vs, :Qp, :Qs, :epsilon, :delta, :gamma, :z, :Z) ||    # (z, Z: the heights of curvilinear meshes)
         error("δm may have the fields rho, vp, vs, Qp, Qs (and epsilon, delta, gamma), got $(keys(δm.fields))")
     has_anisotropy(δm) && !has_anisotropy(model) &&
         error("δm perturbs epsilon, delta or gamma: give the model these fields (zero for an isotropic background)")

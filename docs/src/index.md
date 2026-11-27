@@ -15,6 +15,9 @@ gradients for full-waveform inversion. It started as a Julia port of the finite-
 
 - **Physics:** P-SV and SH (2D) and 3D visco-elastic waves on a staggered grid (4th order in space, 2nd order in time);
   constant Q (generalized Zener body); free surfaces and topography; oceans; PML, multiaxial PML or Cerjan absorbing boundaries.
+- **Topography on curvilinear grids:** a terrain-following mesh with the free surface exactly on the topography and grid
+  lines along interfaces, with provably stable summation-by-parts (SBP) finite differences and simultaneous approximation
+  terms; 2D and 3D, attenuation, VTI, PML, gradients and Born modelling, GPUs and MPI ([Topography on a curvilinear grid](@ref)).
 - **Sources and receivers:** moment tensors, double couples, forces and plane waves, in Cartesian or geographic
   coordinates; velocity, displacement, stress and strain seismograms; reciprocal Green's functions.
 - **Hardware:** Julia threads on CPUs (faster than OpenSWPC per core and in total), GPUs from NVIDIA, AMD and Apple, and MPI
@@ -43,5 +46,16 @@ Depth = 1
 Maeda, T., Takemura, S., and Furumura, T. (2017). OpenSWPC: an open-source integrated parallel simulation code for modeling
 seismic wave propagation in 3D heterogeneous viscoelastic media. *Earth, Planets and Space*, 69, 102.
 doi:10.1186/s40623-017-0687-2
+
+The curvilinear solver (topography and interfaces on a terrain-following grid) uses summation-by-parts operators from
+SummationByPartsOperators.jl:
+
+Ranocha, H. (2021). SummationByPartsOperators.jl: A Julia library of provably stable semidiscretization techniques with
+mimetic properties. *Journal of Open Source Software*, 6(64), 3454. doi:10.21105/joss.03454
+
+Mattsson, K., Niemelä, O., and Winters, A. R. (2027). Boundary-optimized closures for diagonal-norm upwind SBP operators.
+*Journal of Computational Physics*, 568, 115399. doi:10.1016/j.jcp.2026.115399
+
+Mattsson, K. (2017). Diagonal-norm upwind SBP operators. *Journal of Computational Physics*, 335, 283–310.
 
 MIT license. The forward numerical algorithms are ported from OpenSWPC, © Takuto Maeda, MIT license.

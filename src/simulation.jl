@@ -93,6 +93,9 @@ Keyword arguments
 - `interpolation = :cell`: sources and stations at the cell that contains them (as OpenSWPC), or `:sinc` at their exact
   position, between grid points (Kaiser-windowed sinc interpolation, Hicks 2002; strain is then still taken at the cell).
 - `wave = :psv`: `:psv` or `:sh`, for 2D models.
+- `grid = :auto`: a deformed 2D model (a terrain-following mesh, see [`curvilinear_mesh`](@ref)) runs on a curvilinear grid
+  ([`SeismicWavePC.simulate_curvilinear`](@ref): SBP finite differences, the free surface at the true topography),
+  any other on the staggered grid; `:curvilinear` or `:staggered` to choose.
 - `free_surface = :openswpc`: the shear modulus at the shear-stress points is the harmonic mean of the four cells around them,
   zero next to air or water (as OpenSWPC). On a stair-stepped topography this also zeroes the shear stress at the inner
   corners of the steps, so a top cell one cell wide in x (or y) has no shear coupling to the ground in that direction and
@@ -122,7 +125,11 @@ Keyword arguments
   `DistributedModel`.
 - `verbose = true`: print a summary and the progress (on rank 0).
 """
-function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolation=:cell, free_surface=:openswpc, kwargs...)
+function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolation=:cell, free_surface=:openswpc, grid=:auto, kwargs...)
+    grid in (:auto, :staggered, :curvilinear) || error("grid must be :auto, :staggered or :curvilinear, got :$grid")
+    if (model isa CartData && (grid === :curvilinear || (grid === :auto && is_curvilinear(model)))) || (model isa DistributedModel && is_curvilinear(model))
+        return size(model)[2] == 1 ? simulate_curvilinear(model; wave, kwargs...) : simulate_curvilinear3d(model; kwargs...)
+    end
     mode = size(model)[2] == 1 ? wave : :p3d
     mode in (:psv, :sh, :p3d) || error("wave must be :psv or :sh, got :$wave")
     interpolation in (:cell, :sinc) || error("interpolation must be :cell or :sinc, got :$interpolation")
@@ -213,9 +220,9 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
                                 s=dev(FT[1e3 / M0 * moment_rate(stf, tbeg + it * dt, s.t0, s.trise) * dt / volume(s) for s in FS, it in 1:nt])))
     # between grid points: the weights of the points around the sources (Kaiser-windowed sinc)
     Src = sinc ? merge(Src0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in S], spec_s, off, nl, dev, FT; derivatives=Val(true),
-                                                items=collect(eachindex(S))))) : Src0
+                                                items=collect(eachindex(S)), nodes=Val(true)))) : Src0
     FSrc = sinc ? merge(FSrc0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in FS], spec_v, off, nl, dev, FT; derivatives=Val(true),
-                                                  items=collect(eachindex(FS))))) : FSrc0
+                                                  items=collect(eachindex(FS)), nodes=Val(true)))) : FSrc0
     fcut = max(maximum((1 / s.trise for s in moments); init=0.0), maximum((1 / s.trise for s in forces); init=0.0),
                maximum((plane_wave_fcut(p, med, g) for p in planewaves); init=0.0), maximum((1 / w.trise for w in teleseismic); init=0.0))
 
@@ -516,12 +523,12 @@ function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, in
         end
         pw_edges && extrapolate_sides!(V, edges)
         foreach_region!(backend, stress!, (F, M, c, vc, dtT), cells)
-        nosource || run_once!(backend, inject!, (F, Src, it))
+        nosource || inject_sources!(backend, inject!, (F, Src, it), Src)
         inject_wave!(tw, Val(:stress), F, M, c, vc, dtT, eltype(dtT)(tbeg + (it - 0.5) * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, Σ...))
         pw_edges && extrapolate_sides!(Σ, edges)
         foreach_region!(backend, vel!, (F, M, c, dtT), cells)
-        noforce || run_once!(backend, force!, (F, M, FSrc, it))
+        noforce || inject_sources!(backend, force!, (F, M, FSrc, it), FSrc)
         inject_wave!(tw, Val(:velocity), F, M, c, vc, dtT, eltype(dtT)(tbeg + it * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, V...))
         if verbose && it % report == 0

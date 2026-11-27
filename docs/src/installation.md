@@ -2,11 +2,13 @@
 
 1. Install Julia 1.10 or newer, for example with [juliaup](https://github.com/JuliaLang/juliaup):
    `curl -fsSL https://install.julialang.org | sh` (Linux, macOS) or `winget install julia -s msstore` (Windows).
-2. Install the package (it is not registered yet):
+2. Install the package from the General registry:
    ```julia
    julia> ]
-   pkg> add https://github.com/JuliaGeodynamics/SeismicWavePC.jl
+   pkg> add SeismicWavePC
    ```
+   For the development version (newer than the latest release): `pkg> add SeismicWavePC#main`. To change the code,
+   `pkg> dev SeismicWavePC` puts a clone in `~/.julia/dev/SeismicWavePC`.
 3. To use all CPU cores, start Julia with threads: `julia -t auto`. On machines with very many cores that are shared with
    other jobs, a moderate number of threads (e.g. `-t 8`) can be faster.
 

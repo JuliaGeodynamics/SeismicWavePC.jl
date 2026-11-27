@@ -108,9 +108,12 @@ end
 Device tables of the points of this rank (`off`, local size `nl`; only its interior points, others belong to neighbours) of
 the interpolation of `items` (internal positions) for every component: `ix` (linear indices) and `w` (weights) per
 component, matrices `item × point`, and the derivatives `dw` (per component a tuple over axes, times the grid spacing).
-Returns the tables and the items with points on this rank.
+Returns the tables and the items with points on this rank. `nodes = Val(true)` (sources) adds the points sorted by node: per node
+`nc` (component), `nix` (linear index) and its entries `nseg[u]:nseg[u+1]-1`, each with `nn` (item) and `nq` (point), so
+that one thread per node can add all contributions (sources may share points).
 """
-function sinc_tables(g::Grid{N}, med, positions, spec, off, nl, dev, ::Type{T}; derivatives::Val{D}=Val(false), items=nothing) where {N,T,D}
+function sinc_tables(g::Grid{N}, med, positions, spec, off, nl, dev, ::Type{T}; derivatives::Val{D}=Val(false), items=nothing,
+                     nodes::Val{ND}=Val(false)) where {N,T,D,ND}
     comps = spec.cells
     raw = [component_points(g, med, p, comps, spec.shear, D) for p in positions]    # per item, a tuple over components
     local_(J) = J - CartesianIndex(off)
@@ -132,7 +135,15 @@ function sinc_tables(g::Grid{N}, med, positions, spec, off, nl, dev, ::Type{T}; 
                       end; dev(A)), length(comps))
     w = ntuple(c -> table(c, (rc, m) -> rc[2][m]), length(comps))
     dw = D ? ntuple(c -> ntuple(a -> table(c, (rc, m) -> rc[3][a][m] * g.d[a]), N), length(comps)) : nothing
-    return (; ix, w, dw), items
+    ND || return (; ix, w, dw), items
+    # (per component as `ix`: inferable; sorted by component and node, stable: per node in the order of the items)
+    per = ntuple(c -> [(Int32(c), Int32(L[local_(raw[n][c][1][m])]), Int32(r), Int32(q))
+                       for (r, n) in enumerate(items) for (q, m) in enumerate(keep[n][c])], length(comps))
+    all_ = reduce(vcat, per)
+    ent = all_[sortperm(all_; by=e -> (e[1], e[2]), alg=Base.Sort.DEFAULT_STABLE)]
+    first_ = [u for u in eachindex(ent) if u == 1 || ent[u][1:2] != ent[u-1][1:2]]
+    return (; ix, w, dw, nc=dev(Int32[ent[u][1] for u in first_]), nix=dev(Int32[ent[u][2] for u in first_]),
+            nseg=dev(Int32[first_; length(ent) + 1]), nn=dev(Int32[e[3] for e in ent]), nq=dev(Int32[e[4] for e in ent])), items
 end
 
 # ------------------------------------------------------------------ kernels
@@ -145,14 +156,14 @@ Base.@propagate_inbounds function sinc_sample(A, ix, w, n)
     return s
 end
 
-"Moment tensor sources: the stress glut on the stress grids (as `inject_*!`)."
-Base.@propagate_inbounds function inject_sinc!(Σ, S, cols, it)
-    for n in 1:size(S.M, 1), c in eachindex(Σ)
+"Moment tensor sources: the stress glut on the stress grids (as `inject_*!`), at the point `u` of the node table."
+Base.@propagate_inbounds function inject_sinc!(Σ, S, cols, it, u)
+    c, I = S.nc[u], S.nix[u]
+    A, w = Σ[c], S.w[c]
+    for e in S.nseg[u]:S.nseg[u+1]-1
+        n, q = S.nn[e], S.nq[e]
         m = S.M[n, cols[c]] * S.s[n, it]
-        A, ix, w = Σ[c], S.ix[c], S.w[c]
-        for q in axes(w, 2)
-            A[ix[n, q]] -= m * w[n, q]
-        end
+        A[I] -= m * w[n, q]
     end
 end
 
@@ -160,15 +171,15 @@ end
 @inline buoyancy(ρ, J, ::Nothing) = @inbounds 1 / ρ[J]
 @inline buoyancy(ρ, J, e) = @inbounds 2 / (ρ[J] + ρ[J+e])
 
-"Forces: added to the velocities, times the buoyancy at the points (as `force_*!`)."
-Base.@propagate_inbounds function force_sinc!(V, ρ, es, S, cols, it)
-    for n in 1:size(S.F, 1), c in eachindex(V)
+"Forces: added to the velocities, times the buoyancy at the points (as `force_*!`), at the point `u` of the node table."
+Base.@propagate_inbounds function force_sinc!(V, ρ, es, S, cols, it, u)
+    c, I = S.nc[u], S.nix[u]
+    A, w = V[c], S.w[c]
+    J = CartesianIndices(A)[I]
+    for e in S.nseg[u]:S.nseg[u+1]-1
+        n, q = S.nn[e], S.nq[e]
         f = S.F[n, cols[c]] * S.s[n, it]
-        A, ix, w = V[c], S.ix[c], S.w[c]
-        C = CartesianIndices(A)
-        for q in axes(w, 2)
-            A[ix[n, q]] += f * w[n, q] * buoyancy(ρ, C[ix[n, q]], es[c])
-        end
+        A[I] += f * w[n, q] * buoyancy(ρ, J, es[c])
     end
 end
 
@@ -221,12 +232,14 @@ on_rank(g::Grid{N}, med, pos, cells, shear, off, nl) where {N} =
     any(J -> all(a -> H < J[a] - off[a] <= nl[a] - H, 1:N), sinc_points(g, med, pos, four(cells), shear)[1])
 
 # kernels of the modes (the stress and velocity components in the order of `stagger`)
-inject_sinc_psv!(F, S, it) = inject_sinc!((F.Sxx, F.Szz, F.Sxz), S, (1, 3, 5), it)
-inject_sinc_sh!(F, S, it) = inject_sinc!((F.Syz, F.Sxy), S, (4, 6), it)
-inject_sinc_3d!(F, S, it) = inject_sinc!((F.Sxx, F.Syy, F.Szz, F.Syz, F.Sxz, F.Sxy), S, (1, 2, 3, 4, 5, 6), it)
-force_sinc_psv!(F, M, S, it) = force_sinc!((F.Vx, F.Vz), M.rho, (C2(1, 0), C2(0, 1)), S, (1, 3), it)
-force_sinc_sh!(F, M, S, it) = force_sinc!((F.Vy,), M.rho, (nothing,), S, (2,), it)
-force_sinc_3d!(F, M, S, it) = force_sinc!((F.Vx, F.Vy, F.Vz), M.rho, (C3(1, 0, 0), C3(0, 1, 0), C3(0, 0, 1)), S, (1, 2, 3), it)
+inject_sinc_psv!(F, S, it, u) = inject_sinc!((F.Sxx, F.Szz, F.Sxz), S, (1, 3, 5), it, u)
+inject_sinc_sh!(F, S, it, u) = inject_sinc!((F.Syz, F.Sxy), S, (4, 6), it, u)
+inject_sinc_3d!(F, S, it, u) = inject_sinc!((F.Sxx, F.Syy, F.Szz, F.Syz, F.Sxz, F.Sxy), S, (1, 2, 3, 4, 5, 6), it, u)
+force_sinc_psv!(F, M, S, it, u) = force_sinc!((F.Vx, F.Vz), M.rho, (C2(1, 0), C2(0, 1)), S, (1, 3), it, u)
+force_sinc_sh!(F, M, S, it, u) = force_sinc!((F.Vy,), M.rho, (nothing,), S, (2,), it, u)
+force_sinc_3d!(F, M, S, it, u) = force_sinc!((F.Vx, F.Vy, F.Vz), M.rho, (C3(1, 0, 0), C3(0, 1, 0), C3(0, 0, 1)), S, (1, 2, 3), it, u)
+"Source injection: per point of the node table (sinc, parallel) or all sources in one thread (cells)."
+inject_sources!(backend, f, args, S) = haskey(S, :nseg) ? foreach_item!(backend, f, args, length(S.nseg) - 1) : run_once!(backend, f, args)
 residual_sinc_psv!(Q, M, St, res, itw, nown) = residual_sinc!((Q.Vx, Q.Vz), M.rho, (C2(1, 0), C2(0, 1)), (1, -1), St, res, itw, nown)
 residual_sinc_sh!(Q, M, St, res, itw, nown) = residual_sinc!((Q.Vy,), M.rho, (nothing,), (1,), St, res, itw, nown)
 residual_sinc_3d!(Q, M, St, res, itw, nown) =

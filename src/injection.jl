@@ -23,7 +23,9 @@ boundaries take out. Use it in `sources`, also for `misfit_gradient` (the gradie
   displacement `amplitude` [m].
 
 The model must be horizontally layered (elastic, no water) along the box boundary and below: that is the background in which
-the wave is computed exactly. The box must keep 4 cells from the absorbing layers.
+the wave is computed exactly. The box must keep 4 cells from the absorbing layers. On curvilinear grids the box is made of
+the nodes inside it (and the mesh row nearest to its bottom); the topography must be flat along its sides, and its bottom
+5 nodes away from block interfaces.
 """
 struct TeleseismicWave
     wave::Symbol

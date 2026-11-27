@@ -86,27 +86,52 @@ The same benchmark with topography (the `dev/cutCells` cases of [flexOPT.jl](htt
 also by Nobuaki Fuji): the free surface tilted by 10, 20 and 30° (source, force along the normal and receivers rotated with
 it), and a Gaussian hill (3 km high, σ = 5 km) between the source and the receivers. Two lines of five receivers, 10 km
 ("deep") and 1 km ("shallow") below the surface; components along (u_t) and normal to the surface (u_n). On the 500 m grid
-(16 points per S wavelength) the surface is a staircase of cells. The references: for the tilted planes the exact answer,
-the flat case rotated (on a 62.5 m grid, where its surface lies on cell faces); for the hill `free_surface = :corners` on a
-62.5 m grid
+(16 points per S wavelength) the staggered grid represents the surface as a staircase of cells, with the default free
+surface or `free_surface = :corners`; the curvilinear solver (`grid = :curvilinear`, see [Models](models.md)) puts its
+nodes exactly on the surface (for the tilts on a mesh whose bottom is parallel to the surface, 80 km below it). The
+references: for the tilted planes the exact answer, the flat case rotated (on a 62.5 m grid, where its surface lies on cell
+faces); for the hill `free_surface = :corners` on a 62.5 m grid
 ([`examples/topography_benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/topography_benchmark.jl),
 under a minute on a laptop):
 
 ![Free surface on topography: relative errors and seismograms](assets/topography_benchmark.png)
 
-Relative L2 error of (u_t, u_n) over 0–9 s, mean (max) over the five receivers of a line:
+Relative L2 error of (u_t, u_n) over 0–9 s on the 500 m grid, mean (max) over the five receivers of a line:
 
-| Case | deep, default (`:openswpc`) | deep, `:corners` | shallow, default (`:openswpc`) | shallow, `:corners` |
-|---|---|---|---|---|
-| flat | 1.2 % (1.6) | 1.2 % (1.6) | 2.9 % (4.0) | 2.9 % (4.0) |
-| 10° | 4.2 % (5.3) | 3.0 % (4.1) | 31 % (38) | 21 % (25) |
-| 20° | 4.5 % (5.7) | 3.0 % (3.7) | 20 % (32) | 13 % (18) |
-| 30° | 4.0 % (5.7) | 2.7 % (3.6) | 24 % (34) | 16 % (21) |
-| hill | 2.2 % (3.5) | 1.9 % (2.8) | 18 % (25) | 11 % (16) |
+| Case | deep, default | deep, `:corners` | deep, curvilinear | shallow, default | shallow, `:corners` | shallow, curvilinear |
+|---|---|---|---|---|---|---|
+| flat | 1.2 % (1.6) | 1.2 % (1.6) | 1.0 % (1.1) | 2.9 % (4.0) | 2.9 % (4.0) | 0.8 % (0.9) |
+| 10° | 4.2 % (5.3) | 3.0 % (4.1) | 1.5 % (2.2) | 31 % (38) | 21 % (25) | 1.2 % (1.5) |
+| 20° | 4.5 % (5.7) | 3.0 % (3.7) | 2.0 % (2.5) | 20 % (32) | 13 % (18) | 1.1 % (1.6) |
+| 30° | 4.0 % (5.7) | 2.7 % (3.6) | 1.3 % (1.7) | 24 % (34) | 16 % (21) | 0.9 % (1.4) |
+| hill | 2.2 % (3.5) | 1.9 % (2.8) | 0.9 % (1.0) | 18 % (25) | 11 % (16) | 1.2 % (1.6) |
 
 Away from the surface the staircase costs little (2–4.5 %). Within a fifth of an S wavelength of a sloping surface the
-errors are 20–30 %, mostly delays of the waves along the surface (u_t in the figure); `:corners` reduces them by 1.5–2. Near
-a sloping surface, use a finer grid than the 16 points per S wavelength that suffice elsewhere.
+errors are 20–30 %, mostly delays of the waves along the surface (u_t in the figure); `:corners` reduces them by 1.5–2. The
+curvilinear solver stays at about 1 % on both lines, as on a flat surface (the hill: at the accuracy of its reference,
+whose variants differ by up to 1 %).
+
+Run times per simulation (9 s, 12 threads of an Apple M-series laptop, after compilation), and the mean error on the
+shallow line of the sloping cases (10°, 20°, 30°, hill):
+
+| Solver | grid | run time | shallow error |
+|---|---|---|---|
+| staggered, default | 500 m | 0.06–0.10 s | 18–31 % |
+| staggered, `:corners` | 500 m | 0.07–0.12 s | 11–21 % |
+| curvilinear | 500 m | 0.12–0.20 s | 0.9–1.2 % |
+| staggered, default | 250 m | 0.34–0.41 s | 5.9–8.2 % |
+| staggered, `:corners` | 250 m | 0.25–0.50 s | 3.6–4.4 % |
+| curvilinear | 250 m | 0.55–0.74 s | 0.6–1.0 % |
+| staggered, default | 125 m | 1.2–2.3 s | 1.7–3.7 % |
+| staggered, `:corners` | 125 m | 1.3–2.4 s | 1.0–1.8 % |
+
+On the same grid a curvilinear run costs about twice a staggered one (as many time steps here, but more work per node:
+7th-order collocated stencils instead of 4th-order staggered ones), but it reaches the accuracy that the staggered grid needs 4×
+finer cells for (`:corners` at 125 m), about 10× faster. On a laptop GPU (Apple Metal, Float32, the same errors) these small 2D models run
+about as fast as on the CPU (0.06–0.4 s at 500 m, 0.65–1.5 s at 125 m; a time step costs at least ~0.15 ms there, mostly
+kernel launches), and the curvilinear solver at 500 m is about 3× faster than `:corners` at 125 m. GPUs pay off most for
+large models, such as the 10 m Unzen model of the README (8.5 million nodes). Near a sloping surface on the staggered grid, use a finer grid
+than the 16 points per S wavelength that suffice elsewhere, or the curvilinear solver.
 
 ## Rayleigh waves in firn
 
