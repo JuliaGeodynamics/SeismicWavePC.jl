@@ -215,7 +215,7 @@ cvpart(k) = !isdefined(Main, :TEST_PARTS) || isempty(Main.TEST_PARTS[]) || strin
         @test sg[2].z ≈ fdx(e -> [ms, ForceSource(fs.x, 0.0, fs.z + e; fz=fs.F[3], trise=fs.trise)]) rtol = 1e-5
         @test sg[2].F[3] ≈ fdx(e -> [ms, ForceSource(fs.x, 0.0, fs.z; fz=fs.F[3] + 1e13e, trise=fs.trise)]) / 1e13 rtol = 1e-6
     end
-    cvpart(1) && @testset "misfit gradient (3D) against finite differences" begin
+    cvpart(2) && @testset "misfit gradient (3D) against finite differences" begin
         topog3(x, y) = 1.0 * exp(-(x^2 + y^2) / 10)
         mohog3(x, y) = -4.0 + 0.5 * sin(2π * x / 10) * cos(2π * y / 12)
         mesh = curvilinear_mesh(range(-6, 6, length=33), range(-5, 5, length=29), [topog3, mohog3]; dz=0.4, bottom=-8)

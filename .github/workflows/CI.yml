@@ -12,7 +12,7 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.group }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 45                # (the groups take 15-30 min)
     strategy:
       fail-fast: false
       # the tests in groups (test/runtests.jl), as parallel jobs; Julia 1 on all systems, the LTS 1.10 on Linux
