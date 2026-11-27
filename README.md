@@ -64,11 +64,14 @@ anomalies) turned into velocities and melt with MAGEMin; orange marks partially 
 
 ## Installation
 
+SeismicWavePC is a registered Julia package (Julia 1.10 or newer):
 ```julia
 julia> ]
-pkg> add https://github.com/JuliaGeodynamics/SeismicWavePC.jl
+pkg> add SeismicWavePC
 ```
-Start Julia with `julia -t auto` to use all cores; for GPUs add `CUDA`, `AMDGPU` or `Metal`.
+For the development version (newer than the latest release) use `pkg> add SeismicWavePC#main`.
+Start Julia with `julia -t auto` to use all cores; for GPUs add `CUDA`, `AMDGPU` or `Metal`. See the
+[installation page](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/installation/) for GPUs, MPI and the examples.
 
 ## Example
 
