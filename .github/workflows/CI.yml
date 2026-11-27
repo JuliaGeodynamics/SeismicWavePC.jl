@@ -44,10 +44,7 @@ jobs:
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
-      - uses: julia-actions/cache@v2
-        with:                           # (one cache per system and Julia version, shared by the groups)
-          cache-name: julia-cache-${{ matrix.os }}-${{ matrix.version }}
-          include-matrix: false
+      - uses: julia-actions/cache@v2   # (a cache per job: shared ones missed the test dependencies of other groups)
       - name: Swap file (Linux runners have 16 GB; the MPI test runs 4 Julia processes of ~3 GB each)
         if: runner.os == 'Linux'
         run: |

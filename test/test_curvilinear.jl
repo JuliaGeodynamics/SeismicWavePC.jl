@@ -576,7 +576,7 @@ cvpart(k) = !isdefined(Main, :TEST_PARTS) || isempty(Main.TEST_PARTS[]) || strin
         @test norm([D[i, j] for (i, j) in I] - dfd) < 0.03norm(dfd)                       # (2 %: the error of the differences)
         @test norm([R[i, j] for (i, j) in I] - rfd) < 0.03norm(rfd)
     end
-    cvpart(2) && @testset "SH waves: against the staggered solver, gradient and Born against finite differences" begin
+    cvpart(1) && @testset "SH waves: against the staggered solver, gradient and Born against finite differences" begin
         # flat half-space with attenuation and VTI (γ): seismograms at the surface and stresses at depth
         src = DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=3.0, strike=90, dip=60, rake=0, trise=1.0)
         stations = [[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in (2, 5, 8)]; Station("d", 4.0, 0.0, -3.0)]
@@ -636,24 +636,24 @@ cvpart(k) = !isdefined(Main, :TEST_PARTS) || isempty(Main.TEST_PARTS[]) || strin
         M = simulate(addfield(mesh, merge(base, (; vs=base.vs .- 1e-3 .* δv))); kw..., stations=sts, verbose=false)
         @test maximum(abs, δd.v .- (P.v .- M.v) ./ 2e-3) < 1e-6 * maximum(abs, δd.v)
     end
-    cvpart(2) && @testset "teleseismic waves (TF/SF injection): exact background, gradient" begin
+    cvpart(1) && @testset "teleseismic waves (TF/SF injection): exact background, gradient" begin
         # a layer over a half-space: inside the box the total field is the background (exact, layered), outside nothing
         Lb = SW.Layers([0.0, 3000.0], [2400.0, 2800.0], [2400 * (4000.0^2 - 2 * 2300.0^2), 2800 * (6000.0^2 - 2 * 3400.0^2)],
                        [2400 * 2300.0^2, 2800 * 3400.0^2])
         for (wave, comps) in ((:p, ((1, :Vx, 1), (2, :Vz, -1))), (:sh, ((1, :Vy, 1),)))
-            w = TeleseismicWave(wave; angle=20.0, box=(-8.0, 8.0, -12.0), backazimuth=270.0, t0=0.5, trise=1.0)
+            w = TeleseismicWave(wave; angle=20.0, box=(-8.0, 8.0, -12.0), backazimuth=270.0, t0=1.0, trise=2.0)
             vel = wave === :p ? 6000.0 : 3400.0
             p = sind(20.0) / vel
             ηs = [real(SW.vslow(v, p)) for v in (wave === :p ? (4000.0, 6000.0) : (2300.0, 3400.0))]
             tshift = w.t0 - p * (-8000.0) - SW.vertical_delay(Lb, ηs, 12000.0)
             fk = wave === :sh ? Val(:sh) : Val(:psv)
             tab = SW.teleseismic_tables_cv(w, fk, SW.rotation(fk, (1.0, 0.0), (0.0, 1.0)), p, Lb, [0.0], Tuple(c[2] for c in comps),
-                                           -5.0, 12.0, 1e-3, :kupper, Float64)
+                                           -5.0, 14.0, 1e-3, :kupper, Float64)
             exact(nm, x, t) = (f = (t - tshift - p * 1e3x + 5.0) / 1e-3; j = floor(Int, f); a = f - j; A = getfield(tab, nm); (1 - a) * A[j+1, 1] + a * A[j+2, 1])
-            mesh = curvilinear_mesh(range(-20, 20, length=401), [x -> 0.0, x -> -3.0]; dz=0.1, bottom=-25)
+            mesh = curvilinear_mesh(range(-20, 20, length=201), [x -> 0.0, x -> -3.0]; dz=0.2, bottom=-25)   # (0.04–0.15 %)
             low = mesh.z.val .< -3.0
             m = addfield(mesh, (; rho=ifelse.(low, 2800.0, 2400.0), vp=ifelse.(low, 6.0, 4.0), vs=ifelse.(low, 3.4, 2.3)))
-            r = simulate(m; grid=:curvilinear, wave=wave === :sh ? :sh : :psv, tmax=8.0, sources=w, T=Float64, verbose=false, absorber=:pml,
+            r = simulate(m; grid=:curvilinear, wave=wave === :sh ? :sh : :psv, tmax=9.0, sources=w, T=Float64, verbose=false, absorber=:pml,
                          stations=[Station("in", 2.0, 0.0, 0.0; surface=true), Station("out", 14.0, 0.0, 0.0; surface=true)])
             for (c, nm, sg) in comps
                 e = [sg * exact(nm, 2.0, t) for t in r.t]

@@ -15,11 +15,15 @@ struct CurvilinearGradient{O,M}
     illumination::Bool
 end
 
-"Add the residual (∂J/∂v at the recorded samples) × `s` to the adjoint velocities at the stations (transposed interpolation)."
+"""
+Add the residual (∂J/∂v at the recorded samples) × `s` to the adjoint velocities at the stations (transposed interpolation).
+(MPI: the weights of the nodes of other processes are zero; a stencil may reach beyond the halo there: skipped.)
+"""
 Base.@propagate_inbounds function residual_cv!(blocks, St, R, itw, s)
     for n in 1:length(St.b)
         B = blocks[St.b[n]]
         for c in 1:6, a in 1:6
+            iszero(St.wx[a, n]) && continue
             w = s * St.wx[a, n] * St.wz[c, n]
             i, k = St.i0[n] + a - 1, St.k0[n] + c - 1
             B.V1[i, k] += w * R[itw, 1, n]
@@ -40,6 +44,7 @@ Base.@propagate_inbounds function residual3_cv!(blocks, St, R, itw, s)
     for n in 1:length(St.b)
         B = blocks[St.b[n]]
         for c in 1:6, b in 1:6, a in 1:6
+            (iszero(St.wx[a, n]) || iszero(St.wy[b, n])) && continue
             w = s * St.wx[a, n] * St.wy[b, n] * St.wz[c, n]
             i, j, k = St.i0[n] + a - 1, St.j0[n] + b - 1, St.k0[n] + c - 1
             B.V1[i, j, k] += w * R[itw, 1, n]
@@ -61,6 +66,7 @@ Base.@propagate_inbounds function residual_sh_cv!(blocks, St, R, itw, s)
     for n in 1:length(St.b)
         B = blocks[St.b[n]]
         for c in 1:6, a in 1:6
+            iszero(St.wx[a, n]) && continue
             B.V1[St.i0[n]+a-1, St.k0[n]+c-1] += s * St.wx[a, n] * St.wz[c, n] * R[itw, 1, n]
         end
     end

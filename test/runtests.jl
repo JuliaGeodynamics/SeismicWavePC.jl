@@ -6,8 +6,8 @@ include("setup.jl")
 # ("mpi:forward,born": parts of mpi_script.jl, "curvilinear:1": the first half of test_curvilinear.jl). MPI first: its 4 processes start while this process is still small (memory of the CI runners)
 const TESTS = ["mpi", "basics", "openswpc", "files", "types", "gradient", "born", "anisotropy", "inversion", "interpolation", "distributed", "rayleigh", "curvilinear"]
 # CI runs the groups as parallel jobs (environment variable SWPC_TEST_GROUP; unset: all tests)
-const GROUPS = Dict("mpi1" => ["mpi:forward,gradient,born,vti"],
-                    "mpi2" => ["mpi:mpml,other"],
+const GROUPS = Dict("mpi1" => ["mpi:forward,gradient,born"],
+                    "mpi2" => ["mpi:vti,mpml,other"],
                     "mpi3" => ["mpi:curvilinear"],
                     "mpi4" => ["mpi:curvilinear3d"],
                     "gradient" => ["gradient", "basics", "openswpc", "files", "types", "inversion", "interpolation", "rayleigh"],
