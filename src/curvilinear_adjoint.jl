@@ -172,7 +172,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     # the forward; the adjoint applies the parts of the operators of the stretched directions separately (`part`)
     pml = pmlof(blocks[1]) !== nothing
     lite = map(B -> merge(B, (; pml=nothing)), blocks)
-    memnames(P) = Tuple(k for k in keys(P) if getfield(P, k) isa AbstractArray && !(k in (:gx, :gy, :gz)))
+    memnames(P) = Tuple(k for k in keys(P) if getfield(P, k) isa AbstractArray && !(k in (:gx, :gy, :gz, :mdt)))
     scratch = pml ? Tuple(merge(blocks[b].pml, NamedTuple{memnames(blocks[b].pml)}(map(copy, pml_arrays(blocks[b])))) for b in 1:nb) : nothing
     withpml(blk, b) = pml ? merge(blk, (; pml=scratch[b])) : blk
     AblkF = Tuple(withpml(merge(Ablk[b], NamedTuple{sn}(comps(blocks[b], sn))), b) for b in 1:nb)       # A σ of the forward
@@ -188,51 +188,67 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         foreach(a -> foreach(A -> fill!(A, 0), a), Aout)
         momentum!(one(FT), false, blk)
     end
-    # the stretched directions: (part, the pieces of every block: full-array ranges, slab ranges, γ₁ - 1, γ₂, γ₃, γ₄ dt) and the
-    # adjoint memory variables of the momentum (per velocity) and the stress (per stress component), in the slabs
+    # the stretched directions: (part, the pieces of every block: local ranges, γ₁ - 1, γ₂, γ₃, γ₄ dt on them) and the
+    # adjoint memory variables of the momentum (per velocity) and the stress (per stress component) of every piece. A piece:
+    # the nodes of a layer where the forward kernels stretch that direction (PML: ξ in the side layers, η in the bottom one;
+    # M-PML: every direction in all layers), with the coefficients of the forward kernels (`pml_xgamma`, ...).
     dirs = pml ? (N == 2 ? (:xi, :eta) : (:xi, :psi, :eta)) : ()
     function pieces(D, b)
         P = blocks[b].pml
-        na = P.np
+        na, mp = P.np, ismpml(P)
         nz = hostblocks[b].nz
-        owned(a) = N == 2 ? (hx+1:hx+c.no) : a == 1 ? (hx+1:hx+c.nox) : (hx+1:hx+c.noy)
-        shape(g, a) = reshape(g, ntuple(q -> q == a ? length(g) : 1, N))
-        γs(G, a) = (shape(dev(FT[g[1] - 1 for g in G]), a), shape(dev(FT[g[2] for g in G]), a), shape(dev(FT[g[3] for g in G]), a),
-                    shape(dev(FT[g[4] * dtT for g in G]), a))
-        out = []
-        if D === :eta
-            b == 1 || return out
-            G = Array(P.gz)[1:na]
-            F = N == 2 ? (owned(1), 1:na) : (owned(1), owned(2), 1:na)
-            push!(out, (F, F, γs(G, N)...))
+        gxh, gzh = Array(P.gx), Array(P.gz)
+        gyh = N == 3 ? Array(P.gy) : nothing
+        xo = c.ia:c.ib
+        yo = N == 3 ? (c.ja:c.jb) : (1:1)
+        ny_ = N == 3 ? c.ny : 1
+        cut(r, o) = max(first(r), first(o)):min(last(r), last(o))
+        xs = filter(!isempty, [cut(1:na, xo), cut(nx-na+1:nx, xo)]); xm = cut(na+1:nx-na, xo)
+        ys = N == 3 ? filter(!isempty, [cut(1:na, yo), cut(ny_-na+1:ny_, yo)]) : UnitRange{Int}[]
+        ym = N == 3 ? cut(na+1:ny_-na, yo) : yo
+        all_, bot, above = 1:nz, b == 1 ? (1:na) : (1:0), b == 1 ? (na+1:nz) : (1:nz)
+        sets = if N == 2
+            D === :xi ? [[(x, all_) for x in xs]; mp ? [(xm, bot)] : []] :
+                        [[(xo, bot)]; mp ? [(x, above) for x in xs] : []]
+        elseif D === :xi
+            [[(x, yo, all_) for x in xs]; mp ? [[(xm, y, all_) for y in ys]; [(xm, ym, bot)]] : []]
+        elseif D === :psi
+            [[(xo, y, all_) for y in ys]; mp ? [[(x, ym, all_) for x in xs]; [(xm, ym, bot)]] : []]
         else
-            a = D === :xi ? 1 : 2
-            n, lo, hi, o = a == 1 ? (nx, c.ia, c.ib, ox) : (c.ny, c.ja, c.jb, oy)
-            G = Array(a == 1 ? P.gx : P.gy)
-            for r in (1:na, n-na+1:n)
-                g = max(first(r), lo):min(last(r), hi)
-                isempty(g) && continue
-                sl = (first(g) <= na ? first(g) : first(g) - n + 2na):(last(g) <= na ? last(g) : last(g) - n + 2na)
-                other = N == 2 ? (1:nz,) : a == 1 ? (owned(2), 1:nz) : (1:nz,)
-                F = a == 1 ? (g .- o, other...) : (owned(1), g .- o, 1:nz)
-                S = a == 1 ? (sl, other...) : (owned(1), sl, 1:nz)
-                push!(out, (F, S, γs(G[g], a)...))
-            end
+            [[(xo, yo, bot)]; mp ? [[(x, yo, above) for x in xs]; [(xm, y, above) for y in ys]] : []]
+        end
+        Pm = mp ? (; mpml=P.mpml) : nothing
+        # (the coefficients of the forward kernels at the node (ig, jg, k), the sums of d∥ in the same order)
+        γ(ig, jg, k) = if !mp
+            D === :xi ? gxh[ig] : D === :psi ? gyh[jg] : gzh[k]
+        elseif N == 2
+            D === :xi ? mpml_gamma(Pm, gxh[ig], gzh[k][4], dtT) : mpml_gamma(Pm, gzh[k], gxh[ig][4], dtT)
+        else
+            D === :xi ? mpml_gamma(Pm, gxh[ig], gyh[jg][4] + gzh[k][4], dtT) :
+            D === :psi ? mpml_gamma(Pm, gyh[jg], gxh[ig][4] + gzh[k][4], dtT) : mpml_gamma(Pm, gzh[k], gxh[ig][4] + gyh[jg][4], dtT)
+        end
+        out = []
+        for st in sets
+            any(isempty, st) && continue
+            G = N == 2 ? [γ(i, 1, k) for i in st[1], k in st[2]] : [γ(i, j, k) for i in st[1], j in st[2], k in st[3]]
+            F = N == 2 ? (st[1] .- ox, st[2]) : (st[1] .- ox, st[2] .- oy, st[3])
+            push!(out, (F, dev(FT[g[1] - 1 for g in G]), dev(FT[g[2] for g in G]), dev(FT[g[3] for g in G]), dev(FT[g[4] * dtT for g in G])))
         end
         return out
     end
-    slabsize(D, b) = (P = blocks[b].pml; size(D === :xi ? P.xv1 : D === :psi ? P.yv1 : P.zv1))
-    PML = Tuple((; part=Val(D), pieces=Tuple(pieces(D, b) for b in 1:nb),
-                  mv=Tuple(ntuple(_ -> KernelAbstractions.zeros(backend, FT, slabsize(D, b)...), nV) for b in 1:nb),
-                  ms=Tuple(ntuple(_ -> KernelAbstractions.zeros(backend, FT, slabsize(D, b)...), nS) for b in 1:nb)) for D in dirs)
+    PML = Tuple(begin
+                    pcs = Tuple(pieces(D, b) for b in 1:nb)
+                    mem(n) = Tuple(Tuple(ntuple(_ -> KernelAbstractions.zeros(backend, FT, length.(pc[1])...), n) for pc in pcs[b]) for b in 1:nb)
+                    (; part=Val(D), pieces=pcs, mv=mem(nV), ms=mem(nS))
+                end for D in dirs)
     Win0 = pml ? Tuple(ntuple(_ -> zero_(b), nV) for b in 1:nb) : nothing
     Yin0 = pml ? Tuple(ntuple(_ -> zero_(b), nS) for b in 1:nb) : nothing
-    "W = (γ₁ - 1) W0 + γ₄ dt M̄, M̄ ← γ₂ W0 + γ₃ M̄ in the slabs of the direction (W = 0 elsewhere)"
+    "W = (γ₁ - 1) W0 + γ₄ dt M̄, M̄ ← γ₂ W0 + γ₃ M̄ on the pieces of the direction (W = 0 elsewhere)"
     function pml_adjoint!(W, W0, M, pcs)
         for b in 1:nb, k in eachindex(W[b])
             fill!(W[b][k], 0)
-            for (F, S, g1, g2, g3, g4) in pcs[b]
-                w, r, m = view(W[b][k], F...), view(W0[b][k], F...), view(M[b][k], S...)
+            for (p, (F, g1, g2, g3, g4)) in enumerate(pcs[b])
+                w, r, m = view(W[b][k], F...), view(W0[b][k], F...), M[b][p][k]
                 @. w = g1 * r + g4 * m
                 @. m = g2 * r + g3 * m
             end

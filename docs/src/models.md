@@ -53,7 +53,9 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
 - **Time step and boundaries.** The time step follows from the spectral radius of the operator: `dt` is not needed, give
   the duration `tmax`. The sides and the bottom absorb with impedance boundary conditions; `absorber = :pml` adds a
   perfectly matched layer of `na = 20` nodes (at least 6; the CFS-PML of OpenSWPC on the ξ and η parts of the SBP operators: about
-  20 times fewer reflections, ~1.5× the cost per step with layers on all sides), `:cerjan` a sponge.
+  20 times fewer reflections, ~1.5× the cost per step with layers on all sides), `:mpml` the multiaxial PML (as on the
+  staggered grid, `mpml_ratio = 0.1`: stable under soft surface layers, where the PML can grow exponentially; 2–3 times
+  the reflections of the PML), `:cerjan` a sponge.
 - **Stations** with `surface=true` record exactly on the topography. Attenuation, moment tensors and forces work as on
   the staggered grid.
 - **3D:** `curvilinear_mesh(x, y, surfaces; dz, bottom)` with surfaces z(x, y) (functions or surface `CartData`); columns

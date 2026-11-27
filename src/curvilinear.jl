@@ -238,9 +238,38 @@ neighbour(::Nothing) = nothing
     m[I] = γ[3] * q + γ[4] * dt * d
     return γ[1] * d + γ[2] * q
 end
+# M-PML (absorber = :mpml, as the staggered grid): every derivative in the layers is damped with d + p d∥, d∥ the damping of
+# the other axes (p = `P.mpml`); α and κ of its own axis. The profiles are then (d, α, 1/κ, d) (`cfs_profile`) at all nodes,
+# the coefficients computed per node, and the memory variables of the ξ parts also in the bottom layer away from the sides
+# (`…b`, rows of the bottom block) and those of the η parts also in the side layers (`…s`, as `xslab`).
+@inline ismpml(P::NamedTuple{K}) where {K} = :mpml in K
+"""
+The ADE coefficients of the M-PML from the profile `g` = (d, α, 1/κ, d) of the axis and the damping `dpar` of the others, for
+the time step `dt` (the kernels: `P.mdt[1]`, the time step of the simulation, also when the adjoint applies them with dt = 1).
+"""
+@inline function mpml_gamma(P, g, dpar, dt)
+    d, α, iκ, _ = g
+    u = (d + P.mpml * dpar) * iκ
+    c = dt / 2
+    iq = inv(1 + c * (α + u))
+    return ((1 + c * α) * iκ * iq, -iκ * iq, (1 - c * (α + u)) * iq, u * iq)
+end
+"The ADE coefficients of a ξ (`pml_xgamma`) or η (`pml_zgamma`) part at the node (global column `ig`, row `k`)."
+@inline Base.@propagate_inbounds pml_xgamma(P, ig, k, dt) = ismpml(P) ? mpml_gamma(P, P.gx[ig], P.gz[k][4], P.mdt[1]) : P.gx[ig]
+@inline Base.@propagate_inbounds pml_zgamma(P, ig, k, dt) = ismpml(P) ? mpml_gamma(P, P.gz[k], P.gx[ig][4], P.mdt[1]) : P.gz[k]
+"The memory variable (array, index) of a ξ part (`a`: the side layers, `ab`: M-PML, the bottom layer between them)."
+@inline Base.@propagate_inbounds function pml_xmem(P, ::Val{a}, ::Val{ab}, i, ig, k) where {a,ab}
+    (!ismpml(P) || ig <= P.np || ig > P.nxg - P.np) && return getfield(P, a), CartesianIndex(xslab(P, ig), k)
+    return getfield(P, ab), CartesianIndex(i, k)
+end
+"The memory variable (array, index) of an η part (`a`: the bottom layer, `as`: M-PML, the side layers above it)."
+@inline Base.@propagate_inbounds function pml_zmem(P, ::Val{a}, ::Val{as}, i, ig, k) where {a,as}
+    (!ismpml(P) || k <= size(getfield(P, a), 2)) && return getfield(P, a), CartesianIndex(i, k)
+    return getfield(P, as), CartesianIndex(xslab(P, ig), k)
+end
 @inline flags(F) = F isa Tuple ? F : (F, false, false)
 "The PML memory variables of a block (checkpoints)."
-pml_arrays(B) = (P = pmlof(B); P === nothing ? () : Tuple(v for (k, v) in pairs(P) if v isa AbstractArray && !(k in (:gx, :gy, :gz))))
+pml_arrays(B) = (P = pmlof(B); P === nothing ? () : Tuple(v for (k, v) in pairs(P) if v isa AbstractArray && !(k in (:gx, :gy, :gz, :mdt))))
 
 # Momentum: ρ J ∂t v_i = Dξ(Jξ_j σ_ij) + Dη(Jη_j σ_ij), Jξ = (J, 0), Jη = (Jx, 1), with SAT terms on the boundary nodes:
 # the traction removed (free surface on top; free or absorbing at the sides and bottom), half the traction mismatch at
@@ -289,12 +318,14 @@ pml_arrays(B) = (P = pmlof(B); P === nothing ? () : Tuple(v for (k, v) in pairs(
     useeta(p) || (z1 = z2 = zero(T))
     P = pmlof(B)
     if px && P !== nothing
-        γ, I = P.gx[i+ox], CartesianIndex(xslab(P, i + ox), k)
-        x1 = pml_stretch(P.xv1, I, γ, x1, dt); x2 = pml_stretch(P.xv2, I, γ, x2, dt)
+        γ = pml_xgamma(P, i + ox, k, dt)
+        x1 = pml_stretch(pml_xmem(P, Val(:xv1), Val(:xv1b), i, i + ox, k)..., γ, x1, dt)
+        x2 = pml_stretch(pml_xmem(P, Val(:xv2), Val(:xv2b), i, i + ox, k)..., γ, x2, dt)
     end
     if pz && P !== nothing
-        γ, I = P.gz[k], CartesianIndex(i, k)
-        z1 = pml_stretch(P.zv1, I, γ, z1, dt); z2 = pml_stretch(P.zv2, I, γ, z2, dt)
+        γ = pml_zgamma(P, i + ox, k, dt)
+        z1 = pml_stretch(pml_zmem(P, Val(:zv1), Val(:zv1s), i, i + ox, k)..., γ, z1, dt)
+        z2 = pml_stretch(pml_zmem(P, Val(:zv2), Val(:zv2s), i, i + ox, k)..., γ, z2, dt)
     end
     d1, d2 = x1 + z1, x2 + z2
     b1, b2 = damp ? (a1[i, k] * dt / 2, a2[i, k] * dt / 2) : (zero(T), zero(T))
@@ -355,12 +386,14 @@ end
     useeta(p) || (b = e = zero(T))
     P = pmlof(B)
     if px && P !== nothing
-        γ, I = P.gx[i+ox], CartesianIndex(xslab(P, i + ox), k)
-        a = pml_stretch(P.xa, I, γ, a, dt); c = pml_stretch(P.xc, I, γ, c, dt)
+        γ = pml_xgamma(P, i + ox, k, dt)
+        a = pml_stretch(pml_xmem(P, Val(:xa), Val(:xab), i, i + ox, k)..., γ, a, dt)
+        c = pml_stretch(pml_xmem(P, Val(:xc), Val(:xcb), i, i + ox, k)..., γ, c, dt)
     end
     if pz && P !== nothing
-        γ, I = P.gz[k], CartesianIndex(i, k)
-        b = pml_stretch(P.zb, I, γ, b, dt); e = pml_stretch(P.ze, I, γ, e, dt)
+        γ = pml_zgamma(P, i + ox, k, dt)
+        b = pml_stretch(pml_zmem(P, Val(:zb), Val(:zbs), i, i + ox, k)..., γ, b, dt)
+        e = pml_stretch(pml_zmem(P, Val(:ze), Val(:zes), i, i + ox, k)..., γ, e, dt)
     end
     stress_update_cv!(B, vc, dt, i, k, a, b, c, e)
 end
@@ -401,8 +434,8 @@ neighbour_sh(::Nothing) = nothing
     usexi(p) || (x1 = zero(T))
     useeta(p) || (z1 = zero(T))
     P = pmlof(B)
-    px && P !== nothing && (x1 = pml_stretch(P.xv1, CartesianIndex(xslab(P, i + ox), k), P.gx[i+ox], x1, dt))
-    pz && P !== nothing && (z1 = pml_stretch(P.zv1, CartesianIndex(i, k), P.gz[k], z1, dt))
+    px && P !== nothing && (x1 = pml_stretch(pml_xmem(P, Val(:xv1), Val(:xv1b), i, i + ox, k)..., pml_xgamma(P, i + ox, k, dt), x1, dt))
+    pz && P !== nothing && (z1 = pml_stretch(pml_zmem(P, Val(:zv1), Val(:zv1s), i, i + ox, k)..., pml_zgamma(P, i + ox, k, dt), z1, dt))
     b1 = damp ? a1[i, k] * dt / 2 : zero(T)
     V1[i, k] = ((1 - b1) * V1[i, k] + dt * iρJ[i, k] * (x1 + z1)) / (1 + b1)
 end
@@ -429,8 +462,8 @@ end
     usexi(p) || (c = zero(T))
     useeta(p) || (e = zero(T))
     P = pmlof(B)
-    px && P !== nothing && (c = pml_stretch(P.xa, CartesianIndex(xslab(P, i + ox), k), P.gx[i+ox], c, dt))
-    pz && P !== nothing && (e = pml_stretch(P.zb, CartesianIndex(i, k), P.gz[k], e, dt))
+    px && P !== nothing && (c = pml_stretch(pml_xmem(P, Val(:xa), Val(:xab), i, i + ox, k)..., pml_xgamma(P, i + ox, k, dt), c, dt))
+    pz && P !== nothing && (e = pml_stretch(pml_zmem(P, Val(:zb), Val(:zbs), i, i + ox, k)..., pml_zgamma(P, i + ox, k, dt), e, dt))
     stress_update_sh!(B, vc, dt, i, k, c, e)
 end
 @inline Base.@propagate_inbounds function stress_sh!(B, Bd, Bu, vc, dt, ::Val{:int}, i, k)
@@ -671,7 +704,8 @@ cv_max(par, x) = par === nothing ? x : MPI.Allreduce(x, max, par.comm)
 2D P-SV or SH (`wave`) on a deformed (terrain-following) `CartData` (see [`curvilinear_mesh`](@ref)); called by `simulate` for such a
 model. Keywords as in `simulate`, and: `dt = nothing` (from the spectral radius of the operator: 90 % of the leapfrog
 limit), `tmax` (duration) instead of `nt`, `absorber = :impedance` (or `:pml`: also a PML of `na = 20` nodes at the sides
-and the bottom, `:cerjan`: a sponge of `na` nodes, or `:none`: free sides and bottom), `jump = 0.05`
+and the bottom, `:mpml`: the multiaxial PML with `mpml_ratio = 0.1`, `:cerjan`: a sponge of `na` nodes, or `:none`: free
+sides and bottom), `jump = 0.05`
 (relative jump of vp or vs that makes a grid row an interface, see `find_blocks`), `nproc` MPI processes along x (2D) or
 `(npx, npy)` (3D): start julia with `mpiexec`; the columns are not split.
 """
@@ -680,12 +714,14 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
                               density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, snapshots=nothing, checkpoint=nothing, checkpoint_every=0,
                               restart=false, backend=CPU(),
                               T::Type{FT}=Float32, verbose=true, wavefield=model isa CartData, jump=0.05, wave=:psv, interpolation=:sinc,
-                              free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
+                              free_surface=:openswpc, nproc=1, driver=nothing, mpml_ratio=0.1, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
     wave in (:psv, :sh) || error("curvilinear grids: wave = :psv or :sh")
     sh = wave === :sh                                         # SH: vy (V1), σxy (S1), σyz (S2)
-    absorber in (:impedance, :pml, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :pml, :cerjan (with a sponge) or :none")
-    absorber === :pml && na < SBP_NB && error("curvilinear grids: the PML needs na >= $SBP_NB nodes (the boundary closures), got na = $na")
+    absorber in (:impedance, :pml, :mpml, :cerjan, :none) ||
+        error("curvilinear grids: absorber = :impedance, :pml, :mpml (multiaxial PML), :cerjan (with a sponge) or :none")
+    absorber in (:pml, :mpml) && na < SBP_NB && error("curvilinear grids: the PML needs na >= $SBP_NB nodes (the boundary closures), got na = $na")
+    absorber === :mpml && !(0 <= mpml_ratio <= 1) && error("mpml_ratio must be between 0 and 1, got $mpml_ratio")
     srcs = sources isa AbstractVector ? sources : [sources]
     all(s -> s isa Union{MomentTensorSource,ForceSource,TeleseismicWave}, srcs) ||
         error("curvilinear grids: MomentTensorSource, ForceSource and TeleseismicWave (PlaneWave: use TeleseismicWave)")
@@ -803,20 +839,24 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     end
     nb = length(hostblocks)
     # PML: profiles (identity until the time step is known) and memory variables (side layers: 2na columns; bottom: na rows)
-    pml = absorber === :pml
+    pml, mp = absorber in (:pml, :mpml), absorber === :mpml
     if pml
         nx >= 2na + 2SBP_NB + 1 || error("curvilinear grid: the PML (na = $na nodes) needs more than $(2na + 2SBP_NB) nodes in x")
         hostblocks[1].nz >= na + SBP_NB + 1 || error("curvilinear grid: the PML (na = $na nodes) needs more rows in the bottom block ($(hostblocks[1].nz))")
     end
-    ident = ntuple(q -> FT(isodd(q)), 4)
+    ident = mp ? FT.((0, 0, 1, 0)) : ntuple(q -> FT(isodd(q)), 4)   # (no damping until the time step is known)
     blocks = Tuple(map(enumerate(hostblocks)) do (bi, H)
         z() = KernelAbstractions.zeros(backend, FT, nl, H.nz)
         zs(n...) = KernelAbstractions.zeros(backend, FT, n...)
         nzp = bi == 1 ? na : 0
         player = !pml ? (;) : sh ? (; pml=(; gx=dev(fill(ident, nx)), gz=dev(fill(ident, H.nz)), np=na, nxg=nx, xv1=zs(2na, H.nz),
-                                             xa=zs(2na, H.nz), zv1=zs(nl, nzp), zb=zs(nl, nzp))) :
+                                             xa=zs(2na, H.nz), zv1=zs(nl, nzp), zb=zs(nl, nzp),
+                                             (mp ? (; xv1b=zs(nl, nzp), xab=zs(nl, nzp), zv1s=zs(2na, H.nz), zbs=zs(2na, H.nz),
+                                                    mpml=FT(mpml_ratio), mdt=zs(1)) : (;))...)) :
                   (; pml=(; gx=dev(fill(ident, nx)), gz=dev(fill(ident, H.nz)), np=na, nxg=nx, xv1=zs(2na, H.nz), xv2=zs(2na, H.nz),
-                            xa=zs(2na, H.nz), xc=zs(2na, H.nz), zv1=zs(nl, nzp), zv2=zs(nl, nzp), zb=zs(nl, nzp), ze=zs(nl, nzp)))
+                            xa=zs(2na, H.nz), xc=zs(2na, H.nz), zv1=zs(nl, nzp), zv2=zs(nl, nzp), zb=zs(nl, nzp), ze=zs(nl, nzp),
+                            (mp ? (; xv1b=zs(nl, nzp), xv2b=zs(nl, nzp), xab=zs(nl, nzp), xcb=zs(nl, nzp), zv1s=zs(2na, H.nz),
+                                   zv2s=zs(2na, H.nz), zbs=zs(2na, H.nz), zes=zs(2na, H.nz), mpml=FT(mpml_ratio), mdt=zs(1)) : (;))...))
         loc(A) = dev(FT.(A[xr .- ow, :]))
         mem = attenuation ? (; R11=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz), R22=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz),
                                R12=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz)) : (;)
@@ -854,7 +894,8 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
             l0, w = a - ox - 1, b - a + 1
             for (k1, k2, kind, pz) in zsegs
                 k2 < k1 && continue
-                flag = !xint ? Val((false, px, pz)) : (px || pz) ? Val((true, px, pz)) : kind === :mid ? Val(:int) : Val(true)
+                qx, qz = mp ? (px || pz, px || pz) : (px, pz)  # (M-PML: both directions in all layers)
+                flag = !xint ? Val((false, qx, qz)) : (qx || qz) ? Val((true, qx, qz)) : kind === :mid ? Val(:int) : Val(true)
                 push!(R, ((l0, k1 - 1), (w, k2 - k1 + 1), flag))
             end
         end
@@ -902,11 +943,15 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     if pml                      # the profiles of the time step (as OpenSWPC: 6 km/s, fcut the highest source frequency)
         fcut = maximum(s -> 1 / s.trise, allsrcs)
         xs = (gx .- gx[1]) ./ 1e3
-        copyto!.(getfield.(getfield.(blocks, :pml), :gx), Ref([FT.(damping_profile(x, xs[na+1], xs[end], na, dt, fcut)) for x in xs]))
+        # (M-PML: the profiles (d, α, 1/κ, d), also of the rows above the bottom layer: no damping, α of beyond it)
+        prof(x, h, L) = mp ? (c = cfs_profile(x, h, L, na, fcut); FT.((c[1], c[2], 1 / c[3], c[1]))) : FT.(damping_profile(x, h, L, na, dt, fcut))
+        copyto!.(getfield.(getfield.(blocks, :pml), :gx), Ref([prof(x, xs[na+1], xs[end]) for x in xs]))
         H1 = hostblocks[1]
         # (the heights of the rows of the first column: the same on every process, exactly)
         zrow = cv_sum(par, ia == 1 ? (H1.Z[1, :] .- H1.Z[1, 1]) ./ 1e3 : zeros(H1.nz))
-        copyto!(blocks[1].pml.gz, [FT.(damping_profile(z, zrow[na+1], 1e9, na, dt, fcut)) for z in zrow])
+        copyto!(blocks[1].pml.gz, [prof(z, zrow[na+1], 1e9) for z in zrow])
+        mp && foreach(b -> fill!(blocks[b].pml.gz, prof(1e8, 1.0, 1e9)), 2:nb)
+        mp && foreach(B -> fill!(B.pml.mdt, dtT), blocks)
     end
     # locate points: block and η̂ (Lagrange interpolation of the mesh columns, bisection)
     function locate(x, z)

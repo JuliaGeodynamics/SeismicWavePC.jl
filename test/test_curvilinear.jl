@@ -369,6 +369,8 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         err(r) = maximum(n -> norm(r.v[:, :, n] .- ref.v[:, :, n]) / norm(ref.v[:, :, n]), eachindex(sts))
         ei, ep = err(simulate(mkf(161, 81); kw..., absorber=:impedance)), err(simulate(mkf(161, 81); kw..., absorber=:pml))
         @test ep < 0.01 && ei > 10ep                                              # (0.7 % against 17 %)
+        em = err(simulate(mkf(161, 81); kw..., absorber=:mpml))
+        @test ep < em < 0.03                                                      # (M-PML, ratio 0.1: 1.7 %)
         # gradient and Born (2D, attenuation, an interface; perturbations in the layers)
         mesh = curvilinear_mesh(range(-8, 8, length=61), [x -> 1.2 * exp(-x^2 / 12), x -> -4.0 + 0.6 * sin(2π * x / 10)]; dz=0.25, bottom=-10)
         X, Z = mesh.x.val, mesh.z.val
@@ -392,6 +394,58 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         P = simulate(addfield(mesh, merge(base, (; vs=base.vs .+ 1e-3 .* δv))); kw..., stations=sts, verbose=false)
         M = simulate(addfield(mesh, merge(base, (; vs=base.vs .- 1e-3 .* δv))); kw..., stations=sts, verbose=false)
         @test maximum(abs, δd.v .- (P.v .- M.v) ./ 2e-3) < 1e-6 * maximum(abs, δd.v)
+    end
+    @testset "multiaxial PML (absorber = :mpml)" begin
+        # the reproducer of issue #6, coarse: under a soft surface layer the classical PML grows exponentially, the M-PML decays
+        mesh = curvilinear_mesh(range(0, 10, length=101), [x -> 0.0, x -> -0.4]; dz=0.1, bottom=-3.0)
+        soft = mesh.z.val .>= -0.4 - 1e-9
+        m = addfield(mesh, (; rho=ifelse.(soft, 2000.0, 2700.0), vp=ifelse.(soft, 1.6, 5.8), vs=ifelse.(soft, 0.35, 3.35)))
+        kw = (; grid=:curvilinear, tmax=100.0, sources=MomentTensorSource(5.0, 0.0, -1.0, 1e15, (1.0, 0.0, -1.0, 0.0, 1.0, 0.0); trise=1.5),
+              stations=[Station("pml", 9.75, 0.0, 0.0; surface=true), Station("in", 7.0, 0.0, 0.0; surface=true)], record_every=10,
+              verbose=false, wavefield=false, T=Float64)
+        growth(r) = maximum(abs, r.v[r.t .>= 80, :, :]) / maximum(abs, r.v[r.t .< 20, :, :])     # last 20 s / first 20 s
+        @test growth(simulate(m; kw..., absorber=:pml)) > 1e3
+        @test growth(simulate(m; kw..., absorber=:mpml)) < 0.3          # (0.11: the soft layer reverberates, slowly decaying)
+        @test_throws "mpml_ratio" simulate(m; kw..., tmax=0.1, absorber=:mpml, mpml_ratio=1.5)
+        # gradient (2D, attenuation, SH too): perturbations in a corner of the layers and in the bottom layer
+        mesh = curvilinear_mesh(range(-8, 8, length=61), [x -> 1.2 * exp(-x^2 / 12), x -> -4.0 + 0.6 * sin(2π * x / 10)]; dz=0.25, bottom=-10)
+        X, Z = mesh.x.val, mesh.z.val
+        low = Z .< -4.0 .+ 0.6 .* sin.(2π .* X ./ 10)
+        o = ones(size(X))
+        base = (; rho=ifelse.(low, 2900.0, 2600.0), vp=ifelse.(low, 6.5, 5.5), vs=ifelse.(low, 3.75, 3.2), Qp=100 .* o, Qs=50 .* o)
+        srcs = [DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0), ForceSource(6.0, 0.0, -9.0; fy=1e14, fz=1e14, trise=1.0)]
+        sts = [[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in -6:3:6]; Station("d", 7.0, 0.0, -9.0)]
+        r0 = simulate(addfield(mesh, base); tmax=0.05, sources=srcs, T=Float64, verbose=false)
+        bump(c, s) = @. exp(-((X - c[1])^2 + (Z - c[2])^2) / s)
+        for wave in (:psv, :sh)
+            kw = (; dt=r0.t[2] - r0.t[1], tmax=3.0, sources=srcs, T=Float64, absorber=:mpml, mpml_ratio=0.2, na=10, wave)
+            obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* 0.97))); kw..., stations=sts, verbose=false)
+            J, g, _ = misfit_gradient(addfield(mesh, base), obs; kw...)
+            Jof(m) = L2Misfit()(simulate(m; kw..., stations=sts, verbose=false).v, obs.v, obs.t)[1]
+            for (f, δ) in ((:vs, 0.05 .* bump((7.3, -9.4), 1)), (:rho, 50 .* bump((0.5, -9.4), 1)))
+                fd = (Jof(addfield(mesh, merge(base, (; f => base[f] .+ 1e-3 .* δ)))) - Jof(addfield(mesh, merge(base, (; f => base[f] .- 1e-3 .* δ))))) / 2e-3
+                @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
+            end
+        end
+        # 3D: a model and a source symmetric under x <-> y give symmetric seismograms (the damping of every part); gradient
+        mesh = curvilinear_mesh(range(-5, 5, length=29), range(-5, 5, length=29), [(x, y) -> 0.5 * exp(-(x^2 + y^2) / 8)]; dz=0.4, bottom=-7)
+        o = ones(size(mesh.x.val))
+        m3 = addfield(mesh, (; rho=2600 .* o, vp=5.5 .* o, vs=3.2 .* o))
+        src = MomentTensorSource(-1.5, -1.5, -2.0, 1e15, (1.0, 1.0, 0.5, 0.3, 0.3, 0.2); trise=0.5)
+        st = [Station("a", 4.5, 2.0, 0.0; surface=true), Station("b", 2.0, 4.5, 0.0; surface=true)]
+        r3 = simulate(m3; grid=:curvilinear, tmax=4.0, sources=src, stations=st, T=Float64, absorber=:mpml, mpml_ratio=0.2, na=6, verbose=false)
+        @test maximum(abs, r3.v[:, 1, 1] .- r3.v[:, 2, 2]) < 1e-10 * maximum(abs, r3.v) &&
+              maximum(abs, r3.v[:, 3, 1] .- r3.v[:, 3, 2]) < 1e-10 * maximum(abs, r3.v)
+        X3, Y3, Z3 = mesh.x.val, mesh.y.val, mesh.z.val
+        kw = (; dt=r3.t[2] - r3.t[1], tmax=3.0, sources=src, T=Float64, absorber=:mpml, mpml_ratio=0.2, na=6)
+        sts3 = [Station("s$x$y", Float64(x), Float64(y), 0.0; surface=true) for x in -3:3:3 for y in (-3, 3)]
+        obs = simulate(addfield(mesh, (; rho=2600 .* o, vp=5.5 .* o, vs=3.1 .* o)); kw..., stations=sts3, verbose=false)
+        J, g, _ = misfit_gradient(m3, obs; kw...)
+        Jof3(m) = L2Misfit()(simulate(m; kw..., stations=sts3, verbose=false).v, obs.v, obs.t)[1]
+        δ = 0.05 .* exp.(-((X3 .- 4.5) .^ 2 .+ (Y3 .- 4) .^ 2 .+ (Z3 .+ 6) .^ 2) ./ 2)                   # in a corner, at the bottom
+        fd = (Jof3(addfield(mesh, (; rho=2600 .* o, vp=5.5 .* o, vs=3.2 .* o .+ 1e-3 .* δ))) -
+              Jof3(addfield(mesh, (; rho=2600 .* o, vp=5.5 .* o, vs=3.2 .* o .- 1e-3 .* δ)))) / 2e-3
+        @test sum(g.fields.vs .* δ) ≈ fd rtol = 1e-6
     end
     @testset "the mesh of GMG (curvilinear_grid with SBP spacing)" begin
         if isdefined(GeophysicalModelGenerator, :curvilinear_grid)              # (GMG ≥ 0.10.2)

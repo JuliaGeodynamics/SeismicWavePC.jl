@@ -26,6 +26,32 @@ neighbour3(::Nothing) = nothing
 # applies them separately: `part`; the PML stretches them, see curvilinear.jl).
 @inline flags3(F) = length(F) == 3 ? (F..., false, false, false) : F
 @inline yslab(P, jg) = jg <= P.np ? jg : jg - P.nyg + 2P.np
+# M-PML (see curvilinear.jl): the coefficients per node, d∥ the sum of the other two axes; the memory variables of a part
+# outside its own layer: in the layers of the other axes (4D arrays, the component last: `x…y`, `x…z` for ξ in the y layers
+# and the bottom, `y…x`, `y…z`, `z…x`, `z…y`), each node in one of them. Which one: `w`, the layers of the region (a constant of
+# its kernel, the flags' 7th entry: branches on the node would blow up the kernels, beyond what Metal's compiler handles).
+@inline Base.@propagate_inbounds pml_xgamma3(P, ig, jg, k) = ismpml(P) ? mpml_gamma(P, P.gx[ig], P.gy[jg][4] + P.gz[k][4], P.mdt[1]) : P.gx[ig]
+@inline Base.@propagate_inbounds pml_ygamma3(P, ig, jg, k) = ismpml(P) ? mpml_gamma(P, P.gy[jg], P.gx[ig][4] + P.gz[k][4], P.mdt[1]) : P.gy[jg]
+@inline Base.@propagate_inbounds pml_zgamma3(P, ig, jg, k) = ismpml(P) ? mpml_gamma(P, P.gz[k], P.gx[ig][4] + P.gy[jg][4], P.mdt[1]) : P.gz[k]
+@inline layers3(F) = length(F) == 7 ? F[7] : (false, false, false)
+"The stretched ξ part `d` (memory `a` in the x layers; M-PML: `ay` in the y layers, `az` in the bottom one, component `c`)."
+@inline Base.@propagate_inbounds function stretch_x3(P, i, j, k, ig, jg, w, ::Val{a}, ::Val{ay}, ::Val{az}, c, γ, d, dt) where {a,ay,az}
+    (!ismpml(P) || w[1]) && return pml_stretch(getfield(P, a), CartesianIndex(xslab(P, ig), j, k), γ, d, dt)
+    w[2] && return pml_stretch(getfield(P, ay), CartesianIndex(i, yslab(P, jg), k, c), γ, d, dt)
+    return pml_stretch(getfield(P, az), CartesianIndex(i, j, k, c), γ, d, dt)
+end
+"The stretched ψ part (memory `a` in the y layers; M-PML: `ax` in the x layers, `az` in the bottom one)."
+@inline Base.@propagate_inbounds function stretch_y3(P, i, j, k, ig, jg, w, ::Val{a}, ::Val{ax}, ::Val{az}, c, γ, d, dt) where {a,ax,az}
+    (!ismpml(P) || w[2]) && return pml_stretch(getfield(P, a), CartesianIndex(i, yslab(P, jg), k), γ, d, dt)
+    w[1] && return pml_stretch(getfield(P, ax), CartesianIndex(xslab(P, ig), j, k, c), γ, d, dt)
+    return pml_stretch(getfield(P, az), CartesianIndex(i, j, k, c), γ, d, dt)
+end
+"The stretched η part (memory `a` in the bottom layer; M-PML: `ax` in the x layers above it, `ay` in the y layers)."
+@inline Base.@propagate_inbounds function stretch_z3(P, i, j, k, ig, jg, w, ::Val{a}, ::Val{ax}, ::Val{ay}, c, γ, d, dt) where {a,ax,ay}
+    (!ismpml(P) || w[3]) && return pml_stretch(getfield(P, a), CartesianIndex(i, j, k), γ, d, dt)
+    w[1] && return pml_stretch(getfield(P, ax), CartesianIndex(xslab(P, ig), j, k, c), γ, d, dt)
+    return pml_stretch(getfield(P, ay), CartesianIndex(i, yslab(P, jg), k, c), γ, d, dt)
+end
 @inline Base.@propagate_inbounds function momentum3_cv!(B, Bd, Bu, dt, damp, ::Val{F}, i, j, k) where {F}
     (; V1, V2, V3, S11, S22, S33, S23, S13, S12, G1, G2, G3, J, iρJ, a1, a2, a3, hξ, hψ, hη, ox, oy, nxg, nyg) = B
     flags = flags3(F)
@@ -75,16 +101,22 @@ neighbour3(::Nothing) = nothing
     useeta(p) || (z1 = z2 = z3 = zero(T))
     P = pmlof(B)
     if flags[4] && P !== nothing
-        γ, I = P.gx[i+ox], CartesianIndex(xslab(P, i + ox), j, k)
-        x1 = pml_stretch(P.xv1, I, γ, x1, dt); x2 = pml_stretch(P.xv2, I, γ, x2, dt); x3 = pml_stretch(P.xv3, I, γ, x3, dt)
+        γ, g = pml_xgamma3(P, i + ox, j + oy, k), (P, i, j, k, i + ox, j + oy, layers3(F))
+        x1 = stretch_x3(g..., Val(:xv1), Val(:xvy), Val(:xvz), 1, γ, x1, dt)
+        x2 = stretch_x3(g..., Val(:xv2), Val(:xvy), Val(:xvz), 2, γ, x2, dt)
+        x3 = stretch_x3(g..., Val(:xv3), Val(:xvy), Val(:xvz), 3, γ, x3, dt)
     end
     if flags[5] && P !== nothing
-        γ, I = P.gy[j+oy], CartesianIndex(i, yslab(P, j + oy), k)
-        y1 = pml_stretch(P.yv1, I, γ, y1, dt); y2 = pml_stretch(P.yv2, I, γ, y2, dt); y3 = pml_stretch(P.yv3, I, γ, y3, dt)
+        γ, g = pml_ygamma3(P, i + ox, j + oy, k), (P, i, j, k, i + ox, j + oy, layers3(F))
+        y1 = stretch_y3(g..., Val(:yv1), Val(:yvx), Val(:yvz), 1, γ, y1, dt)
+        y2 = stretch_y3(g..., Val(:yv2), Val(:yvx), Val(:yvz), 2, γ, y2, dt)
+        y3 = stretch_y3(g..., Val(:yv3), Val(:yvx), Val(:yvz), 3, γ, y3, dt)
     end
     if flags[6] && P !== nothing
-        γ, I = P.gz[k], CartesianIndex(i, j, k)
-        z1 = pml_stretch(P.zv1, I, γ, z1, dt); z2 = pml_stretch(P.zv2, I, γ, z2, dt); z3 = pml_stretch(P.zv3, I, γ, z3, dt)
+        γ, g = pml_zgamma3(P, i + ox, j + oy, k), (P, i, j, k, i + ox, j + oy, layers3(F))
+        z1 = stretch_z3(g..., Val(:zv1), Val(:zvx), Val(:zvy), 1, γ, z1, dt)
+        z2 = stretch_z3(g..., Val(:zv2), Val(:zvx), Val(:zvy), 2, γ, z2, dt)
+        z3 = stretch_z3(g..., Val(:zv3), Val(:zvx), Val(:zvy), 3, γ, z3, dt)
     end
     d1, d2, d3 = x1 + y1 + z1, x2 + y2 + z2, x3 + y3 + z3
     r = iρJ[i, j, k]
@@ -134,16 +166,22 @@ end
     useeta(p) || (z1 = z2 = z3 = zero(T))
     P = pmlof(B)
     if flags[4] && P !== nothing
-        γ, I = P.gx[i+ox], CartesianIndex(xslab(P, i + ox), j, k)
-        x1 = pml_stretch(P.xa1, I, γ, x1, dt); x2 = pml_stretch(P.xa2, I, γ, x2, dt); x3 = pml_stretch(P.xa3, I, γ, x3, dt)
+        γ, g = pml_xgamma3(P, i + ox, j + oy, k), (P, i, j, k, i + ox, j + oy, layers3(F))
+        x1 = stretch_x3(g..., Val(:xa1), Val(:xay), Val(:xaz), 1, γ, x1, dt)
+        x2 = stretch_x3(g..., Val(:xa2), Val(:xay), Val(:xaz), 2, γ, x2, dt)
+        x3 = stretch_x3(g..., Val(:xa3), Val(:xay), Val(:xaz), 3, γ, x3, dt)
     end
     if flags[5] && P !== nothing
-        γ, I = P.gy[j+oy], CartesianIndex(i, yslab(P, j + oy), k)
-        y1 = pml_stretch(P.ya1, I, γ, y1, dt); y2 = pml_stretch(P.ya2, I, γ, y2, dt); y3 = pml_stretch(P.ya3, I, γ, y3, dt)
+        γ, g = pml_ygamma3(P, i + ox, j + oy, k), (P, i, j, k, i + ox, j + oy, layers3(F))
+        y1 = stretch_y3(g..., Val(:ya1), Val(:yax), Val(:yaz), 1, γ, y1, dt)
+        y2 = stretch_y3(g..., Val(:ya2), Val(:yax), Val(:yaz), 2, γ, y2, dt)
+        y3 = stretch_y3(g..., Val(:ya3), Val(:yax), Val(:yaz), 3, γ, y3, dt)
     end
     if flags[6] && P !== nothing
-        γ, I = P.gz[k], CartesianIndex(i, j, k)
-        z1 = pml_stretch(P.za1, I, γ, z1, dt); z2 = pml_stretch(P.za2, I, γ, z2, dt); z3 = pml_stretch(P.za3, I, γ, z3, dt)
+        γ, g = pml_zgamma3(P, i + ox, j + oy, k), (P, i, j, k, i + ox, j + oy, layers3(F))
+        z1 = stretch_z3(g..., Val(:za1), Val(:zax), Val(:zay), 1, γ, z1, dt)
+        z2 = stretch_z3(g..., Val(:za2), Val(:zax), Val(:zay), 2, γ, z2, dt)
+        z3 = stretch_z3(g..., Val(:za3), Val(:zax), Val(:zay), 3, γ, z3, dt)
     end
     I = CartesianIndex(i, j, k)
     iJ = 1 / J[I]
@@ -260,10 +298,12 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
                                 density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing, snapshots=nothing, checkpoint=nothing, checkpoint_every=0,
                               restart=false, backend=CPU(),
                                 T::Type{FT}=Float32, verbose=true, wavefield=model isa CartData, jump=0.05, wave=:psv, interpolation=:sinc,
-                                free_surface=:openswpc, nproc=1, driver=nothing, kwargs...) where {FT}
+                                free_surface=:openswpc, nproc=1, driver=nothing, mpml_ratio=0.1, kwargs...) where {FT}
     isempty(kwargs) || error("simulate on a curvilinear grid: not (yet) supported: $(join(keys(kwargs), ", "))")
-    absorber in (:impedance, :pml, :cerjan, :none) || error("curvilinear grids: absorber = :impedance, :pml, :cerjan (with a sponge) or :none")
-    absorber === :pml && na < SBP_NB && error("curvilinear grids: the PML needs na >= $SBP_NB nodes (the boundary closures), got na = $na")
+    absorber in (:impedance, :pml, :mpml, :cerjan, :none) ||
+        error("curvilinear grids: absorber = :impedance, :pml, :mpml (multiaxial PML), :cerjan (with a sponge) or :none")
+    absorber in (:pml, :mpml) && na < SBP_NB && error("curvilinear grids: the PML needs na >= $SBP_NB nodes (the boundary closures), got na = $na")
+    absorber === :mpml && !(0 <= mpml_ratio <= 1) && error("mpml_ratio must be between 0 and 1, got $mpml_ratio")
     srcs = sources isa AbstractVector ? sources : [sources]
     all(s -> s isa Union{MomentTensorSource,ForceSource,TeleseismicWave}, srcs) ||
         error("curvilinear grids: MomentTensorSource, ForceSource and TeleseismicWave (PlaneWave: use TeleseismicWave)")
@@ -394,12 +434,12 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
     end
     nb = length(hostblocks)
     # PML: profiles (identity until the time step is known) and memory variables (x, y layers: 2na columns, 2na rows; bottom: na)
-    pml = absorber === :pml
+    pml, mp = absorber in (:pml, :mpml), absorber === :mpml
     if pml
         min(nx, ny) >= 2na + 2SBP_NB + 1 || error("curvilinear grid: the PML (na = $na nodes) needs more than $(2na + 2SBP_NB) nodes in x and y")
         hostblocks[1].nz >= na + SBP_NB + 1 || error("curvilinear grid: the PML (na = $na nodes) needs more rows in the bottom block ($(hostblocks[1].nz))")
     end
-    ident = ntuple(q -> FT(isodd(q)), 4)
+    ident = mp ? FT.((0, 0, 1, 0)) : ntuple(q -> FT(isodd(q)), 4)   # (no damping until the time step is known)
     blocks = Tuple(map(enumerate(hostblocks)) do (bi, H)
         zs(n...) = KernelAbstractions.zeros(backend, FT, n...)
         nzp = bi == 1 ? na : 0
@@ -408,7 +448,9 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
                                  xa2=zs(2na, nly, H.nz), xa3=zs(2na, nly, H.nz), yv1=zs(nlx, 2na, H.nz), yv2=zs(nlx, 2na, H.nz),
                                  yv3=zs(nlx, 2na, H.nz), ya1=zs(nlx, 2na, H.nz), ya2=zs(nlx, 2na, H.nz), ya3=zs(nlx, 2na, H.nz),
                                  zv1=zs(nlx, nly, nzp), zv2=zs(nlx, nly, nzp), zv3=zs(nlx, nly, nzp), za1=zs(nlx, nly, nzp),
-                                 za2=zs(nlx, nly, nzp), za3=zs(nlx, nly, nzp))) : (;)
+                                 za2=zs(nlx, nly, nzp), za3=zs(nlx, nly, nzp),
+                                 (mp ? (; xvy=zs(nlx, 2na, H.nz, 3), xvz=zs(nlx, nly, nzp, 3), yvx=zs(2na, nly, H.nz, 3), yvz=zs(nlx, nly, nzp, 3), zvx=zs(2na, nly, H.nz, 3), zvy=zs(nlx, 2na, H.nz, 3),
+                                        xay=zs(nlx, 2na, H.nz, 3), xaz=zs(nlx, nly, nzp, 3), yax=zs(2na, nly, H.nz, 3), yaz=zs(nlx, nly, nzp, 3), zax=zs(2na, nly, H.nz, 3), zay=zs(nlx, 2na, H.nz, 3), mpml=FT(mpml_ratio), mdt=zs(1)) : (;))...)) : (;)
         z() = KernelAbstractions.zeros(backend, FT, nlx, nly, H.nz)
         R() = KernelAbstractions.zeros(backend, FT, NM, nlx, nly, H.nz)
         loc(A) = dev(FT.(A[xr .- ow, yr .- owy, :]))
@@ -440,7 +482,9 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
     end
     regions = map(enumerate(hostblocks)) do (bi, H)
         p, pz = pml ? na : 0, pml && bi == 1 ? na : 0
-        Tuple(((a[1], b[1], c[1]), (a[2], b[2], c[2]), a[4] || b[4] || c[4] ? Val((a[3], b[3], c[3], a[4], b[4], c[4])) : Val((a[3], b[3], c[3])))
+        # (M-PML: all three directions in all layers)
+        fl(a, b, c) = (q = a[4] || b[4] || c[4]; mp ? (a[3], b[3], c[3], q, q, q, (a[4], b[4], c[4])) : (a[3], b[3], c[3], a[4], b[4], c[4]))
+        Tuple(((a[1], b[1], c[1]), (a[2], b[2], c[2]), a[4] || b[4] || c[4] ? Val(fl(a, b, c)) : Val((a[3], b[3], c[3])))
               for a in seg(nx, ia, ib, ox, p), b in seg(ny, ja, jb, oy, p), c in seg(H.nz, 1, H.nz, 0, pz, true))
     end
     # (on `blks`: the blocks, or blocks of other arrays with the same mesh: the operators of the adjoint)
@@ -487,13 +531,17 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
     vc = attenuation ? memory_coefficients(ts, dt, FT) : nothing
     if pml                      # the profiles of the time step (as OpenSWPC: 6 km/s, fcut the highest source frequency)
         fcut = maximum(s -> 1 / s.trise, allsrcs)
-        prof(g) = (xs = (g .- g[1]) ./ 1e3; [FT.(damping_profile(x, xs[na+1], xs[end], na, dt, fcut)) for x in xs])
+        # (M-PML: the profiles (d, α, 1/κ, d), also of the rows above the bottom layer: no damping, α of beyond it)
+        pr(x, h, L) = mp ? (c = cfs_profile(x, h, L, na, fcut); FT.((c[1], c[2], 1 / c[3], c[1]))) : FT.(damping_profile(x, h, L, na, dt, fcut))
+        prof(g) = (xs = (g .- g[1]) ./ 1e3; [pr(x, xs[na+1], xs[end]) for x in xs])
         copyto!.(getfield.(getfield.(blocks, :pml), :gx), Ref(prof(gx)))
         copyto!.(getfield.(getfield.(blocks, :pml), :gy), Ref(prof(gy)))
         H1 = hostblocks[1]
         # (the heights of the rows of the first column: the same on every process, exactly)
         zrow = cv_sum(par, ia == 1 && ja == 1 ? (H1.Z[1, 1, :] .- H1.Z[1, 1, 1]) ./ 1e3 : zeros(H1.nz))
-        copyto!(blocks[1].pml.gz, [FT.(damping_profile(z, zrow[na+1], 1e9, na, dt, fcut)) for z in zrow])
+        copyto!(blocks[1].pml.gz, [pr(z, zrow[na+1], 1e9) for z in zrow])
+        mp && foreach(b -> fill!(blocks[b].pml.gz, pr(1e8, 1.0, 1e9)), 2:nb)
+        mp && foreach(B -> fill!(B.pml.mdt, dtT), blocks)
     end
     # locate points: block and η̂ (Lagrange interpolation of the columns, bisection)
     function locate(x, y, z)
