@@ -40,7 +40,7 @@ sgrad[1].M, sgrad[1].t0                                                 # ∂J/�
 - **Method:** adjoint-state method with checkpointing. The forward wavefield is saved every few steps (balancing host and device
   memory) and the steps in between are recomputed; the adjoint simulation runs backwards.
 - **Exactness:** the adjoint kernels are the exact transposes of the forward kernels. They include the 2nd-order cells at free
-  surfaces and the PML (with adjoint PML memory variables), and adjoint memory variables of attenuation give the `Qp`, `Qs`
+  surfaces and the PML or M-PML (with adjoint PML memory variables), and adjoint memory variables of attenuation give the `Qp`, `Qs`
   gradients. The result agrees with reverse-mode automatic differentiation to round-off (10⁻¹⁵ with `T = Float64`) in 2D and 3D.
   It is approximate only for the Cerjan sponge, the side extrapolation of plane waves, and the density in the source cell of
   P-SV body forces.

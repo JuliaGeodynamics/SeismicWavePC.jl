@@ -33,8 +33,8 @@ end
 # the adjoint memory variable m̄ ← γ₃ m̄ + γ₂ x. `Δ` holds δ = W - x of every derivative (zero outside the PML), so the adjoint
 # kernels gather x + δ; `stretch_*!` compute δ and update m̄ (`P.mem`) after every adjoint update of the velocities (`v`:
 # the derivatives of the velocity kernel) and the stresses (`s`: those of the stress kernel).
-Base.@propagate_inbounds function stretch1!(δ, mb, X, prof, I, J, ix, dt)
-    γ = prof[ix]
+Base.@propagate_inbounds function stretch1!(δ, mb, X, P, a, g, I, J, ix, dt)
+    γ = pml_gamma(P, a, g, I, ix, dt)
     x, m = X[I], mb[J]
     δ[I] = (γ[1] - 1) * x + γ[4] * dt * m
     mb[J] = γ[3] * m + γ[2] * x
@@ -42,37 +42,37 @@ end
 
 Base.@propagate_inbounds function stretch_v_psv!(Δ, Q, P, dt, i, k)
     I = CartesianIndex(i, k); J = I - P.lo; m = P.mem
-    stretch1!(Δ.axSxx, m.axSxx, Q.Vx, P.gxe, I, J, i, dt); stretch1!(Δ.azSxz, m.azSxz, Q.Vx, P.gzc, I, J, k, dt)
-    stretch1!(Δ.axSxz, m.axSxz, Q.Vz, P.gxc, I, J, i, dt); stretch1!(Δ.azSzz, m.azSzz, Q.Vz, P.gze, I, J, k, dt)
+    stretch1!(Δ.axSxx, m.axSxx, Q.Vx, P, :axSxx, :gxe, I, J, i, dt); stretch1!(Δ.azSxz, m.azSxz, Q.Vx, P, :azSxz, :gzc, I, J, k, dt)
+    stretch1!(Δ.axSxz, m.axSxz, Q.Vz, P, :axSxz, :gxc, I, J, i, dt); stretch1!(Δ.azSzz, m.azSzz, Q.Vz, P, :azSzz, :gze, I, J, k, dt)
 end
 Base.@propagate_inbounds function stretch_s_psv!(Δ, Q, P, dt, i, k)
     I = CartesianIndex(i, k); J = I - P.lo; m = P.mem
-    stretch1!(Δ.axVx, m.axVx, Q.Sxx, P.gxc, I, J, i, dt); stretch1!(Δ.azVz, m.azVz, Q.Szz, P.gzc, I, J, k, dt)
-    stretch1!(Δ.axVz, m.axVz, Q.Sxz, P.gxe, I, J, i, dt); stretch1!(Δ.azVx, m.azVx, Q.Sxz, P.gze, I, J, k, dt)
+    stretch1!(Δ.axVx, m.axVx, Q.Sxx, P, :axVx, :gxc, I, J, i, dt); stretch1!(Δ.azVz, m.azVz, Q.Szz, P, :azVz, :gzc, I, J, k, dt)
+    stretch1!(Δ.axVz, m.axVz, Q.Sxz, P, :axVz, :gxe, I, J, i, dt); stretch1!(Δ.azVx, m.azVx, Q.Sxz, P, :azVx, :gze, I, J, k, dt)
 end
 Base.@propagate_inbounds function stretch_v_sh!(Δ, Q, P, dt, i, k)
     I = CartesianIndex(i, k); J = I - P.lo; m = P.mem
-    stretch1!(Δ.azSyz, m.azSyz, Q.Vy, P.gzc, I, J, k, dt); stretch1!(Δ.axSxy, m.axSxy, Q.Vy, P.gxc, I, J, i, dt)
+    stretch1!(Δ.azSyz, m.azSyz, Q.Vy, P, :azSyz, :gzc, I, J, k, dt); stretch1!(Δ.axSxy, m.axSxy, Q.Vy, P, :axSxy, :gxc, I, J, i, dt)
 end
 Base.@propagate_inbounds function stretch_s_sh!(Δ, Q, P, dt, i, k)
     I = CartesianIndex(i, k); J = I - P.lo; m = P.mem
-    stretch1!(Δ.axVy, m.axVy, Q.Sxy, P.gxe, I, J, i, dt); stretch1!(Δ.azVy, m.azVy, Q.Syz, P.gze, I, J, k, dt)
+    stretch1!(Δ.axVy, m.axVy, Q.Sxy, P, :axVy, :gxe, I, J, i, dt); stretch1!(Δ.azVy, m.azVy, Q.Syz, P, :azVy, :gze, I, J, k, dt)
 end
 Base.@propagate_inbounds function stretch_v_3d!(Δ, Q, P, dt, i, j, k)
     I = CartesianIndex(i, j, k); J = I - P.lo; m = P.mem
-    stretch1!(Δ.axSxx, m.axSxx, Q.Vx, P.gxe, I, J, i, dt); stretch1!(Δ.aySxy, m.aySxy, Q.Vx, P.gyc, I, J, j, dt)
-    stretch1!(Δ.azSxz, m.azSxz, Q.Vx, P.gzc, I, J, k, dt); stretch1!(Δ.axSxy, m.axSxy, Q.Vy, P.gxc, I, J, i, dt)
-    stretch1!(Δ.aySyy, m.aySyy, Q.Vy, P.gye, I, J, j, dt); stretch1!(Δ.azSyz, m.azSyz, Q.Vy, P.gzc, I, J, k, dt)
-    stretch1!(Δ.axSxz, m.axSxz, Q.Vz, P.gxc, I, J, i, dt); stretch1!(Δ.aySyz, m.aySyz, Q.Vz, P.gyc, I, J, j, dt)
-    stretch1!(Δ.azSzz, m.azSzz, Q.Vz, P.gze, I, J, k, dt)
+    stretch1!(Δ.axSxx, m.axSxx, Q.Vx, P, :axSxx, :gxe, I, J, i, dt); stretch1!(Δ.aySxy, m.aySxy, Q.Vx, P, :aySxy, :gyc, I, J, j, dt)
+    stretch1!(Δ.azSxz, m.azSxz, Q.Vx, P, :azSxz, :gzc, I, J, k, dt); stretch1!(Δ.axSxy, m.axSxy, Q.Vy, P, :axSxy, :gxc, I, J, i, dt)
+    stretch1!(Δ.aySyy, m.aySyy, Q.Vy, P, :aySyy, :gye, I, J, j, dt); stretch1!(Δ.azSyz, m.azSyz, Q.Vy, P, :azSyz, :gzc, I, J, k, dt)
+    stretch1!(Δ.axSxz, m.axSxz, Q.Vz, P, :axSxz, :gxc, I, J, i, dt); stretch1!(Δ.aySyz, m.aySyz, Q.Vz, P, :aySyz, :gyc, I, J, j, dt)
+    stretch1!(Δ.azSzz, m.azSzz, Q.Vz, P, :azSzz, :gze, I, J, k, dt)
 end
 Base.@propagate_inbounds function stretch_s_3d!(Δ, Q, P, dt, i, j, k)
     I = CartesianIndex(i, j, k); J = I - P.lo; m = P.mem
-    stretch1!(Δ.axVx, m.axVx, Q.Sxx, P.gxc, I, J, i, dt); stretch1!(Δ.ayVy, m.ayVy, Q.Syy, P.gyc, I, J, j, dt)
-    stretch1!(Δ.azVz, m.azVz, Q.Szz, P.gzc, I, J, k, dt); stretch1!(Δ.axVy, m.axVy, Q.Sxy, P.gxe, I, J, i, dt)
-    stretch1!(Δ.ayVx, m.ayVx, Q.Sxy, P.gye, I, J, j, dt); stretch1!(Δ.axVz, m.axVz, Q.Sxz, P.gxe, I, J, i, dt)
-    stretch1!(Δ.azVx, m.azVx, Q.Sxz, P.gze, I, J, k, dt); stretch1!(Δ.ayVz, m.ayVz, Q.Syz, P.gye, I, J, j, dt)
-    stretch1!(Δ.azVy, m.azVy, Q.Syz, P.gze, I, J, k, dt)
+    stretch1!(Δ.axVx, m.axVx, Q.Sxx, P, :axVx, :gxc, I, J, i, dt); stretch1!(Δ.ayVy, m.ayVy, Q.Syy, P, :ayVy, :gyc, I, J, j, dt)
+    stretch1!(Δ.azVz, m.azVz, Q.Szz, P, :azVz, :gzc, I, J, k, dt); stretch1!(Δ.axVy, m.axVy, Q.Sxy, P, :axVy, :gxe, I, J, i, dt)
+    stretch1!(Δ.ayVx, m.ayVx, Q.Sxy, P, :ayVx, :gye, I, J, j, dt); stretch1!(Δ.axVz, m.axVz, Q.Sxz, P, :axVz, :gxe, I, J, i, dt)
+    stretch1!(Δ.azVx, m.azVx, Q.Sxz, P, :azVx, :gze, I, J, k, dt); stretch1!(Δ.ayVz, m.ayVz, Q.Syz, P, :ayVz, :gye, I, J, j, dt)
+    stretch1!(Δ.azVy, m.azVy, Q.Syz, P, :azVy, :gze, I, J, k, dt)
 end
 
 "Transposed difference of `A` (+ its PML correction `δ`, if any)."
@@ -85,7 +85,7 @@ Base.@propagate_inbounds dt_(d, A, δ, I, e, a) = d(A, I, e, a) + d(δ, I, e, a)
 "Forward difference `d` stretched as in the PML zone `Z` (`nothing`: interior), with the forward memory `Z.fm` of the step."
 @inline fst(::Nothing, ::Val, ::Val, I, ix, d) = d
 Base.@propagate_inbounds function fst(Z, ::Val{m}, ::Val{g}, I, ix, d) where {m,g}
-    γ = getfield(Z.P, g)[ix]
+    γ = pml_gamma(Z.P, m, g, I, ix, Z.dt)
     return γ[1] * d + γ[2] * getfield(Z.fm, m)[I-Z.P.lo]
 end
 
@@ -535,7 +535,7 @@ function (d::AdjointDriver)(s)
             foreach_cell!(backend, grad!, (G, E, Rb, Qv, nothing, Vn, Vp, nothing, Ma, c, vc, dtT), deep...)
             L === nothing || foreach_cell!(backend, illuminate!, (L, Vn), inner...)
             map(((lo, ndr),) -> foreach_cell!(backend, grad!, (G, E, Rb, Qv, Δv, Vn, Vp, nothing, Ma, c, vc, dtT), lo, ndr), band)
-            map((z, P, m) -> foreach_cell!(backend, grad!, (G, E, Rb, Qv, Δv, Vn, Vp, (; P, fm=m), Ma, c, vc, dtT), z[1], z[2]), zones, Zp, fm)
+            map((z, P, m) -> foreach_cell!(backend, grad!, (G, E, Rb, Qv, Δv, Vn, Vp, (; P, fm=m, dt=dtT), Ma, c, vc, dtT), z[1], z[2]), zones, Zp, fm)
             inject_wave_grad!(s.tw, G, E, Ma, c, dtT, eltype(dtT)(s.tbeg + (n - 0.5) * s.dt), backend)   # teleseismic wave
             foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, nothing), deep...)
             map(((lo, ndr),) -> foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, Δv), lo, ndr), rest)

@@ -102,8 +102,13 @@ Keyword arguments
   its horizontal velocity stays exactly zero there. `:corners` takes the harmonic mean of the three solid cells at these
   inner corners (one cell of the four with μ = 0); flat surfaces and outer corners are unchanged (identical results on a
   flat free surface). P-SV and 3D (SH has no such points).
-- `absorber = :pml`: absorbing boundary at the sides and the bottom, `:pml` (perfectly matched layer) or `:cerjan` (sponge);
-  `na = 20` is its thickness in cells.
+- `absorber = :pml`: absorbing boundary at the sides and the bottom, `:pml` (perfectly matched layer), `:mpml` (multiaxial
+  PML) or `:cerjan` (sponge); `na = 20` is its thickness in cells. The PML can grow exponentially where a soft surface layer
+  (high Poisson ratio, e.g. water-saturated sediments) reaches into the side layers. The M-PML is stable there: each layer also
+  damps the derivatives parallel to it, with the fraction `mpml_ratio = 0.1` of the layer's damping. It reflects more than the
+  PML (less than `:cerjan`), mostly as a slowly decaying long-period residual. (`:pml` damps the top `h` of the side layers in
+  z too: `h` = `na` cells, or on a stretched z axis the thickness of the bottom layer; with less air than `h` this reaches into
+  the ground. `:mpml` does not damp at the free surface.) Plane waves need `:pml`.
 - `fq_min = 0.05`, `fq_max = 5.0`, `fq_ref = 1.0`: frequency band [Hz] of constant Q, and reference frequency of the velocities.
 - `density_unit = :kg_m3`: unit of `rho`, or `:g_cm3` (as in OpenSWPC).
 - `snapshot_every = 0`: if > 0, write the velocity field every so many steps to ParaView files in `snapshot_dir = "snapshots"`.
@@ -139,7 +144,7 @@ has_attenuation(model::DistributedModel) = model.attenuation
 # Function barrier on the solver type: from here on the dimension N is known to the compiler.
 function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{interp}=Val(:cell), ::Val{attenuation}=Val(true), ::Val{aniso}=Val(false),
                   ::Val{fsurf}=Val(:openswpc); dt, nt, sources, stations=Station[], stf=:kupper, tbeg=0.0,
-                  absorber=:pml, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
+                  absorber=:pml, mpml_ratio=0.1, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
                   snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true,
                   wavefield=model isa CartData) where {mode,interp,attenuation,aniso,fsurf,FT}
@@ -165,7 +170,11 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     # medium on this rank
     loc(A) = dev(FT.(A[R...]))
     col(A) = dev(A[Base.front(R)...])
-    absorber in (:pml, :cerjan) || error("absorber must be :pml or :cerjan, got :$absorber")
+    absorber in (:pml, :mpml, :cerjan) || error("absorber must be :pml, :mpml or :cerjan, got :$absorber")
+    absorber === :mpml && !(0 <= mpml_ratio <= 1) && error("mpml_ratio must be between 0 and 1, got $mpml_ratio")
+    absorber === :mpml && any(s -> s isa PlaneWave, sources) &&
+        error("plane waves need absorber = :pml: they pass its side layers, which the M-PML damps along them")
+    mpml = absorber === :mpml ? mpml_ratio : nothing             # (the PML zones of the M-PML: `pml_regions`)
     sponge(a) = map(v -> dev(FT.(v[R[a]])), absorber === :cerjan ? cerjan(g.n[a], g.d[a], na; top=a < N) : (ones(g.n[a] + 2H), ones(g.n[a] + 2H)))
     (gx_c, gx_b), (gz_c, gz_b) = sponge(1), sponge(N)
     G = N == 3 ? (; gx_c, gx_b, gy_c=sponge(2)[1], gy_b=sponge(2)[2], gz_c, gz_b) : (; gx_c, gx_b, gz_c, gz_b)
@@ -273,7 +282,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     split = backend isa CPU
     if driver !== nothing
         regions = absorber === :cerjan ? ((ntuple(_ -> H, N), nl .- 2H, nothing),) :
-                  pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT)
+                  pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT; mpml)
         rows = plain_blocks(regions[1], med, off; split)
         res = driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode, sinc), regions, nt, nosource=isempty(S),
                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
@@ -295,9 +304,12 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     movie_out = if absorber === :cerjan
         whole = ((ntuple(_ -> H, N), nl .- 2H, nothing),)
         timeloop!(head..., (whole, plain_blocks(whole[1], med, off; split)), tail...)
-    else
+    elseif mpml === nothing
         pml = pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT)
         timeloop!(head..., (pml, plain_blocks(pml[1], med, off; split)), tail...)
+    else
+        mpl = pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT; mpml)
+        timeloop!(head..., (mpl, plain_blocks(mpl[1], med, off; split)), tail...)
     end
     movie_out === nothing || movie_paraview(pvd=movie_out, Finalize=true)
     planes === nothing || write_peaks(planes, snapshots.quantities, mode, scale, parallel, me)

@@ -56,7 +56,7 @@ end
 "Derivative `d` along a PML axis: stretched with the profile `P.g[i]` and the memory variable `P.a[J]` (which is updated)."
 @inline ade(::Nothing, ::Symbol, ::Symbol, J, i, d, dt) = d
 Base.@propagate_inbounds function ade(P, a::Symbol, g::Symbol, J, i, d, dt)
-    A, γ = getfield(P.mem, a), getfield(P, g)[i]
+    A, γ = getfield(P.mem, a), pml_gamma(P, a, g, J + P.lo, i, dt)
     m = A[J]
     A[J] = γ[3] * m + γ[4] * d * dt
     return γ[1] * d + γ[2] * m
@@ -66,6 +66,39 @@ end
 @inline edge(::Nothing, i, j...) = false                       # 2nd order at the outer two cells of the PML (as OpenSWPC)
 Base.@propagate_inbounds edge(P, i) = P.ox[i]
 Base.@propagate_inbounds edge(P, i, j) = P.ox[i] | P.oy[j]
+
+"""
+ADE coefficients (γ₁, γ₂, γ₃, γ₄) of the derivative with the memory variable `a` along the axis of the profile `g` at the cell
+`I` (array indices; `i` its index along that axis) of the PML zone `P`: the profile (classical PML), or with an M-PML zone
+(field `mpml`, the ratio p) computed from the profiles (d, α, 1/κ, d∥) of the axis and the damping d∥ of the other axes at
+the point of the derivative (`MPML_PARALLEL`). Forward and adjoint kernels take them from here.
+"""
+Base.@propagate_inbounds function pml_gamma(P, a::Symbol, g::Symbol, I, i, dt)
+    haskey(P, :mpml) || return getfield(P, g)[i]                   # (resolved at compile time)
+    d, α, iκ, _ = getfield(P, g)[i]
+    u = (d + P.mpml * parallel_damping(P, Val(a), I)) * iκ
+    c = dt / 2
+    iq = inv(1 + c * (α + u))
+    return ((1 + c * α) * iκ * iq, -iκ * iq, (1 - c * (α + u)) * iq, u * iq)
+end
+
+# M-PML: the profiles of the other axes at the point of every derivative (named by its memory variable). Derivatives of the
+# stresses are at velocity points (Vx: x at an edge, y, z at centres; …), those of the velocities at stress points (normal
+# stresses at the centre, Sxy at edges in x and y, …). 2D zones have no y profiles: those terms are left out.
+const MPML_PARALLEL = (axSxx=(:gyc, :gzc), aySxy=(:gxe, :gzc), azSxz=(:gxe, :gyc),     # at Vx
+                       axSxy=(:gye, :gzc), aySyy=(:gxc, :gzc), azSyz=(:gxc, :gye),     # at Vy
+                       axSxz=(:gyc, :gze), aySyz=(:gxc, :gze), azSzz=(:gxc, :gyc),     # at Vz
+                       axVx=(:gyc, :gzc), ayVy=(:gxc, :gzc), azVz=(:gxc, :gyc),        # at Sxx, Syy, Szz
+                       axVy=(:gye, :gzc), ayVx=(:gxe, :gzc),                           # at Sxy
+                       axVz=(:gyc, :gze), azVx=(:gxe, :gyc),                           # at Sxz
+                       ayVz=(:gxc, :gze), azVy=(:gxc, :gye))                           # at Syz
+"Sum of the damping d∥ of the other axes at the point of the derivative with the memory variable `a`, at the cell `I`."
+@generated function parallel_damping(P::NamedTuple{K}, ::Val{a}, I::CartesianIndex{N}) where {K,a,N}
+    terms = map(Base.Fix2(damping_term, N), filter(in(K), getfield(MPML_PARALLEL, a)))
+    return Expr(:block, Expr(:meta, :inline), Expr(:meta, :propagate_inbounds), Expr(:call, :+, terms...))
+end
+"`d∥` of the profile `s` (e.g. `:gzc`) at the cell `I` of an `N`-dimensional zone `P` (expression)."
+damping_term(s, N) = :(getfield(P, $(QuoteNode(s)))[I[$(s === :gxc || s === :gxe ? 1 : s === :gyc || s === :gye ? 2 : N)]][4])
 
 """
 Rows of the interior without 2nd-order differences (no free surface or ocean bottom near, no PML): the kernels use the
