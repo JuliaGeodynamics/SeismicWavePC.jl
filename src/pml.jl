@@ -57,16 +57,19 @@ end
 Cell ranges (global, physical) of the interior and of the PML zones: sides in x (and y) over the whole depth, bottom below
 the interior. As OpenSWPC, no PML at the top.
 """
-function zones(n::NTuple{2,Int}, na)
+function zones(n::NTuple{2,Int}, na, periodic=(false,))
     x, z = n
+    periodic[1] && return (1:x, 1:z-na), ((1:x, z-na+1:z),)                # (no side layers)
     inner = (na+1:x-na, 1:z-na)
     return inner, ((1:na, 1:z), (x-na+1:x, 1:z), (na+1:x-na, z-na+1:z))
 end
-function zones(n::NTuple{3,Int}, na)
+function zones(n::NTuple{3,Int}, na, periodic=(false, false))
     x, y, z = n
-    inner = (na+1:x-na, na+1:y-na, 1:z-na)
-    return inner, ((1:x, 1:na, 1:z), (1:x, y-na+1:y, 1:z), (1:na, na+1:y-na, 1:z), (x-na+1:x, na+1:y-na, 1:z),
-                   (na+1:x-na, na+1:y-na, z-na+1:z))
+    px, py = periodic
+    # (side layers only along the axes that are not periodic)
+    xa, ya = px ? (1:x) : (na+1:x-na), py ? (1:y) : (na+1:y-na)
+    sides = (py ? () : ((1:x, 1:na, 1:z), (1:x, y-na+1:y, 1:z)))..., (px ? () : ((1:na, ya, 1:z), (x-na+1:x, ya, 1:z)))...
+    return (xa, ya, 1:z-na), (sides..., (xa, ya, z-na+1:z))
 end
 
 "Offset `lo` and size of the part of the global range `r` (per axis) on this rank (array indices `lo .+ (1:ndr)`)."
@@ -88,17 +91,21 @@ memory variables and damping profiles. With `mpml` (the ratio p of the M-PML) th
 the field `mpml = p`; the z profile damps the bottom only. Without, the profiles are the ADE coefficients; as in OpenSWPC the
 z profile then also damps the top `h` (thickness of the bottom PML) in the side zones.
 """
-function pml_regions(::Val{mode}, g::Grid{N}, na, dt, fcut, off, nl, R, dev, backend, ::Type{T}; mpml=nothing) where {mode,N,T}
+function pml_regions(::Val{mode}, g::Grid{N}, na, dt, fcut, off, nl, R, dev, backend, ::Type{T}; mpml=nothing,
+                     periodic=ntuple(_ -> false, Val(N - 1))) where {mode,N,T}
     top = g.zf[H] # edge above the first cell
     m = mpml !== nothing
     prof = ntuple(a -> a < N || g.uniform ? pml_axis(g.n[a], g.d[a], na, dt, fcut, T; mpml=m, top=a < N) :
                                  pml_axis(g.zc .- top, g.zf .- top, g.zf[end-H] - g.zf[end-H-na], g.zf[end-H] - top, g.n[a], na, dt, fcut, T;
                                           mpml=m, top=false), Val(N))
+    # periodic axes: no damping (the profile of the middle of the axis everywhere)
+    flat((c, e, outer)) = (fill(c[length(c) ÷ 2], length(c)), fill(e[length(e) ÷ 2], length(e)), fill(false, length(outer)))
+    prof = ntuple(a -> a < N && periodic[a] ? flat(prof[a]) : prof[a], Val(N))
     loc(v, a) = dev(v[R[a]])
     profiles = N == 3 ? (; gxc=loc(prof[1][1], 1), gxe=loc(prof[1][2], 1), gyc=loc(prof[2][1], 2), gye=loc(prof[2][2], 2),
                            gzc=loc(prof[3][1], 3), gze=loc(prof[3][2], 3), ox=loc(prof[1][3], 1), oy=loc(prof[2][3], 2)) :
                 (; gxc=loc(prof[1][1], 1), gxe=loc(prof[1][2], 1), gzc=loc(prof[2][1], 2), gze=loc(prof[2][2], 2), ox=loc(prof[1][3], 1))
-    inner, boxes = zones(g.n, na)
+    inner, boxes = zones(g.n, na, periodic)
     pml = map(boxes) do b
         lo, ndr = local_range(b, off, nl)
         memory = pml_memory(Val(mode), () -> KernelAbstractions.zeros(backend, T, ndr...))

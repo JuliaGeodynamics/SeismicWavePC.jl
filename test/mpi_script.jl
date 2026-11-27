@@ -179,6 +179,16 @@ MPI.Barrier(MPI.COMM_WORLD)
 end
 
 if runs("other")
+# periodic side boundaries: the halo exchange wraps around (ImplicitGlobalGrid with periodic directions)
+for (mode, nproc) in ((:psv, 4), (:p3d, (2, 2)))
+    m = test_model(mode; step=false)
+    kw = (; dt=DT, nt=150, sources=test_source(), stations=test_stations(mode), T=Float64, verbose=false, periodic=true)
+    s1, s2 = simulate(m; kw...), simulate(m; kw..., nproc)
+    e = maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v)
+    rank == 0 && println("MPI periodic $mode nproc=$nproc: seismograms $e")
+    e < 1e-12 || error("MPI result with periodic sides differs for $mode on rank $rank")
+end
+MPI.Barrier(MPI.COMM_WORLD)
 # teleseismic waves injected along a box that spans several ranks: forward and gradient as in serial
 let m0 = test_model(:psv), nproc = 4
     m = CartData(m0.x.val, m0.y.val, m0.z.val, Base.structdiff(m0.fields, NamedTuple{(:Qp, :Qs)}))

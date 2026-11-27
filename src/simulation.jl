@@ -158,21 +158,28 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
                   absorber=:pml, mpml_ratio=0.1, na=20, fq_min=0.05, fq_max=5.0, fq_ref=1.0, record_every=1,
                   density_unit=:kg_m3, snapshot_every=0, snapshot_dir="snapshots", callback=nothing,
                   snapshots=nothing, checkpoint=nothing, checkpoint_every=0, restart=false, driver=nothing, backend=CPU(), T::Type{FT}=Float32, nproc=1, verbose=true,
-                  wavefield=model isa CartData) where {mode,interp,attenuation,aniso,fsurf,FT}
+                  wavefield=model isa CartData, periodic=false) where {mode,interp,attenuation,aniso,fsurf,FT}
     N = mode === :p3d ? 3 : 2
+    # periodic side boundaries per horizontal axis (x, y): the wavefield leaves on one side and enters on the other
+    per = periodic isa Bool ? ntuple(_ -> periodic, Val(N - 1)) : ntuple(a -> Bool(periodic[a]), Val(N - 1))
     sources = sources isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave} ? [sources] : collect(sources)
     all(s -> s isa Union{MomentTensorSource,ForceSource,PlaneWave,TeleseismicWave}, sources) ||
         error("sources must be MomentTensorSource, ForceSource, PlaneWave or TeleseismicWave")
     stations = collect(Station, stations)
     isempty(sources) && error("at least one source is required")
     distributed = model isa DistributedModel        # every rank has the medium of its own subdomain only
+    if any(per)
+        distributed && error("periodic boundaries need a CartData model (not a DistributedModel)")
+        driver === nothing || error("periodic boundaries: simulations only (no misfit gradients or Born modelling yet)")
+        any(s -> s isa TeleseismicWave, sources) && error("periodic boundaries: no TeleseismicWave (it is injected along a box)")
+    end
     distributed && !(interp === :cell && driver === nothing && all(s -> s isa Union{MomentTensorSource,ForceSource}, sources)) &&
         error("a DistributedModel takes MomentTensorSource and ForceSource with interpolation = :cell; plane and teleseismic waves, interpolation = :sinc, misfit gradients and Born modelling need a CartData")
     m = whole_model(model, density_unit, Val(aniso))
     axes_ = model_axes(model)
     g = Grid(axes_, Val(N))
-    all(ntuple(a -> g.n[a] > (a < N ? 2na : na), N)) || error("the model ($(join(g.n, "×")) cells) must be larger than the absorbing layers (na = $na cells)")
-    decomposition, med0, courant = decomposed_medium(model, m, g, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, Val(aniso))
+    all(ntuple(a -> g.n[a] > (a < N ? (per[a] ? 0 : 2na) : na), N)) || error("the model ($(join(g.n, "×")) cells) must be larger than the absorbing layers (na = $na cells)")
+    decomposition, med0, courant = decomposed_medium(model, m, g, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, Val(aniso); periodic=per)
     (; dims, nl, parallel, me, nb, off, R) = decomposition
     rule = fsurf === :openswpc ? (;) : (; free_surface=Val(fsurf))     # averaging of the shear moduli (`shear_rule`)
     med = merge(med0, rule)
@@ -186,7 +193,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     absorber === :mpml && any(s -> s isa PlaneWave, sources) &&
         error("plane waves need absorber = :pml: they pass its side layers, which the M-PML damps along them")
     mpml = absorber === :mpml ? mpml_ratio : nothing             # (the PML zones of the M-PML: `pml_regions`)
-    sponge(a) = map(v -> dev(FT.(v[R[a]])), absorber === :cerjan ? cerjan(g.n[a], g.d[a], na; top=a < N) : (ones(g.n[a] + 2H), ones(g.n[a] + 2H)))
+    sponge(a) = map(v -> dev(FT.(v[R[a]])), absorber === :cerjan && !(a < N && per[a]) ? cerjan(g.n[a], g.d[a], na; top=a < N) : (ones(g.n[a] + 2H), ones(g.n[a] + 2H)))
     (gx_c, gx_b), (gz_c, gz_b) = sponge(1), sponge(N)
     G = N == 3 ? (; gx_c, gx_b, gy_c=sponge(2)[1], gy_b=sponge(2)[2], gz_c, gz_b) : (; gx_c, gx_b, gz_c, gz_b)
     M = merge((; rho=loc(med.rho), lam=loc(med.lam), mu=loc(med.mu), taup=loc(med.taup), taus=loc(med.taus),
@@ -281,7 +288,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
             copyto!(B, Array(B) .+ FT.(A))
         end
     end
-    edges = ntuple(a -> (off[a] == 0, off[a] + nl[a] - 2H == g.n[a]), N - 1)
+    edges = ntuple(a -> per[a] ? (false, false) : (off[a] == 0, off[a] + nl[a] - 2H == g.n[a]), N - 1)   # (periodic: no extrapolation)
     pw_edges = !isempty(planewaves) && absorber === :pml
 
     if verbose && me == 0
@@ -297,7 +304,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     split = backend isa CPU
     if driver !== nothing
         regions = absorber === :cerjan ? ((ntuple(_ -> H, N), nl .- 2H, nothing),) :
-                  pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT; mpml)
+                  pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT; mpml, periodic=per)
         rows = plain_blocks(regions[1], med, off; split)
         res = driver((; F, M, Src, FSrc, St, rec, acc, c, vc, dtT=FT(dt), kernels=kernels(mode, sinc), regions, nt, nosource=isempty(S),
                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
@@ -314,16 +321,16 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     ckp = checkpoint === nothing ? nothing : parallel ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")
     tail = (nt, isempty(S), isempty(FS), length(own), record_every, snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt,
-            verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, pw_edges, edges, planes, backend, tw, Wm, Wf)
+            verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, pw_edges, edges, planes, backend, tw, Wm, Wf, per)
     # (separate variables per branch: each call sees concrete regions)
     movie_out = if absorber === :cerjan
         whole = ((ntuple(_ -> H, N), nl .- 2H, nothing),)
         timeloop!(head..., (whole, plain_blocks(whole[1], med, off; split)), tail...)
     elseif mpml === nothing
-        pml = pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT)
+        pml = pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT; periodic=per)
         timeloop!(head..., (pml, plain_blocks(pml[1], med, off; split)), tail...)
     else
-        mpl = pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT; mpml)
+        mpl = pml_regions(Val(mode), g, na, dt, fcut, off, nl, R, dev, backend, FT; mpml, periodic=per)
         timeloop!(head..., (mpl, plain_blocks(mpl[1], med, off; split)), tail...)
     end
     movie_out === nothing || movie_paraview(pvd=movie_out, Finalize=true)
@@ -348,7 +355,7 @@ whole_model(::DistributedModel, density_unit, aniso=Val(false)) = nothing
 Domain decomposition in x (and y) with ImplicitGlobalGrid: every rank owns `n / dims` cells plus `H` ghost cells on each side
 (`nl` cells; `R` are their indices in the padded global grid, `off` its offset, `nb` the MPI neighbours left and right).
 """
-function decompose(g::Grid{N}, nproc, backend) where {N}
+function decompose(g::Grid{N}, nproc, backend; periodic=ntuple(_ -> false, Val(N - 1))) where {N}
     dims = ntuple(a -> a < N && a <= length(nproc) ? nproc[a] : 1, N)
     all(g.n .% dims .== 0) || error("cells per direction $(g.n) must be divisible by nproc $dims")
     nl = g.n .÷ dims .+ 2H
@@ -357,6 +364,7 @@ function decompose(g::Grid{N}, nproc, backend) where {N}
     if parallel
         me, _, _, c3 = IGG.init_global_grid(nl..., ntuple(_ -> 1, 3 - N)...; dimx=dims[1], dimy=N == 3 ? dims[2] : 1, dimz=1,
                                             overlaps=(2H, 2H, 2H), halowidths=(H, H, H), init_MPI=!MPI.Initialized(),
+                                            periodx=Int(periodic[1]), periody=N == 3 ? Int(periodic[2]) : 0,
                                             device_type=igg_device(backend), quiet=true)
         coords = ntuple(a -> Int(c3[a]), N)
     end
@@ -371,12 +379,14 @@ The domain decomposition, the medium and the Courant number. Of a `CartData` eve
 the padded global grid); of a [`DistributedModel`](@ref) only the cells of its own subdomain ([`Window`](@ref)s), and the
 numbers of the whole model are collected from all ranks.
 """
-function decomposed_medium(::CartData, m, g::Grid{N}, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, _) where {N}
-    med = setup_medium(S -> model_block(m, S, Val(N)), g, ntuple(a -> 1:g.n[a]+2H, Val(N)), Val(false), na, fq_min, fq_max, fq_ref)
+function decomposed_medium(::CartData, m, g::Grid{N}, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, aniso;
+                           periodic=ntuple(a -> false, Val(N - 1))) where {N}
+    med = setup_medium(S -> model_block(m, S, Val(N)), g, ntuple(a -> 1:g.n[a]+2H, Val(N)), Val(false), na, fq_min, fq_max, fq_ref; periodic)
     courant = stable_courant(med, g, dt)
-    return decompose(g, nproc, backend), med, courant
+    return decompose(g, nproc, backend; periodic), med, courant
 end
-function decomposed_medium(model::DistributedModel, ::Nothing, g::Grid{N}, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, aniso) where {N}
+function decomposed_medium(model::DistributedModel, ::Nothing, g::Grid{N}, nproc, backend, density_unit, na, fq_min, fq_max, fq_ref, dt, aniso;
+                           periodic=nothing) where {N}
     d = decompose(g, nproc, backend)
     try
         rho_max = Ref(-Inf)
@@ -507,7 +517,7 @@ stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, 
 # Function barrier: everything below is concretely typed.
 function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, force!, record!, plane!), (regions, rows), nt, nosource, noforce, nown, record_every,
                    snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, ckp, checkpoint_every, restart,
-                   pw_edges, edges, planes, backend, tw, Wm, Wf)
+                   pw_edges, edges, planes, backend, tw, Wm, Wf, periodic)
     V, Σ = velocities(F), stresses(F)
     cells = (rows..., Base.tail(regions)...)                   # the interior by rows, and the PML zones
     report = max(nt ÷ 10, 1)
@@ -541,11 +551,13 @@ function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, in
         nosource || inject_sources!(backend, inject!, (F, Src, window_step!(Wm, it)), Src)
         inject_wave!(tw, Val(:stress), F, M, c, vc, dtT, eltype(dtT)(tbeg + (it - 0.5) * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, Σ...))
+        !parallel && any(periodic) && wrap_halo!(periodic, Σ...)
         pw_edges && extrapolate_sides!(Σ, edges)
         foreach_region!(backend, vel!, (F, M, c, dtT), cells)
         noforce || inject_sources!(backend, force!, (F, M, FSrc, window_step!(Wf, it)), FSrc)
         inject_wave!(tw, Val(:velocity), F, M, c, vc, dtT, eltype(dtT)(tbeg + it * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, V...))
+        !parallel && any(periodic) && wrap_halo!(periodic, V...)
         if verbose && it % report == 0
             KernelAbstractions.synchronize(backend)
             vmax = maximum(A -> maximum(abs, A), V) * out.scale
@@ -564,6 +576,20 @@ end
 # costs ~0.4 ms per call (a task per field and neighbour), more than the time step of a small model: plain MPI there.
 # (ImplicitGlobalGrid ≥ 0.18 does not wait for kernels still running on GPUs: synchronize first)
 exchange_halo!(backend, nb, A...) = (KernelAbstractions.synchronize(backend); IGG.update_halo!(A...))
+"""
+One process with periodic sides (`periodic` per horizontal axis): the ghost cells get the cells next to the opposite side
+(with MPI the halo exchange does this: ImplicitGlobalGrid with periodic directions).
+"""
+function wrap_halo!(periodic, A...)
+    for f in A, a in eachindex(periodic)
+        periodic[a] || continue
+        n = size(f, a)
+        sel(r) = ntuple(b -> b == a ? r : Colon(), ndims(f))
+        copyto!(view(f, sel(1:H)...), view(f, sel(n-2H+1:n-H)...))
+        copyto!(view(f, sel(n-H+1:n)...), view(f, sel(H+1:2H)...))
+    end
+end
+
 function exchange_halo!(::CPU, nb, A::Vararg{Array{T,N}}) where {T,N}
     comm = IGG.comm()
     for a in 1:N-1
