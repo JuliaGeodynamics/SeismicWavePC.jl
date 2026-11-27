@@ -374,7 +374,7 @@ if runs("curvilinear")
     wet = mesh.z.val .> bathy3.(mesh.x.val, mesh.y.val) .- 1e-9
     m = addfield(mesh, (; rho=ifelse.(wet, 1000.0, 2700.0), vp=ifelse.(wet, 1.5, 5.5), vs=ifelse.(wet, 0.0, 3.2)))
     src3 = MomentTensorSource(0.5, -0.5, -3.0, 1e15, (1.0, 0.7, 0.5, 0.3, 0.4, 0.2); trise=0.8)
-    kw = (; dt=stable_dt(m, [src3]), tmax=3.0, sources=src3, stations=[Station("w", 2.0, 1.0, -0.4), Station("s", -2.0, 2.0, -3.0)], verbose=false, absorber=:pml, na=6)
+    kw = (; dt=stable_dt(m, [src3]), tmax=3.0, sources=src3, stations=[Station("w", 2.0, 1.0, -0.4), Station("s", -2.0, 2.0, -3.0)], T=Float64, verbose=false, absorber=:pml, na=6)
     s1, s2 = simulate(m; kw...), simulate(m; kw..., nproc=(2, 2))
     e = maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v)
     rank == 0 && println("MPI curvilinear 3D ocean nproc=(2, 2): seismograms $e")
