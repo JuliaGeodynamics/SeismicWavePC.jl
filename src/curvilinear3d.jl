@@ -470,6 +470,8 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
                a3=loc(H.a3), hξ=FT(hξ), hψ=FT(hψ), hη=FT(H.hη), ox, oy, nxg=nx, nyg=ny, fluid=H.fluid), mem, vti, sponge, player)
     end)
     lite = map(B -> merge(B, (; pml=nothing)), blocks)        # (kernels without the PML: Metal allows 4 kB of arguments)
+    # (kernels that see all blocks: only the arrays they read)
+    recB, forceB, momB, updB, velB = slim(blocks, CV_RECORD), slim(blocks, CV_FORCE), slim(blocks, CV_STRESS), slim(blocks, CV_UPDATE), slim(blocks, CV_VEL)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing
     # up to 27 regions per block: low / interior / high in x, y and η, with their kernel flags (in x and y: the global
@@ -656,18 +658,18 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
     function step!(it, record)
         n = it - 1
         itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
-        itw > 0 && nst > 0 && foreach_item!(backend, vprev3_cv!, (prev, lite, St), nst)
+        itw > 0 && nst > 0 && foreach_item!(backend, vprev3_cv!, (prev, recB, St), nst)
         momentum!(dtT, true)
-        ntw > 0 && foreach_item!(backend, tf_momentum3!, (lite, TW, FT(tbeg + n * dt), dtT), ntw)
+        ntw > 0 && foreach_item!(backend, tf_momentum3!, (forceB, TW, FT(tbeg + n * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> (B.V1 .*= B.gs; B.V2 .*= B.gs; B.V3 .*= B.gs), blocks)
-        length(FS.seg) > 1 && foreach_item!(backend, force3_cv!, (lite, FS, it, dtT), length(FS.seg) - 1)
+        length(FS.seg) > 1 && foreach_item!(backend, force3_cv!, (forceB, FS, it, dtT), length(FS.seg) - 1)
         par === nothing || KernelAbstractions.synchronize(backend)
         exchange_v!()
-        record && nst > 0 && foreach_item!(backend, record3_cv!, (rec, acc, prev, lite, St, itw, dtT), nst)
+        record && nst > 0 && foreach_item!(backend, record3_cv!, (rec, acc, prev, recB, St, itw, dtT), nst)
         stress!(vc, dtT)
-        ntw > 0 && foreach_item!(backend, tf_stress3!, (lite, TW, vc, FT(tbeg + (n + 0.5) * dt), dtT), ntw)
+        ntw > 0 && foreach_item!(backend, tf_stress3!, (updB, TW, vc, FT(tbeg + (n + 0.5) * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(S -> S .*= B.gs, (B.S11, B.S22, B.S33, B.S23, B.S13, B.S12)), blocks)
-        length(MS.seg) > 1 && foreach_item!(backend, moment3_cv!, (lite, MS, it), length(MS.seg) - 1)
+        length(MS.seg) > 1 && foreach_item!(backend, moment3_cv!, (momB, MS, it), length(MS.seg) - 1)
         par === nothing || KernelAbstractions.synchronize(backend)
         exchange_s!()
     end
@@ -704,7 +706,7 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
             store = snapshot_every > 0 && n % snapshot_every == 0
             store && Dps !== nothing && divrot!()
             for p in planes
-                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, lite, store ? Dps : nothing, p.pts, dtT, store, Val(3)),
+                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, velB, store ? Dps : nothing, p.pts, dtT, store, Val(3)),
                                                 length(p.own))
             end
             if store
