@@ -118,6 +118,9 @@ time `tr`. `stf` is
   benchmarks);
 - `:gaussian`: a Gaussian centred at `t0 + tr` with width `tr` (`√π/tr · exp(-(π(t - t0 - tr)/tr)²)`, integral 1), and
   `:gaussian_derivative`: its time derivative times `tr/π` (integral 0);
+- `:fuchs_mueller`: the Fuchs-Müller wavelet of SOFI, `sin(2πfτ) - sin(4πfτ)/2` for `τ = t - t0` in `[0, 1/f]`, `f = 1/tr`
+  (integral 0; times `1/tr`, as `:ricker`); `:sin3` is `:kupper` (SOFI's sin³ wavelet);
+- [`BerlageSTF`](@ref) and [`KlauderSTF`](@ref) (SOFI's Berlage and Klauder wavelets, with their parameters);
 - `:step`: a unit step at `t0` (e.g. a force switched on: a static load; for moment tensors the moment grows linearly);
 - `:delta`: a unit impulse at `t0` (the moment steps from 0 to `M0`; a force gives a unit impulse), in simulations the time
   step that contains `t0` (`1/dt` there);
@@ -140,6 +143,11 @@ function moment_rate(stf::Symbol, t, t0, tr)
     end
     (0 <= τ <= tr) || return 0.0
     stf === :step && return τ >= 0 ? 1.0 : 0.0
+    stf === :sin3 && return moment_rate(:kupper, t, t0, tr)
+    if stf === :fuchs_mueller
+        (τ < 0 || τ > tr) && return 0.0
+        return (sin(2π * τ / tr) - sin(4π * τ / tr) / 2) / tr
+    end
     stf === :delta && error("moment_rate(:delta, …) is an impulse: use it as `stf` of a simulation (one time step, 1/dt)")
     stf === :kupper && return 3π * sin(π * τ / tr)^3 / (4tr)
     stf === :boxcar && return 1 / tr
@@ -151,6 +159,50 @@ function moment_rate(stf::Symbol, t, t0, tr)
         return 16 * (tr - τ)^2 / tr^3
     end
     error("unknown source time function :$stf")
+end
+
+"""
+    BerlageSTF(; n=1.5, α, φ0=-90)
+
+The Berlage wavelet (Aldridge, 1990; as in SOFI) as a source time function: `τⁿ exp(-ατ) cos(2πfτ + φ0)` for `τ = t - t0 ≥ 0`
+with the centre frequency `f = 1/trise` and `φ0` in degrees, scaled so that its envelope peaks at `1/trise`. Use it as `stf`.
+"""
+Base.@kwdef struct BerlageSTF
+    n::Float64 = 1.5
+    α::Float64
+    φ0::Float64 = -90.0
+end
+function (b::BerlageSTF)(t, t0, tr)
+    τ = t - t0
+    τ < 0 && return 0.0
+    peak = (b.n / b.α)^b.n * exp(-b.n)                    # (of the envelope τⁿ exp(-ατ))
+    return τ^b.n * exp(-b.α * τ) * cosd(360 * τ / tr + b.φ0) / (peak * tr)
+end
+
+"""
+    KlauderSTF(; fmin, fmax, tsweep, ntwidth=5)
+
+The Klauder wavelet (the autocorrelation of a linear sweep from `fmin` to `fmax` [Hz] of duration `tsweep` [s]; as in
+SOFI): `sin(πkτ(T - τ)) / (πkτ T) cos(2π fc τ)`, `k = (fmax - fmin)/T`, `fc = (fmax + fmin)/2`, centred `ntwidth/fc` after
+`t0`, zero beyond `ntwidth` centre periods on either side, with cosine tapers over the first and last 20 %; peak `fc`.
+`trise` is not used (give `trise = 1/fmax` for the absorbing layers). Use it as `stf`.
+"""
+Base.@kwdef struct KlauderSTF
+    fmin::Float64
+    fmax::Float64
+    tsweep::Float64
+    ntwidth::Float64 = 5.0
+end
+function (w::KlauderSTF)(t, t0, tr)
+    fc, T = (w.fmax + w.fmin) / 2, w.tsweep
+    k = (w.fmax - w.fmin) / T
+    half = w.ntwidth / fc
+    τ = t - t0 - half
+    abs(τ) > half && return 0.0
+    a = abs(τ) < 1e-12 ? 1.0 : sin(π * k * τ * (T - τ)) / (π * k * τ * T)
+    x = (τ + half) / (2half)                              # (0 … 1 across the window)
+    taper = x < 0.2 ? (1 - cos(π * x / 0.2)) / 2 : x > 0.8 ? (1 - cos(π * (1 - x) / 0.2)) / 2 : 1.0
+    return fc * a * cos(2π * fc * τ) * taper
 end
 
 """
