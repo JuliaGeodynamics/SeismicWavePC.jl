@@ -602,8 +602,8 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
     tables(δ) = (mine(source_table(forces, fcoef, δ)), mine(source_table(moments, mcoef, δ)))
     ft, mt = tables((0.0, 0.0, 0.0))
     # the amplitudes per source and step, on the device in windows of steps (source_window.jl)
-    amp_f(n, it) = (s = forces[n]; source_rate(source_stf(s, stf), tbeg + (it - 1) * dt, s.t0, s.trise, dt))
-    amp_m(n, it) = (s = moments[n]; source_rate(source_stf(s, stf), tbeg + (it - 0.5) * dt, s.t0, s.trise, dt) * dt)
+    amp_f(n) = (s = forces[n]; amp_row(source_stf(s, stf), 1, 1, 1, tbeg, 1, dt, s.t0, s.trise))
+    amp_m(n) = (s = moments[n]; amp_row(source_stf(s, stf), 1, dt, 1, tbeg, 0.5, dt, s.t0, s.trise))
     Wf, Wm = source_window(amp_f, length(forces), nt, dev, FT, backend), source_window(amp_m, length(moments), nt, dev, FT, backend)
     FS = (; b=dev(ft.b), i=dev(ft.i), j=dev(ft.j), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n), seg=dev(ft.seg), F=dev(FT[s.F[c] for s in forces, c in 1:3]),
           s=Wf.s)

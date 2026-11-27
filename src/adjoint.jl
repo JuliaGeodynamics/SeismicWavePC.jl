@@ -585,11 +585,11 @@ function source_sensitivities(s, nSl, nFl, nt, backend)
     cm = [src.M0 / s.M0 * s.dt / s.volume[i] for (src, i) in zip(S, s.iS)]
     cf = [1e3 / s.M0 * s.dt / s.fvolume[i] for i in s.iF]
     dM, gmM, dF, gmF = zeros(nSl, 6), zeros(nSl, nt), zeros(nFl, 3), zeros(nFl, nt)
-    function reducer(dA, gm, A, c, amp)
-        return (outs, steps, _) -> begin
+    function reducer(dA, gm, A, c)
+        return (outs, steps, amp) -> begin
             W = outs[1]
             for (q, n) in enumerate(steps), l in axes(W, 1)
-                a = amp(l, n)                                   # (the amplitude in Float64, as `amp_m`, `amp_f`)
+                a = Float64(amp[l, q])                          # (the injected amplitude, from the window)
                 for j in axes(W, 2)
                     dA[l, j] += a * W[l, j, q]
                     gm[l, n] += c[l] * A[l][j] * W[l, j, q]
@@ -597,8 +597,8 @@ function source_sensitivities(s, nSl, nFl, nt, backend)
             end
         end
     end
-    Wm = source_window(s.amp_m, nSl, nt, s.dev, s.T, backend; outputs=((nSl, 6),), reduce=reducer(dM, gmM, Mi, cm, s.amp_m))
-    Wf = source_window(s.amp_f, nFl, nt, s.dev, s.T, backend; outputs=((nFl, 3),), reduce=reducer(dF, gmF, Fi, cf, s.amp_f))
+    Wm = source_window(s.amp_m, nSl, nt, s.dev, s.T, backend; outputs=((nSl, 6),), reduce=reducer(dM, gmM, Mi, cm))
+    Wf = source_window(s.amp_f, nFl, nt, s.dev, s.T, backend; outputs=((nFl, 3),), reduce=reducer(dF, gmF, Fi, cf))
     return (; Wm, Wf, dM, gmM, dF, gmF)
 end
 

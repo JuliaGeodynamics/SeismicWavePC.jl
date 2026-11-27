@@ -215,8 +215,8 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     volume(s) = sinc ? prod(g.d) : prod(Base.front(g.d)) * thickness(g, position(s.x, s.y, s.z)[N])
     S, FS = moments[iS], forces[iF]
     # the injected amplitudes per source and step, on the device in windows of steps (source_window.jl)
-    amp_m(n, it) = (s = S[n]; s.M0 / M0 * source_rate(source_stf(s, stf), tbeg + (it - 0.5) * dt, s.t0, s.trise, dt) * dt / volume(s))
-    amp_f(n, it) = (s = FS[n]; 1e3 / M0 * source_rate(source_stf(s, stf), tbeg + it * dt, s.t0, s.trise, dt) * dt / volume(s))
+    amp_m(n) = (s = S[n]; amp_row(source_stf(s, stf), s.M0 / M0, dt, volume(s), tbeg, 0.5, dt, s.t0, s.trise))
+    amp_f(n) = (s = FS[n]; amp_row(source_stf(s, stf), 1e3 / M0, dt, volume(s), tbeg, 0, dt, s.t0, s.trise))
     Wm, Wf = source_window(amp_m, length(S), nt, dev, FT, backend), source_window(amp_f, length(FS), nt, dev, FT, backend)
     Src0 = merge(source_cells(S, position, off, dev, Val(N)), (; M=dev(FT[s.M[m] * (m in (4, 5) ? -1 : 1) for s in S, m in 1:6]),     # z up -> z down
                               s=Wm.s))

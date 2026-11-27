@@ -13,7 +13,7 @@ const SOURCE_BUDGET = Ref(1 << 24)
 mutable struct SourceWindow{A,H,F,O,R,B}
     s::A                # the amplitudes on the device (nsrc × K)
     host::H             # the same on the host
-    amp::F              # amp(n, it): the amplitude of source n at time step it
+    rows::F             # rows(n): the amplitude of source n as a function of the time step
     out::O              # outputs on the device (arrays with the window as last dimension), or ()
     reduce!::R          # reduce!(outputs on the host, steps, amplitudes on the host) (accumulating), or nothing
     K::Int              # time steps per block
@@ -23,17 +23,18 @@ mutable struct SourceWindow{A,H,F,O,R,B}
 end
 
 """
-    source_window(amp, nsrc, nt, dev, FT, backend; outputs=(), reduce=nothing)
+    source_window(rows, nsrc, nt, dev, FT, backend; outputs=(), reduce=nothing)
 
-A window of the amplitudes `amp(n, it)` of `nsrc` sources over `nt` time steps (`dev`: host array -> device array), with
-optional outputs of sizes `(outputs..., K)` whose blocks are passed to `reduce(host outputs, steps, host amplitudes)`.
+A window of the amplitudes of `nsrc` sources over `nt` time steps (`rows(n)`: the amplitude of source n as a function of the
+time step, see `amp_row`; `dev`: host array -> device array), with optional outputs of sizes `(outputs..., K)` whose blocks
+are passed to `reduce(host outputs, steps, host amplitudes)`.
 """
-function source_window(amp, nsrc, nt, dev, FT, backend; outputs=(), reduce=nothing)
+function source_window(rows, nsrc, nt, dev, FT, backend; outputs=(), reduce=nothing)
     per = max(nsrc, maximum((prod(o) for o in outputs); init=0), 1)       # values per time step of the largest array
     K = per * nt <= SOURCE_BUDGET[] ? nt : clamp(SOURCE_BUDGET[] ÷ per, 1, nt)
     host = Matrix{FT}(undef, nsrc, K)
     out = Tuple(KernelAbstractions.zeros(backend, FT, o..., K) for o in outputs)
-    W = SourceWindow(dev(copy(host)), host, amp, out, reduce, K, nt, 0, backend)
+    W = SourceWindow(dev(copy(host)), host, rows, out, reduce, K, nt, 0, backend)
     switch!(W, 1)
     return W
 end
@@ -49,8 +50,9 @@ window_step!(::Nothing, it) = it
 function switch!(W::SourceWindow, first)
     flush!(W)
     W.first > 0 && KernelAbstractions.synchronize(W.backend)      # (kernels of earlier steps may still read the block)
-    for (l, it) in enumerate(first:min(first + W.K - 1, W.nt)), n in axes(W.host, 1)
-        W.host[n, l] = W.amp(n, it)
+    last = min(first + W.K - 1, W.nt)
+    for n in axes(W.host, 1)
+        fill_row!(W.host, n, W.rows(n), first, last)    # (a function barrier: typed in the source time function of source n)
     end
     copyto!(W.s, W.host)
     W.first = first
@@ -66,6 +68,18 @@ function flush!(W::SourceWindow)
     return nothing
 end
 flush!(::Nothing) = nothing
+
+function fill_row!(H, n, f::F, first, last) where {F}
+    for (l, it) in enumerate(first:last)
+        H[n, l] = f(it)
+    end
+end
+
+"""
+The amplitude of a source at time step `it`, `a · rate(tbeg + (it - shift) dt) · b / c` with its source time function `stf`
+(`source_rate`): a function of `it`, typed in `stf` (the sources of a simulation may have source time functions of any type).
+"""
+amp_row(stf, a, b, c, tbeg, shift, dt, t0, tr) = it -> a * source_rate(stf, tbeg + (it - shift) * dt, t0, tr, dt) * b / c
 
 "Whether the window holds the whole simulation (no refills)."
 whole(W::SourceWindow) = W.K == W.nt
