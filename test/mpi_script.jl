@@ -355,5 +355,29 @@ if runs("curvilinear")
     e = (maximum(abs, b1.v .- b2.v) / maximum(abs, b1.v), maximum(abs, d1.v .- d2.v) / maximum(abs, d1.v))
     rank == 0 && println("MPI curvilinear 3D born nproc=(2, 2): background, scattered $e")
     all(<(1e-10), e) || error("MPI curvilinear born differs on rank $rank")
+    # an ocean (fluid block, fluid–solid interface): 2D gradient, 3D seismograms
+    bathy(x) = -1.5 + 0.4 * tanh(x / 3)
+    mesh = curvilinear_mesh(range(-8, 8, length=61), [x -> 0.0, bathy]; dz=0.25, bottom=-8)
+    X, Z = mesh.x.val, mesh.z.val
+    wet = Z .> bathy.(X) .- 1e-9
+    base = (; rho=ifelse.(wet, 1000.0, 2700.0), vp=ifelse.(wet, 1.5, 5.5), vs=ifelse.(wet, 0.0, 3.2), Qp=100 .+ 0 .* X, Qs=50 .+ 0 .* X)
+    srcs = [MomentTensorSource(-1.0, 0.0, -4.0, 1e15, (1.0, 0.0, 0.5, 0.0, 0.7, 0.0); trise=1.0)]
+    sts = [Station("w$x", Float64(x), 0.0, -0.5) for x in -6:3:6]
+    kw = (; dt=stable_dt(addfield(mesh, base), srcs), tmax=3.0, sources=srcs, T=Float64, absorber=:pml, na=8)
+    obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* 0.97))); kw..., stations=sts, verbose=false)
+    (J1, g1, _), (J2, g2, _) = misfit_gradient(addfield(mesh, base), obs; kw...), misfit_gradient(addfield(mesh, base), obs; kw..., nproc=4)
+    e = (abs(J1 / J2 - 1), maximum(f -> maximum(abs, g1.fields[f] .- g2.fields[f]) / maximum(abs, g1.fields[f]), (:rho, :vp, :vs)))
+    rank == 0 && println("MPI curvilinear ocean gradient nproc=4: misfit, gradient $e")
+    all(<(1e-10), e) || error("MPI curvilinear ocean gradient differs on rank $rank")
+    bathy3(x, y) = -1.5 + 0.4 * tanh((x + y) / 3)
+    mesh = curvilinear_mesh(range(-6, 6, length=31), range(-6, 6, length=31), [(x, y) -> 0.0, bathy3]; dz=0.3, bottom=-6)
+    wet = mesh.z.val .> bathy3.(mesh.x.val, mesh.y.val) .- 1e-9
+    m = addfield(mesh, (; rho=ifelse.(wet, 1000.0, 2700.0), vp=ifelse.(wet, 1.5, 5.5), vs=ifelse.(wet, 0.0, 3.2)))
+    src3 = MomentTensorSource(0.5, -0.5, -3.0, 1e15, (1.0, 0.7, 0.5, 0.3, 0.4, 0.2); trise=0.8)
+    kw = (; dt=stable_dt(m, [src3]), tmax=3.0, sources=src3, stations=[Station("w", 2.0, 1.0, -0.4), Station("s", -2.0, 2.0, -3.0)], verbose=false, absorber=:pml, na=6)
+    s1, s2 = simulate(m; kw...), simulate(m; kw..., nproc=(2, 2))
+    e = maximum(abs, s1.v .- s2.v) / maximum(abs, s1.v)
+    rank == 0 && println("MPI curvilinear 3D ocean nproc=(2, 2): seismograms $e")
+    e < 1e-10 || error("MPI curvilinear 3D ocean differs on rank $rank")
 end
 MPI.Barrier(MPI.COMM_WORLD)

@@ -23,8 +23,8 @@ waves are computed on a 10 m grid (10 million cells, 23 400 time steps) in 2.2 m
 *The Unzen model above, computed with the curvilinear solver: a terrain-following mesh whose top row is the free surface of
 the MTK model, and summation-by-parts (SBP) finite differences with simultaneous approximation terms (SAT) for the free
 surface and the PML boundaries. The topography is resolved at the 10 m node spacing instead of as a staircase of cells
-(4001 × 2124 nodes, 32 926 time steps, 3.7 minutes on Apple Metal). The solver handles solids only: the partially molten
-mush that the staggered run above treats as fluid has an S-wave velocity of 1 km/s here, which changes mainly the coda
+(4001 × 2124 nodes, 32 926 time steps, 3.7 minutes on Apple Metal). Fluids must be whole layers of its mesh (oceans): the partially
+molten mush that the staggered run above treats as fluid has an S-wave velocity of 1 km/s here, which changes mainly the coda
 above the magmatic system ([example](examples/MagmaThermoKinematics/Unzen_2D_10m_curvilinear.jl)).*
 
 SeismicWavePC.jl simulates seismic waves through any model built with
@@ -40,7 +40,7 @@ gradients for full-waveform inversion. It started as a Julia port of [OpenSWPC](
 - **Topography on curvilinear grids:** a terrain-following mesh with the free surface exactly on the topography and grid
   lines along interfaces (e.g. the Moho), simulated with provably stable summation-by-parts (SBP) finite differences (the
   boundary-optimized upwind operators of Mattsson et al. from SummationByPartsOperators.jl, boundary and interface conditions
-  as simultaneous approximation terms); 2D and 3D, with attenuation, VTI anisotropy, PML, gradients and Born modelling, on
+  as simultaneous approximation terms); 2D and 3D, with oceans, attenuation, VTI anisotropy, PML, gradients and Born modelling, on
   GPUs and MPI. Meshes from GMG (`curvilinear_grid`) or `curvilinear_mesh`.
 - **Fast everywhere:** Julia threads (faster than OpenSWPC), GPUs from NVIDIA, AMD and Apple, and MPI for several GPUs or nodes.
 - **Any GMG model:** geology tools, geographic data, thermal models

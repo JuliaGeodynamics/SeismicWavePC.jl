@@ -447,6 +447,67 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
               Jof3(addfield(mesh, (; rho=2600 .* o, vp=5.5 .* o, vs=3.2 .* o .- 1e-3 .* δ)))) / 2e-3
         @test sum(g.fields.vs .* δ) ≈ fd rtol = 1e-6
     end
+    @testset "fluid–solid interfaces (oceans)" begin
+        # 2D P-SV: an ocean over a flat seafloor (the staircase of the staggered grid exact), against the staggered grid at 25 m
+        mat(z) = z > 0 ? (1.0, 0.0, 0.0) : z > -2.0 - 1e-9 ? (1000.0, 1.5, 0.0) : (2700.0, 5.0, 2.9)
+        fl(F) = (; rho=getindex.(F, 1), vp=getindex.(F, 2), vs=getindex.(F, 3))
+        src = MomentTensorSource(0.5, 0.0, -4.5, 1e15, (1.0, 0.5, -1.0, 0.0, 0.7, 0.0); trise=1.0)
+        st = [Station("water", 2.0, 0.0, -0.5), Station("seafloor", -3.0, 0.0, -2.1), Station("solid", 4.0, 0.0, -4.0)]
+        mesh = curvilinear_mesh(range(-9, 9, length=181), [x -> 0.0, x -> -2.0]; dz=0.1, bottom=-9)
+        ocean = addfield(mesh, fl(mat.(mesh.z.val)))
+        rc = simulate(ocean; grid=:curvilinear, tmax=5.05, sources=src, stations=st, T=Float64, verbose=false, absorber=:pml)
+        dx = 0.025
+        X, Y, Z = xyz_grid(range(-9 + dx / 2, 9, step=dx), 0, range(-9 + dx / 2, 0.5, step=dx))
+        rs = simulate(CartData(X, Y, Z, fl(mat.(Z))); dt=0.04dx, nt=round(Int, 5 / 0.04dx), sources=src, stations=st, interpolation=:sinc,
+                      T=Float64, verbose=false)
+        at(t, u) = [τ >= t[end] ? u[end] : (j = searchsortedlast(t, τ); j == 0 ? 0.0 : u[j] + (u[j+1] - u[j]) * (τ - t[j]) / (t[2] - t[1])) for τ in 0:0.01:4.9]
+        for k in 1:3, c in 1:2                                      # (measured: 0.04–0.2 %)
+            a, b = at(rc.t, rc.u[:, c, k]), at(rs.t .+ 0.04dx, rs.u[:, c, k])
+            @test sqrt(sum(abs2, a .- b) / sum(abs2, b)) < 0.01
+        end
+        @test all(isfinite, rc.strain)
+        # SH: no motion in the fluid, the seafloor free
+        r = simulate(ocean; grid=:curvilinear, tmax=3.0, sources=ForceSource(0.5, 0.0, -4.5; fy=1e14, trise=1.0), stations=st, verbose=false, wave=:sh)
+        @test maximum(abs, r.v[:, 1, 1]) == 0 && maximum(abs, r.v[:, 1, 3]) > 0 && all(isfinite, r.strain)
+        # fluid regions: whole blocks
+        part = addfield(mesh, fl([z > 0 ? (1.0, 0.0, 0.0) : z > -2.0 - 1e-9 && x < 0 ? (1000.0, 1.5, 0.0) : (2700.0, 5.0, 2.9) for (x, z) in zip(mesh.x.val, mesh.z.val)]))
+        @test_throws "part fluid" simulate(part; grid=:curvilinear, tmax=0.1, sources=src, verbose=false)
+        # gradients: a sloping seafloor, attenuation (P-SV, SH; 3D with the PML)
+        stable_dt(m, srcs) = (r = simulate(m; grid=:curvilinear, tmax=0.05, sources=srcs, T=Float64, verbose=false); r.t[2] - r.t[1])
+        bathy(x) = -2.0 + 0.5tanh(x / 3)
+        mesh = curvilinear_mesh(range(-8, 8, length=61), [x -> 0.0, bathy]; dz=0.25, bottom=-8)
+        X, Z = mesh.x.val, mesh.z.val
+        wet = Z .> bathy.(X) .- 1e-9
+        base = (; rho=ifelse.(wet, 1000.0, 2700.0), vp=ifelse.(wet, 1.5, 5.5), vs=ifelse.(wet, 0.0, 3.2), Qp=100 .+ 0 .* X, Qs=50 .+ 0 .* X)
+        srcs = [DoubleCoupleSource(-2.0, 0.0, -4.0; Mw=4.0, strike=30, dip=60, rake=70, trise=1.0), ForceSource(3.0, 0.0, -6.0; fy=1e14, fz=1e14, trise=1.0)]
+        sts = [[Station("w$x", Float64(x), 0.0, -0.5) for x in -6:3:6]; Station("sf", 1.0, 0.0, bathy(1.0) - 0.3)]
+        bump(c) = @. exp(-((X - c[1])^2 + (Z - c[2])^2))
+        for wave in (:psv, :sh)
+            kw = (; dt=stable_dt(addfield(mesh, base), srcs), tmax=3.0, sources=srcs, T=Float64, wave)
+            obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* 0.97, vp=base.vp .* ifelse.(wet, 1.02, 1.0)))); kw..., stations=sts, verbose=false)
+            J, g, _ = misfit_gradient(addfield(mesh, base), obs; kw...)
+            Jof(m) = L2Misfit()(simulate(m; kw..., stations=sts, verbose=false).v, obs.v, obs.t)[1]
+            for (f, δ) in ((:vs, 0.05 .* bump((0.5, -2.6)) .* .!wet), (:vp, 0.05 .* bump((-1.0, -1.0)) .* wet), (:rho, 50 .* bump((0.5, -2.0))))
+                wave === :sh && f === :vp && continue
+                fd = (Jof(addfield(mesh, merge(base, (; f => base[f] .+ 1e-3 .* δ)))) - Jof(addfield(mesh, merge(base, (; f => base[f] .- 1e-3 .* δ))))) / 2e-3
+                @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
+            end
+        end
+        bathy3(x, y) = -1.6 + 0.4tanh((x + 0.5y) / 2)
+        mesh = curvilinear_mesh(range(-5, 5, length=29), range(-5, 5, length=29), [(x, y) -> 0.0, bathy3]; dz=0.3, bottom=-6)
+        X3, Y3, Z3 = mesh.x.val, mesh.y.val, mesh.z.val
+        wet = Z3 .> bathy3.(X3, Y3) .- 1e-9
+        base = (; rho=ifelse.(wet, 1000.0, 2700.0), vp=ifelse.(wet, 1.5, 5.5), vs=ifelse.(wet, 0.0, 3.2))
+        src3 = MomentTensorSource(-1.0, 0.5, -3.0, 1e15, (1.0, 0.7, 0.5, 0.3, 0.4, 0.2); trise=0.8)
+        sts3 = [[Station("w$x$y", Float64(x), Float64(y), -0.4) for x in -3:3:3 for y in (-3, 3)]; Station("sf", 1.0, -1.0, bathy3(1.0, -1.0) - 0.3)]
+        kw = (; dt=stable_dt(addfield(mesh, base), [src3]), tmax=3.0, sources=src3, T=Float64, absorber=:pml, na=6)
+        obs = simulate(addfield(mesh, merge(base, (; vs=base.vs .* 0.97))); kw..., stations=sts3, verbose=false)
+        J, g, _ = misfit_gradient(addfield(mesh, base), obs; kw...)
+        Jof3(m) = L2Misfit()(simulate(m; kw..., stations=sts3, verbose=false).v, obs.v, obs.t)[1]
+        δ = 0.05 .* exp.(-((X3 .+ 1) .^ 2 .+ (Y3 .- 1) .^ 2 .+ (Z3 .+ 0.8) .^ 2)) .* wet                        # vp of the water
+        fd = (Jof3(addfield(mesh, merge(base, (; vp=base.vp .+ 1e-3 .* δ)))) - Jof3(addfield(mesh, merge(base, (; vp=base.vp .- 1e-3 .* δ))))) / 2e-3
+        @test sum(g.fields.vp .* δ) ≈ fd rtol = 1e-6
+    end
     @testset "the mesh of GMG (curvilinear_grid with SBP spacing)" begin
         if isdefined(GeophysicalModelGenerator, :curvilinear_grid)              # (GMG ≥ 0.10.2)
             topog(x) = 1.2 * exp(-x^2 / 12)

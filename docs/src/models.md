@@ -50,6 +50,15 @@ result = simulate(model; tmax=20.0, sources, stations)           # dt from the s
   `curvilinear_grid(sbp_nodes(-72, 52, 249), 0, (topo, moho, -80.0); dz=0.5, spacing=:sbp)`.
 - **Blocks.** The mesh is split into blocks at grid rows where the material jumps along the full width. Their interfaces
   are grid lines, so the jump stays sharp. Other heterogeneity (a magma chamber, gradients) is sampled at the nodes.
+  Give the nodes on an interface the material above it (`z >= interface`): where the node spacing does not change at the
+  interface (e.g. a flat mesh), the interface is taken at the upper row of the jump, so the material below would shift it
+  up by one row (a first-order error).
+- **Oceans** (fluids, `vs = 0`): a fluid layer is a block of its own, between two surfaces of the mesh (e.g. sea level
+  and the bathymetry), and must span the whole width (no coastlines). At the seafloor the normal velocity and the
+  normal traction are continuous and the tangential traction vanishes: the fluid slips along the solid (SAT terms on the
+  normal components only), stable as all interfaces. Against the staggered grid with a flat seafloor (exact there) below 1 %
+  at 100 m; with a sloping seafloor the staggered grid converges towards it. SH waves see the seafloor as a free surface.
+  Strains at stations in the fluid: the volumetric strain, split equally between the normal components.
 - **Time step and boundaries.** The time step follows from the spectral radius of the operator: `dt` is not needed, give
   the duration `tmax`. The sides and the bottom absorb with impedance boundary conditions; `absorber = :pml` adds a
   perfectly matched layer of `na = 20` nodes (at least 6; the CFS-PML of OpenSWPC on the ξ and η parts of the SBP operators: about

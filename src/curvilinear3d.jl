@@ -18,7 +18,7 @@ in global indices). No closure over the element type: the kernels stay type stab
 end
 
 "The arrays of a neighbouring block that the interface terms read (small kernel arguments: Metal allows 4 kB)."
-neighbour3(B) = (; V1=B.V1, V2=B.V2, V3=B.V3, G1=B.G1, G2=B.G2, G3=B.G3)
+neighbour3(B) = (; V1=B.V1, V2=B.V2, V3=B.V3, G1=B.G1, G2=B.G2, G3=B.G3, fluid=B.fluid)
 neighbour3(::Nothing) = nothing
 
 # Momentum at node (i, j, k); the region flags (fx, fy, fz[, px, py, pz]): interior in x, y, η (no closures, no SAT terms
@@ -83,7 +83,8 @@ end
             if Bu === nothing
                 z1 -= g1 / (w * hη); z2 -= g2 / (w * hη); z3 -= g3 / (w * hη)
             else
-                z1 -= (g1 - Bu.G1[i, j, 1]) / (2w * hη); z2 -= (g2 - Bu.G2[i, j, 1]) / (2w * hη); z3 -= (g3 - Bu.G3[i, j, 1]) / (2w * hη)
+                e1, e2, e3 = sat_traction(B.fluid != Bu.fluid, (B.Jx[i, j, k], B.Jy[i, j, k], one(T)), (g1, g2, g3), (Bu.G1[i, j, 1], Bu.G2[i, j, 1], Bu.G3[i, j, 1]))
+                z1 -= e1 / (2w * hη); z2 -= e2 / (2w * hη); z3 -= e3 / (2w * hη)
             end
         end
         if k == 1
@@ -91,7 +92,8 @@ end
                 z1 += g1 / (w * hη); z2 += g2 / (w * hη); z3 += g3 / (w * hη)
             else
                 n = size(Bd.V1, 3)
-                z1 -= (Bd.G1[i, j, n] - g1) / (2w * hη); z2 -= (Bd.G2[i, j, n] - g2) / (2w * hη); z3 -= (Bd.G3[i, j, n] - g3) / (2w * hη)
+                e1, e2, e3 = sat_traction(B.fluid != Bd.fluid, (B.Jx[i, j, k], B.Jy[i, j, k], one(T)), (g1, g2, g3), (Bd.G1[i, j, n], Bd.G2[i, j, n], Bd.G3[i, j, n]))
+                z1 += e1 / (2w * hη); z2 += e2 / (2w * hη); z3 += e3 / (2w * hη)
             end
         end
     end
@@ -151,13 +153,15 @@ end
     z3 = dpl(q -> @inbounds(V3[i, j, q]), k, 0, nz, fz, T) / hη
     if !flags[3]
         if k == nz && Bu !== nothing
-            z1 -= (V1[i, j, k] - Bu.V1[i, j, 1]) / (2w * hη); z2 -= (V2[i, j, k] - Bu.V2[i, j, 1]) / (2w * hη)
-            z3 -= (V3[i, j, k] - Bu.V3[i, j, 1]) / (2w * hη)
+            e1, e2, e3 = sat_velocity(B.fluid != Bu.fluid, (Jx[i, j, k], Jy[i, j, k], one(T)), (V1[i, j, k], V2[i, j, k], V3[i, j, k]),
+                                      (Bu.V1[i, j, 1], Bu.V2[i, j, 1], Bu.V3[i, j, 1]))
+            z1 -= e1 / (2w * hη); z2 -= e2 / (2w * hη); z3 -= e3 / (2w * hη)
         end
         if k == 1 && Bd !== nothing
             n = size(Bd.V1, 3)
-            z1 -= (Bd.V1[i, j, n] - V1[i, j, k]) / (2w * hη); z2 -= (Bd.V2[i, j, n] - V2[i, j, k]) / (2w * hη)
-            z3 -= (Bd.V3[i, j, n] - V3[i, j, k]) / (2w * hη)
+            e1, e2, e3 = sat_velocity(B.fluid != Bd.fluid, (Jx[i, j, k], Jy[i, j, k], one(T)), (V1[i, j, k], V2[i, j, k], V3[i, j, k]),
+                                      (Bd.V1[i, j, n], Bd.V2[i, j, n], Bd.V3[i, j, n]))
+            z1 += e1 / (2w * hη); z2 += e2 / (2w * hη); z3 += e3 / (2w * hη)
         end
     end
     p = part(B)
@@ -272,7 +276,8 @@ Base.@propagate_inbounds function record3_cv!(rec, acc, prev, blocks, St, itw, d
              sample3_cv(B.S13, St, n), sample3_cv(B.S12, St, n))
         l, m = sample3_cv(B.lam, St, n), sample3_cv(B.mu, St, n)
         tr = (σ[1] + σ[2] + σ[3]) * l / (3l + 2m)
-        e = ((σ[1] - tr) / 2m, (σ[2] - tr) / 2m, (σ[3] - tr) / 2m, σ[4] / 2m, σ[5] / 2m, σ[6] / 2m)
+        ef = (σ[1] + σ[2] + σ[3]) / 9l                 # (fluid: the volumetric strain, split equally; no shear strain)
+        e = iszero(m) ? (ef, ef, ef, m, m, m) : ((σ[1] - tr) / 2m, (σ[2] - tr) / 2m, (σ[3] - tr) / 2m, σ[4] / 2m, σ[5] / 2m, σ[6] / 2m)
         for c in 1:3
             rec[itw, c, n] = (prev[c, n] + v[c]) / 2
             rec[itw, 3+c, n] = acc[c, n]
@@ -348,7 +353,7 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
     haskey(f, :rho) && haskey(f, :vp) && haskey(f, :vs) || error("the model needs fields rho, vp and vs")
     ρ = f.rho .* (density_unit === :g_cm3 ? 1e3 : 1.0)
     vp, vs = 1e3 .* f.vp, 1e3 .* f.vs
-    minimum(vs) > 0 || error("curvilinear grids: solids only (vs > 0 everywhere)")
+    minimum(vp) > 0 && minimum(vs) >= 0 || error("curvilinear grids: vp > 0 and vs >= 0 (vs = 0: fluid) everywhere")
     qp = haskey(f, :Qp) ? Float64.(f.Qp) : fill(Inf, size(Zw))
     qs = haskey(f, :Qs) ? Float64.(f.Qs) : fill(Inf, size(Zw))
     attenuation = model isa CartData ? any(k -> haskey(model.fields, k) && any(isfinite, model.fields[k]), (:Qp, :Qs)) : model.attenuation
@@ -388,7 +393,7 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
         Jx = [-dminus(q -> Zb[clamp(q - ow, 1, nwx), j, k], i + ow, nx) / hξ for i in 1:nwx, j in 1:nwy, k in 1:nz]
         Jy = [-dminus(q -> Zb[i, clamp(q - owy, 1, nwy), k], j + owy, ny) / hψ for i in 1:nwx, j in 1:nwy, k in 1:nz]
         minimum(J) > 0 || error("curvilinear grid: the mesh folds in block $b")
-        taup, taus = NM * zeta ./ bqp, NM * zeta ./ bqs
+        taup, taus = NM * zeta ./ bqp, @. ifelse(bvs == 0, 0.0, NM * zeta / bqs)      # (fluid: no shear)
         mu = @. bρ * bvs^2 / visco_chi((ts,), taus, fq_ref)^2
         lam = @. bρ * bvp^2 / visco_chi((ts,), taup, fq_ref)^2 - 2mu
         V = vti_moduli.(bρ, bvp, bvs, bε, bδ, bγ, visco_chi.((ts,), taup, fq_ref), visco_chi.((ts,), taus, fq_ref))
@@ -430,7 +435,7 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
             end
         end
         (; nz, hη, Z=Zb, J, Jx, Jy, ρ=bρ, lam, mu, taup, taus, a1, a2, a3, vp=bvp, vs=bvs, ε=bε, δ=bδ, γ=bγ, wx, wz, s13, mu55, mu66,
-           kmap, da)
+           kmap, da, fluid=block_fluid(bvs[ia-ow:ib-ow, ja-owy:jb-owy, :], b, par))
     end
     nb = length(hostblocks)
     # PML: profiles (identity until the time step is known) and memory variables (x, y layers: 2na columns, 2na rows; bottom: na)
@@ -462,7 +467,7 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
         merge((; V1=z(), V2=z(), V3=z(), S11=z(), S22=z(), S33=z(), S23=z(), S13=z(), S12=z(), G1=z(), G2=z(), G3=z(), J=loc(H.J),
                Jx=loc(H.Jx), Jy=loc(H.Jy), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam), mu=loc(aniso ? H.mu55 : H.mu),
                tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1), a2=loc(H.a2),
-               a3=loc(H.a3), hξ=FT(hξ), hψ=FT(hψ), hη=FT(H.hη), ox, oy, nxg=nx, nyg=ny), mem, vti, sponge, player)
+               a3=loc(H.a3), hξ=FT(hξ), hψ=FT(hψ), hη=FT(H.hη), ox, oy, nxg=nx, nyg=ny, fluid=H.fluid), mem, vti, sponge, player)
     end)
     lite = map(B -> merge(B, (; pml=nothing)), blocks)        # (kernels without the PML: Metal allows 4 kB of arguments)
     below_(b) = b > 1 ? blocks[b-1] : nothing

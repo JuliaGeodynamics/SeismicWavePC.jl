@@ -161,7 +161,7 @@ if it does not, the interface is the upper row (GMG: a node exactly on a surface
 for each whether each column's node has the material below the interface (true) or above it.
 """
 function find_blocks(Z, vp, vs; jump=0.05, own=axes(vp, 1), red=nothing)
-    rel(a, b) = abs(a - b) / max(abs(a), abs(b))
+    rel(a, b) = a == b ? 0.0 : abs(a - b) / max(abs(a), abs(b))      # (0 between fluid nodes, vs = 0)
     nx, nz = size(vp)
     # a jump: larger than `jump` and than 3 times the changes between the neighbouring rows (not a steep gradient)
     ch(A, i, k) = 1 <= k <= nz - 1 ? rel(A[i, k], A[i, k+1]) : 0.0
@@ -184,6 +184,17 @@ function find_blocks(Z, vp, vs; jump=0.05, own=axes(vp, 1), red=nothing)
         push!(rows, !both ? r : kink(r) > 1e-9 && kink(r) > 3kink(r + 1) ? r : r + 1)
     end
     return rows, [[J[i, r] for i in 1:nx] for r in rows]
+end
+"""
+Is a block fluid (vs = 0)? Blocks are fluid or solid as a whole: fluid–solid interfaces must be interfaces of the mesh (`vs` of
+the columns of this process; with MPI: of all).
+"""
+function block_fluid(vs, b, par)
+    r = (Int(any(iszero, vs)), Int(any(>(0), vs)))
+    f, s = par === nothing ? r : (MPI.Allreduce(r[1], max, par.comm), MPI.Allreduce(r[2], max, par.comm))
+    f == 1 && s == 1 && error("curvilinear grids: block $b is part fluid (vs = 0), part solid: fluid regions must be whole layers " *
+                              "of the mesh, between two of its surfaces (fluid–solid interfaces: interfaces of the mesh)")
+    return f == 1
 end
 "The reductions over the processes of `find_blocks` (nothing: one process)."
 block_reducer(par) = par === nothing ? nothing : (; and=v -> MPI.Allreduce(Int.(v), min, par.comm) .== 1,
@@ -211,9 +222,25 @@ end
 # ------------------------------------------------------------------ kernels (one node (i, k) of a block)
 
 "The arrays of a neighbouring block that the interface terms read (small kernel arguments: Metal allows 4 kB)."
-neighbour(B) = (; V1=B.V1, V2=B.V2, S11=B.S11, S12=B.S12, S22=B.S22, Jx=B.Jx)
+neighbour(B) = (; V1=B.V1, V2=B.V2, S11=B.S11, S12=B.S12, S22=B.S22, Jx=B.Jx, fluid=B.fluid)
 neighbour(::Nothing) = nothing
 
+# Fluid–solid interfaces (`B.fluid`: a block of fluid, μ = 0; an interface with fluid on one side): slip. Only the normal
+# components are coupled (half the mismatch of the normal traction and velocity, as welded), the tangential tractions removed
+# on both sides (as at a free surface; zero in the fluid anyway). The normal n ∝ m = Jη (the same on both sides: the metric
+# along the row), n nᵀ = m mᵀ / |m|². The SBP identity of the adjoint holds as for welded interfaces and free surfaces.
+"The traction mismatch `e` of the momentum SAT at an interface (`t` own, `o` of the other block; top row: -e/(2Hη), bottom: +e/(2Hη))."
+@inline function sat_traction(slip, m, t, o)
+    slip || return t .- o
+    s = sum(m .* (t .+ o)) / sum(m .* m)
+    return 2 .* t .- s .* m
+end
+"The velocity mismatch of the stress SAT at an interface (welded: all components, slip: the normal one)."
+@inline function sat_velocity(slip, m, v, o)
+    slip || return v .- o
+    s = sum(m .* (v .- o)) / sum(m .* m)
+    return s .* m
+end
 @inline orzero(x, I) = x[I]
 @inline orzero(::Nothing, I) = false
 @inline cmemvar!(R, I, f, vc, dt) = memvar!(R, I, f, vc, dt)
@@ -299,8 +326,9 @@ pml_arrays(B) = (P = pmlof(B); P === nothing ? () : Tuple(v for (k, v) in pairs(
         if Bu === nothing
             z1 -= t1 / (w * hη); z2 -= t2 / (w * hη)
         else
-            z1 -= (t1 - (Bu.Jx[i, 1] * Bu.S11[i, 1] + Bu.S12[i, 1])) / (2w * hη)
-            z2 -= (t2 - (Bu.Jx[i, 1] * Bu.S12[i, 1] + Bu.S22[i, 1])) / (2w * hη)
+            e1, e2 = sat_traction(B.fluid != Bu.fluid, (Jx[i, k], one(T)), (t1, t2),
+                                  (Bu.Jx[i, 1] * Bu.S11[i, 1] + Bu.S12[i, 1], Bu.Jx[i, 1] * Bu.S12[i, 1] + Bu.S22[i, 1]))
+            z1 -= e1 / (2w * hη); z2 -= e2 / (2w * hη)
         end
     end
     if k == 1
@@ -309,8 +337,9 @@ pml_arrays(B) = (P = pmlof(B); P === nothing ? () : Tuple(v for (k, v) in pairs(
             z1 += t1 / (w * hη); z2 += t2 / (w * hη)
         else
             n = size(Bd.V1, 2)
-            z1 -= ((Bd.Jx[i, n] * Bd.S11[i, n] + Bd.S12[i, n]) - t1) / (2w * hη)
-            z2 -= ((Bd.Jx[i, n] * Bd.S12[i, n] + Bd.S22[i, n]) - t2) / (2w * hη)
+            e1, e2 = sat_traction(B.fluid != Bd.fluid, (Jx[i, k], one(T)), (t1, t2),
+                                  (Bd.Jx[i, n] * Bd.S11[i, n] + Bd.S12[i, n], Bd.Jx[i, n] * Bd.S12[i, n] + Bd.S22[i, n]))
+            z1 += e1 / (2w * hη); z2 += e2 / (2w * hη)
         end
     end
     p = part(B)
@@ -375,11 +404,13 @@ end
     c = (xint ? dplus_int(g2, i, T) : dplus(q -> g2(q - ox), i + ox, nxg)) / hξ
     e = dplus(j -> @inbounds(V2[i, j]), k, nz) / hη
     if k == nz && Bu !== nothing
-        b -= (V1[i, k] - Bu.V1[i, 1]) / (2w * hη); e -= (V2[i, k] - Bu.V2[i, 1]) / (2w * hη)
+        u1, u2 = sat_velocity(B.fluid != Bu.fluid, (B.Jx[i, k], one(T)), (V1[i, k], V2[i, k]), (Bu.V1[i, 1], Bu.V2[i, 1]))
+        b -= u1 / (2w * hη); e -= u2 / (2w * hη)
     end
     if k == 1 && Bd !== nothing
         n = size(Bd.V1, 2)
-        b -= (Bd.V1[i, n] - V1[i, k]) / (2w * hη); e -= (Bd.V2[i, n] - V2[i, k]) / (2w * hη)
+        u1, u2 = sat_velocity(B.fluid != Bd.fluid, (B.Jx[i, k], one(T)), (V1[i, k], V2[i, k]), (Bd.V1[i, n], Bd.V2[i, n]))
+        b += u1 / (2w * hη); e += u2 / (2w * hη)
     end
     p = part(B)
     usexi(p) || (a = c = zero(T))
@@ -400,7 +431,7 @@ end
 # ------------------------------------------------------------------ SH (2D): vy (V1), σxy (S1), σyz (S2)
 # Momentum: ρ J ∂t vy = Dξ(J σxy) + Dη(Jx σxy + σyz), the SAT terms as in P-SV; stress: σxy with C66 (`mu66`), σyz with
 # C44 (`mu`), memory variables R1, R2. The parts and the PML as in P-SV (memory: xv1, xa (Dξ vy), zv1, zb (Dη vy)).
-neighbour_sh(B) = (; V1=B.V1, S1=B.S1, S2=B.S2, Jx=B.Jx)
+neighbour_sh(B) = (; V1=B.V1, S1=B.S1, S2=B.S2, Jx=B.Jx, fluid=B.fluid)
 neighbour_sh(::Nothing) = nothing
 @inline Base.@propagate_inbounds function momentum_sh!(B, Bd, Bu, dt, damp, ::Val{F}, i, k) where {F}
     xint, px, pz = flags(F)
@@ -419,11 +450,12 @@ neighbour_sh(::Nothing) = nothing
     z1 = dminus(j -> @inbounds(Jx[i, j] * S1[i, j] + S2[i, j]), k, nz) / hη
     if k == nz
         t1 = Jx[i, k] * S1[i, k] + S2[i, k]
-        z1 -= Bu === nothing ? t1 / (w * hη) : (t1 - (Bu.Jx[i, 1] * Bu.S1[i, 1] + Bu.S2[i, 1])) / (2w * hη)
+        # (fluid–solid: vy is tangential, the interface free on both sides)
+        z1 -= Bu === nothing || B.fluid != Bu.fluid ? t1 / (w * hη) : (t1 - (Bu.Jx[i, 1] * Bu.S1[i, 1] + Bu.S2[i, 1])) / (2w * hη)
     end
     if k == 1
         t1 = Jx[i, k] * S1[i, k] + S2[i, k]
-        if Bd === nothing
+        if Bd === nothing || B.fluid != Bd.fluid
             z1 += t1 / (w * hη)
         else
             n = size(Bd.V1, 2)
@@ -456,8 +488,8 @@ end
     g = j -> @inbounds(V1[j, k])
     c = (xint ? dplus_int(g, i, T) : dplus(q -> g(q - ox), i + ox, nxg)) / hξ
     e = dplus(j -> @inbounds(V1[i, j]), k, nz) / hη
-    k == nz && Bu !== nothing && (e -= (V1[i, k] - Bu.V1[i, 1]) / (2w * hη))
-    k == 1 && Bd !== nothing && (e -= (Bd.V1[i, size(Bd.V1, 2)] - V1[i, k]) / (2w * hη))
+    k == nz && Bu !== nothing && B.fluid == Bu.fluid && (e -= (V1[i, k] - Bu.V1[i, 1]) / (2w * hη))
+    k == 1 && Bd !== nothing && B.fluid == Bd.fluid && (e -= (Bd.V1[i, size(Bd.V1, 2)] - V1[i, k]) / (2w * hη))
     p = part(B)
     usexi(p) || (c = zero(T))
     useeta(p) || (e = zero(T))
@@ -511,7 +543,7 @@ Base.@propagate_inbounds function record_sh_cv!(rec, acc, prev, blocks, St, itw,
     if itw > 0
         sxy, syz = sample_cv(B.S1, St, n), sample_cv(B.S2, St, n)
         m, m6 = sample_cv(B.mu, St, n), sample_cv(B.mu66, St, n)
-        q = ((prev[1, n] + v) / 2, acc[1, n], syz, sxy, syz / (2m), sxy / (2m6))
+        q = ((prev[1, n] + v) / 2, acc[1, n], syz, sxy, iszero(m) ? m : syz / (2m), iszero(m6) ? m6 : sxy / (2m6))
         for j in 1:6
             rec[itw, j, n] = q[j]
         end
@@ -611,8 +643,9 @@ Base.@propagate_inbounds function record_cv!(rec, acc, prev, blocks, St, itw, dt
         s11, s22, s12 = sample_cv(B.S11, St, n), sample_cv(B.S22, St, n), sample_cv(B.S12, St, n)
         l, m = sample_cv(B.lam, St, n), sample_cv(B.mu, St, n)
         d = 4m * (l + m)
-        q = ((prev[1, n] + v1) / 2, (prev[2, n] + v2) / 2, acc[1, n], acc[2, n], s11, s22, s12,
-             ((l + 2m) * s11 - l * s22) / d, ((l + 2m) * s22 - l * s11) / d, s12 / (2m))
+        # (fluid: the volumetric strain σ/λ, split equally; no shear strain)
+        e = iszero(m) ? ((s11 + s22) / 4l, (s11 + s22) / 4l, m) : (((l + 2m) * s11 - l * s22) / d, ((l + 2m) * s22 - l * s11) / d, s12 / (2m))
+        q = ((prev[1, n] + v1) / 2, (prev[2, n] + v2) / 2, acc[1, n], acc[2, n], s11, s22, s12, e...)
         for j in 1:10
             rec[itw, j, n] = q[j]
         end
@@ -762,7 +795,7 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     haskey(f, :rho) && haskey(f, :vp) && haskey(f, :vs) || error("the model needs fields rho, vp and vs")
     ρ = f.rho .* (density_unit === :g_cm3 ? 1e3 : 1.0)
     vp, vs = 1e3 .* f.vp, 1e3 .* f.vs
-    minimum(vs) > 0 || error("curvilinear grids: solids only (vs > 0 everywhere)")
+    minimum(vp) > 0 && minimum(vs) >= 0 || error("curvilinear grids: vp > 0 and vs >= 0 (vs = 0: fluid) everywhere")
     qp = haskey(f, :Qp) ? Float64.(f.Qp) : fill(Inf, nw, nzt)
     qs = haskey(f, :Qs) ? Float64.(f.Qs) : fill(Inf, nw, nzt)
     attenuation = model isa CartData ? any(k -> haskey(model.fields, k) && any(isfinite, model.fields[k]), (:Qp, :Qs)) : model.attenuation
@@ -798,7 +831,7 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
         # (global stencils: at the outer nodes of the window wrong (clamped), not used)
         Jx = [-dminus(j -> Zb[clamp(j - ow, 1, nw), k], i + ow, nx) / hξ for i in 1:nw, k in 1:nz]
         minimum(J) > 0 || error("curvilinear grid: the mesh folds in block $b")
-        taup, taus = NM * zeta ./ bqp, NM * zeta ./ bqs
+        taup, taus = NM * zeta ./ bqp, @. ifelse(bvs == 0, 0.0, NM * zeta / bqs)      # (fluid: no shear)
         mu = @. bρ * bvs^2 / visco_chi((ts,), taus, fq_ref)^2
         lam = @. bρ * bvp^2 / visco_chi((ts,), taup, fq_ref)^2 - 2mu
         # the moduli in the VTI form (also of isotropic media: the adjoint)
@@ -835,7 +868,8 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
                 da[1][2][:, 1] .+= q; da[2][1][:, 1] .+= q
             end
         end
-        (; nz, hη, Z=Zb, J, Jx, ρ=bρ, lam, mu, taup, taus, a1, a2, vp=bvp, vs=bvs, ε=bε, δ=bδ, γ=bγ, wx, wz, s13, mu55, mu66, kmap, da)
+        (; nz, hη, Z=Zb, J, Jx, ρ=bρ, lam, mu, taup, taus, a1, a2, vp=bvp, vs=bvs, ε=bε, δ=bδ, γ=bγ, wx, wz, s13, mu55, mu66, kmap, da,
+         fluid=block_fluid(bvs[ia-ow:ib-ow, :], b, par))
     end
     nb = length(hostblocks)
     # PML: profiles (identity until the time step is known) and memory variables (side layers: 2na columns; bottom: na rows)
@@ -864,12 +898,12 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
         r0 = H.kmap[1, 2] - 2                                       # (the mesh row of node k: r0 + k)
         sponge = absorber === :cerjan ? (; gs=loc([cerjan_factor(i + ow, nx, na) * cerjan_factor(r0 + k, typemax(Int), na) for i in 1:nw, k in 1:H.nz])) : (;)
         sh && return merge((; V1=z(), S1=z(), S2=z(), J=loc(H.J), Jx=loc(H.Jx), iρJ=loc(1 ./ (H.ρ .* H.J)), mu=loc(H.mu55), mu66=loc(H.mu66),
-                            ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx),
+                            ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx, fluid=H.fluid),
                            attenuation ? (; R1=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz), R2=KernelAbstractions.zeros(backend, FT, NM, nl, H.nz)) : (;),
                            sponge, player)
         merge((; V1=z(), V2=z(), S11=z(), S22=z(), S12=z(), J=loc(H.J), Jx=loc(H.Jx), iρJ=loc(1 ./ (H.ρ .* H.J)), lam=loc(H.lam),
                mu=loc(aniso ? H.mu55 : H.mu), tp=attenuation ? loc(H.taup) : nothing, ts=attenuation ? loc(H.taus) : nothing, a1=loc(H.a1),
-               a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx), mem, vti, sponge, player)
+               a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx, fluid=H.fluid), mem, vti, sponge, player)
     end)
     lite = map(B -> merge(B, (; pml=nothing)), blocks)        # (kernels without the PML: Metal allows 4 kB of arguments)
     below_(b) = b > 1 ? blocks[b-1] : nothing
