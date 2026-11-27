@@ -229,8 +229,10 @@ slim(blocks, names) = map(B -> NamedTuple{Tuple(k for k in names if haskey(B, k)
 const CV_VEL = (:V1, :V2, :V3)
 const CV_STRESS = (:S11, :S22, :S33, :S23, :S13, :S12, :S1, :S2)
 const CV_RECORD = (CV_VEL..., CV_STRESS..., :lam, :mu, :mu66)                       # (stations)
-const CV_FORCE = (CV_VEL..., :iρJ)                                                  # (forces, teleseismic momentum)
-const CV_UPDATE = (CV_STRESS..., :J, :Jx, :Jy, :lam, :mu, :mu66, :tp, :ts, :wx, :wz, :s13,
+const CV_FORCE = (CV_VEL..., :iρJ)                                                  # (forces)
+const CV_METRIC = (:J, :Jx, :Jy, :hξ, :hψ, :hη, :ox, :oy)
+const CV_TF = (CV_FORCE..., CV_METRIC...)                                           # (teleseismic momentum)
+const CV_UPDATE = (CV_STRESS..., CV_METRIC..., :V1, :lam, :mu, :mu66, :tp, :ts, :wx, :wz, :s13,
                    :R11, :R22, :R33, :R23, :R13, :R12, :R1, :R2)                    # (the stress update: teleseismic stress)
 
 "The arrays of a neighbouring block that the interface terms read (small kernel arguments: Metal allows 4 kB)."
@@ -920,6 +922,7 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     lite = map(B -> merge(B, (; pml=nothing)), blocks)        # (kernels without the PML: Metal allows 4 kB of arguments)
     # (kernels that see all blocks: only the arrays they read)
     recB, forceB, momB, updB, velB = slim(blocks, CV_RECORD), slim(blocks, CV_FORCE), slim(blocks, CV_STRESS), slim(blocks, CV_UPDATE), slim(blocks, CV_VEL)
+    tfB = slim(blocks, CV_TF)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing
     # the regions of a block, each with its kernel variant: the interior (branch-free), the top and bottom rows away from
@@ -1123,7 +1126,7 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
         itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
         itw > 0 && nst > 0 && foreach_item!(backend, sh ? vprev_sh_cv! : vprev_cv!, (prev, recB, St), nst)
         momentum!(dtT, true)
-        ntw > 0 && foreach_item!(backend, sh ? tf_momentum_sh! : tf_momentum_psv!, (forceB, TW, FT(tbeg + n * dt), dtT), ntw)
+        ntw > 0 && foreach_item!(backend, sh ? tf_momentum_sh! : tf_momentum_psv!, (tfB, TW, FT(tbeg + n * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(V -> V .*= B.gs, vel(B)), blocks)
         length(FS.seg) > 1 && foreach_item!(backend, sh ? force_sh_cv! : force_cv!, (forceB, FS, it, dtT), length(FS.seg) - 1)
         par === nothing || KernelAbstractions.synchronize(backend)     # (the halos: MPI reads finished fields)

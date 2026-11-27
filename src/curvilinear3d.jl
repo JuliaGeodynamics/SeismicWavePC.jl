@@ -472,6 +472,7 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
     lite = map(B -> merge(B, (; pml=nothing)), blocks)        # (kernels without the PML: Metal allows 4 kB of arguments)
     # (kernels that see all blocks: only the arrays they read)
     recB, forceB, momB, updB, velB = slim(blocks, CV_RECORD), slim(blocks, CV_FORCE), slim(blocks, CV_STRESS), slim(blocks, CV_UPDATE), slim(blocks, CV_VEL)
+    tfB = slim(blocks, CV_TF)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing
     # up to 27 regions per block: low / interior / high in x, y and η, with their kernel flags (in x and y: the global
@@ -660,7 +661,7 @@ function simulate_curvilinear3d(model::Union{CartData,DistributedModel}; dt=noth
         itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
         itw > 0 && nst > 0 && foreach_item!(backend, vprev3_cv!, (prev, recB, St), nst)
         momentum!(dtT, true)
-        ntw > 0 && foreach_item!(backend, tf_momentum3!, (forceB, TW, FT(tbeg + n * dt), dtT), ntw)
+        ntw > 0 && foreach_item!(backend, tf_momentum3!, (tfB, TW, FT(tbeg + n * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> (B.V1 .*= B.gs; B.V2 .*= B.gs; B.V3 .*= B.gs), blocks)
         length(FS.seg) > 1 && foreach_item!(backend, force3_cv!, (forceB, FS, it, dtT), length(FS.seg) - 1)
         par === nothing || KernelAbstractions.synchronize(backend)
