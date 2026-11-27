@@ -129,9 +129,12 @@ function (d::BornDriver)(s)
     medium = keys(δM)
     Mp = merge(map(plain, Base.structdiff(M, NamedTuple{medium})),
                map(k -> perturbed(getfield(M, k), getfield(δM, k)), NamedTuple{medium}(medium)))
-    p = merge(s, (; c=plain(s.c), vc=plain(s.vc), dtT=plain(s.dtT)))
+    # (the source amplitudes in plain numbers, in windows of their own: source_window.jl)
+    Wm = source_window(s.amp_m, size(s.Wm.host, 1), nt, s.dev, FT, backend)
+    Wf = source_window(s.amp_f, size(s.Wf.host, 1), nt, s.dev, FT, backend)
+    p = merge(s, (; c=plain(s.c), vc=plain(s.vc), dtT=plain(s.dtT), Wm, Wf))
     reg = map(plain_region, regions)
-    Src, FSrc, Stp = plain(s.Src), plain(s.FSrc), plain(St)            # read only: amplitudes, cells, sinc weights
+    Src, FSrc, Stp = merge(plain(s.Src), (; s=Wm.s)), merge(plain(s.FSrc), (; s=Wf.s)), plain(St)   # read only: cells, sinc weights
     for it in 1:nt
         forward_step!(F, Mp, Src, FSrc, Stp, rec, acc, reg, it, p, true)
     end

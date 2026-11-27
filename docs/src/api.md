@@ -13,6 +13,11 @@ Station
 MomentTensorSource
 DoubleCoupleSource
 ForceSource
+ExplosionSource
+finite_fault
+read_sources
+read_srf
+read_cmtsolution
 PlaneWave
 TeleseismicWave
 moment_rate

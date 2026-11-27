@@ -261,8 +261,14 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
         end
     end
     MS, nF, nM = c.MS, length(forces), length(c.moments)
-    AF, gmF = KernelAbstractions.zeros(backend, FT, length(c.ftab.i), nV), KernelAbstractions.zeros(backend, FT, nF, nt)
-    AM, gmM = KernelAbstractions.zeros(backend, FT, length(c.mtab.i), nS), KernelAbstractions.zeros(backend, FT, nM, nt)
+    # ∂J/∂(moment rate) per source and step (gmF, gmM): in windows of steps of the backward pass, summed on the host
+    gmF, gmM = zeros(nF, nt), zeros(nM, nt)
+    collect_gm(gm) = (outs, steps, _) -> (gm[:, steps] .+= view(outs[1], :, 1:length(steps)))
+    Wfb = source_window(c.amp_f, nF, nt, c.dev, FT, backend; outputs=((nF,),), reduce=collect_gm(gmF))
+    Wmb = source_window(c.amp_m, nM, nt, c.dev, FT, backend; outputs=((nM,),), reduce=collect_gm(gmM))
+    FSb, MSb = merge(FS, (; s=Wfb.s)), merge(MS, (; s=Wmb.s))
+    AF = KernelAbstractions.zeros(backend, FT, length(c.ftab.i), nV)
+    AM = KernelAbstractions.zeros(backend, FT, length(c.mtab.i), nS)
     L = d.illumination ? Tuple(zero_(b) for b in 1:nb) : nothing                              # Σₙ |v^{n+1/2}|²
     c1, c2, d1, d2 = attenuation ? vc : (nothing, nothing, nothing, zero(FT))
     # the transposed stress update σ^{n+1} = σⁿ + dt (C₁ e + Σₘ d1ₘ Rₘ^{n+1}), Rₘ^{n+1} = c1ₘ Rₘⁿ - c2ₘ dt Cτ e with the
@@ -366,7 +372,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             end
             if forcedamp
                 foreach(F -> foreach(A -> fill!(A, 0), F), Finc)
-                foreach_item!(backend, sh ? force_sh_cv! : N == 2 ? force_cv! : force3_cv!, (Fblk, FS, it, dtT), length(FS.seg) - 1)
+                foreach_item!(backend, sh ? force_sh_cv! : N == 2 ? force_cv! : force3_cv!, (Fblk, FS, window_step!(c.Wf, it), dtT), length(FS.seg) - 1)
                 for b in 1:nb, k in 1:nV
                     q[b][3nV+k] .= q[b][nV+k] .- Finc[b][k]
                 end
@@ -377,7 +383,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             itw = n % record_every == 0 ? n ÷ record_every + 1 : 0
             q = store[it-s0+1]
             # moment tensors (stress glut, after the stress update)
-            nM > 0 && run_once!(backend, moment_sens_cv!, (AM, gmM, Adj, MS, it, dtT, Val(sn)))
+            nM > 0 && run_once!(backend, moment_sens_cv!, (AM, Wmb.out[1], Adj, MSb, window_step!(Wmb, it), dtT, Val(sn)))
             c.sponge && foreach(b -> foreach(S -> S .*= blocks[b].gs, comps(Adj[b], sn)), 1:nb)      # (the sponge is diagonal)
             c.ntw > 0 && foreach_item!(backend, tf_grad_stress!, (Grad, Adj, lite, Mv, c.TW, FT(c.tbeg + (n + 0.5) * c.dt), dtT, c.tfkind), c.ntw)
             # stress update: gradient (λ, μ, τ) and v̄ += dt Gᵀ (C₁ σ̄ - Cτ Q)
@@ -410,8 +416,9 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             itw > 0 && nst > 0 && run_once!(backend, residual!, (Adj, St, Rres, itw, FT(0.5)))
             # momentum v^{n+1/2} = P v^{n-1/2} + Q dt (1/ρJ) A σⁿ (+ forces): gradient (1/ρJ, damping) and σ̄ += Aᵀ(...)
             if nF > 0
-                run_once!(backend, force_grad!, (Grad, Adj, FS, it, dtT))
-                run_once!(backend, force_sens_cv!, (AF, gmF, Adj, map(B -> merge(B, (; pml=nothing)), blocks), FS, it, dtT, Val(vn)))
+                lf = window_step!(Wfb, it)
+                run_once!(backend, force_grad!, (Grad, Adj, FSb, lf, dtT))
+                run_once!(backend, force_sens_cv!, (AF, Wfb.out[1], Adj, map(B -> merge(B, (; pml=nothing)), blocks), FSb, lf, dtT, Val(vn)))
             end
             c.sponge && foreach(b -> foreach(V -> V .*= blocks[b].gs, comps(Adj[b], vn)), 1:nb)
             c.ntw > 0 && foreach_item!(backend, tf_grad_momentum!, (Grad, Adj, lite, c.TW, FT(c.tbeg + n * c.dt), dtT, c.tfkind), c.ntw)
@@ -498,6 +505,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
     ill = L === nothing ? (;) : (; illumination=gL)
     vti = aniso ? (; epsilon=gε, delta=gδ, gamma=gγ) : (;)
     grad = CartData(model.x.val, model.y.val, model.z.val, merge((; rho=gρ .* rho_unit, vp=gvp .* 1e3, vs=gvs .* 1e3), vti, (; Qp=gqp, Qs=gqs), ill))
+    flush!(Wfb); flush!(Wmb)
     return J, grad, curvilinear_source_gradients(c, sh ? 1 : N, AF, gmF, AM, gmM)
 end
 
@@ -534,7 +542,8 @@ function curvilinear_source_gradients(c, N, AF, gmF, AM, gmM)
     xyz(l, q) = N == 2 ? (dloc[1][q][l], 0.0, dloc[2][q][l]) : (dloc[1][q][l], dloc[2][q][l], dloc[3][q][l])
     # ∂J/∂t0, ∂J/∂trise from the gradient with respect to the moment rate (central differences of the source time function)
     function timing(gm, times, src)
-        mr(t, t0, tr) = moment_rate(stf, t, t0, tr)
+        source_stf(src, stf) === :delta && return NaN, NaN        # (an impulse: no derivative with respect to t0, trise)
+        mr(t, t0, tr) = moment_rate(source_stf(src, stf), t, t0, tr)
         e = 1e-6 * src.trise
         dt0 = sum(gm[n] * (mr(times[n], src.t0 + e, src.trise) - mr(times[n], src.t0 - e, src.trise)) / 2e for n in 1:nt)
         dtr = sum(gm[n] * (mr(times[n], src.t0, src.trise + e) - mr(times[n], src.t0, src.trise - e)) / 2e for n in 1:nt)

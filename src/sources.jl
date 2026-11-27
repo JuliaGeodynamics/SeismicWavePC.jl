@@ -1,12 +1,13 @@
 # Point moment-tensor sources and source time functions (ported from OpenSWPC `m_fdtool.f90`).
 
 """
-    MomentTensorSource(x, y, z, M0, M; t0=0.0, trise=1.0)
+    MomentTensorSource(x, y, z, M0, M; t0=0.0, trise=1.0, stf=nothing)
 
 Point source at model coordinates `x, y, z` [km] (the `CartData` frame: x east, y north, z up).
 `M0` is the scalar moment [N m] (per unit length [N m/m] in 2D) and
 `M = (xx, yy, zz, yz, xz, xy)` the moment tensor in the same frame, normalized so that `M0` sets the size.
-`t0` is the rupture start time and `trise` the rise time [s].
+`t0` is the rupture start time and `trise` the rise time [s]. `stf`: the source time function of this source (as the `stf`
+keyword of [`simulate`](@ref), e.g. a [`SampledSTF`](@ref)); `nothing`: the one of the simulation.
 """
 struct MomentTensorSource
     x::Float64
@@ -16,8 +17,12 @@ struct MomentTensorSource
     M::NTuple{6,Float64}
     t0::Float64
     trise::Float64
+    stf::Any
 end
-MomentTensorSource(x, y, z, M0, M; t0=0.0, trise=1.0) = MomentTensorSource(x, y, z, M0, Tuple(Float64.(M)), t0, trise)
+MomentTensorSource(x, y, z, M0, M::NTuple{6,Float64}, t0, trise) = MomentTensorSource(x, y, z, M0, M, t0, trise, nothing)
+MomentTensorSource(x, y, z, M0, M; t0=0.0, trise=1.0, stf=nothing) = MomentTensorSource(x, y, z, M0, Tuple(Float64.(M)), t0, trise, stf)
+"The source time function of source `s`: its own or the simulation's `stf`."
+source_stf(s, stf) = something(s.stf, stf)
 
 function Base.show(io::IO, s::MomentTensorSource)
     @printf(io, "MomentTensorSource at (%g, %g, %g) km, M0 = %.3e N m (Mw %.2f), t0 = %g s, trise = %g s\n", s.x, s.y, s.z,
@@ -26,12 +31,13 @@ function Base.show(io::IO, s::MomentTensorSource)
 end
 
 """
-    ForceSource(x, y, z; fx=0.0, fy=0.0, fz=0.0, t0=0.0, trise=1.0)
+    ForceSource(x, y, z; fx=0.0, fy=0.0, fz=0.0, t0=0.0, trise=1.0, stf=nothing)
     ForceSource(lon, lat, z, proj::ProjectionPoint; kwargs...)
 
 Point force (the body-force source of OpenSWPC, `bf_mode`) at model coordinates [km] or at a geographic location.
 `fx, fy, fz` [N] point east, north and up; the force history is the source time function (`stf`, unit area) times the force.
-Forces and moment tensor sources can be used together.
+Forces and moment tensor sources can be used together. `stf`: the source time function of this force (`nothing`: the
+simulation's).
 """
 struct ForceSource
     x::Float64
@@ -40,8 +46,10 @@ struct ForceSource
     F::NTuple{3,Float64}
     t0::Float64
     trise::Float64
+    stf::Any
 end
-ForceSource(x, y, z; fx=0.0, fy=0.0, fz=0.0, t0=0.0, trise=1.0) = ForceSource(x, y, z, Float64.((fx, fy, fz)), t0, trise)
+ForceSource(x, y, z, F::NTuple{3,Float64}, t0, trise) = ForceSource(x, y, z, F, t0, trise, nothing)
+ForceSource(x, y, z; fx=0.0, fy=0.0, fz=0.0, t0=0.0, trise=1.0, stf=nothing) = ForceSource(x, y, z, Float64.((fx, fy, fz)), t0, trise, stf)
 ForceSource(lon, lat, z, proj::ProjectionPoint; kwargs...) = ForceSource(project(lon, lat, z, proj)...; kwargs...)
 
 function Base.show(io::IO, s::ForceSource)
@@ -56,7 +64,7 @@ function project(lon, lat, z, proj::ProjectionPoint)
 end
 
 """
-    DoubleCoupleSource(x, y, z; Mw, strike, dip, rake, t0=0.0, trise=1.0)
+    DoubleCoupleSource(x, y, z; Mw, strike, dip, rake, t0=0.0, trise=1.0, stf=nothing)
     DoubleCoupleSource(lon, lat, z, proj::ProjectionPoint; kwargs...)
 
 Double-couple source with moment magnitude `Mw` and fault angles in degrees (strike measured clockwise from north = +y),
@@ -64,7 +72,8 @@ at model coordinates [km], or at a geographic location projected with the `Proje
 """
 DoubleCoupleSource(lon, lat, z, proj::ProjectionPoint; kwargs...) = DoubleCoupleSource(project(lon, lat, z, proj)...; kwargs...)
 
-function DoubleCoupleSource(x, y, z; Mw, strike, dip, rake, t0=0.0, trise=1.0)
+function DoubleCoupleSource(x, y, z; Mw=nothing, M0=nothing, strike, dip, rake, t0=0.0, trise=1.0, stf=nothing)
+    (Mw === nothing) == (M0 === nothing) && error("DoubleCoupleSource: give Mw or M0")
     # Aki & Richards components in (north, east, down)
     sd, cd, s2d, c2d = sind(dip), cosd(dip), sind(2dip), cosd(2dip)
     sl, cl = sind(rake), cosd(rake)
@@ -77,8 +86,24 @@ function DoubleCoupleSource(x, y, z; Mw, strike, dip, rake, t0=0.0, trise=1.0)
     mdd = s2d * sl
     # to (east, north, up)
     M = (mee, mnn, mdd, -mnd, -med, mne)
-    return MomentTensorSource(x, y, z, seismic_moment(Mw), M, t0, trise)
+    return MomentTensorSource(x, y, z, M0 === nothing ? seismic_moment(Mw) : Float64(M0), M, t0, trise, stf)
 end
+
+"""
+    ExplosionSource(x, y, z; M0 or Mw, t0=0.0, trise=1.0, stf=nothing)
+    ExplosionSource(lon, lat, z, proj::ProjectionPoint; kwargs...)
+
+An explosion (isotropic moment tensor) with the diagonal components `M0` [N m] (2D: [N m/m]), or the moment of magnitude `Mw`.
+"""
+function ExplosionSource(x, y, z; M0=nothing, Mw=nothing, t0=0.0, trise=1.0, stf=nothing)
+    (Mw === nothing) == (M0 === nothing) && error("ExplosionSource: give M0 or Mw")
+    return MomentTensorSource(x, y, z, M0 === nothing ? seismic_moment(Mw) : Float64(M0), (1.0, 1.0, 1.0, 0.0, 0.0, 0.0), t0, trise, stf)
+end
+ExplosionSource(lon, lat, z, proj::ProjectionPoint; kwargs...) = ExplosionSource(project(lon, lat, z, proj)...; kwargs...)
+
+"The source time function as injected at the time step of time `t` (`dt`): `moment_rate`, and for `:delta` 1/dt in the
+step that contains `t0`."
+source_rate(stf, t, t0, tr, dt) = stf === :delta ? (t - dt / 2 <= t0 < t + dt / 2 ? 1 / dt : 0.0) : moment_rate(stf, t, t0, tr)
 
 "Scalar moment [N m] from moment magnitude (same relation as OpenSWPC)."
 seismic_moment(Mw) = 10^(1.5Mw + 9.05)
@@ -93,6 +118,9 @@ time `tr`. `stf` is
   benchmarks);
 - `:gaussian`: a Gaussian centred at `t0 + tr` with width `tr` (`√π/tr · exp(-(π(t - t0 - tr)/tr)²)`, integral 1), and
   `:gaussian_derivative`: its time derivative times `tr/π` (integral 0);
+- `:step`: a unit step at `t0` (e.g. a force switched on: a static load; for moment tensors the moment grows linearly);
+- `:delta`: a unit impulse at `t0` (the moment steps from 0 to `M0`; a force gives a unit impulse), in simulations the time
+  step that contains `t0` (`1/dt` there);
 - any function `stf(t, t0, tr)`, e.g. a [`SampledSTF`](@ref) of sampled values.
 """
 moment_rate(stf, t, t0, tr) = stf(t, t0, tr)
@@ -111,6 +139,8 @@ function moment_rate(stf::Symbol, t, t0, tr)
         return (1 - 2a) * exp(-a) / tr
     end
     (0 <= τ <= tr) || return 0.0
+    stf === :step && return τ >= 0 ? 1.0 : 0.0
+    stf === :delta && error("moment_rate(:delta, …) is an impulse: use it as `stf` of a simulation (one time step, 1/dt)")
     stf === :kupper && return 3π * sin(π * τ / tr)^3 / (4tr)
     stf === :boxcar && return 1 / tr
     stf === :cosine && return (1 - cos(2π * τ / tr)) / tr

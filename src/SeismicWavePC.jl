@@ -21,8 +21,11 @@ import Random
 
 include("viscoelastic.jl")
 include("sources.jl")
+include("finite_fault.jl")
+include("source_files.jl")
 include("medium.jl")
 include("kernels.jl")
+include("source_window.jl")
 include("interpolation.jl")
 include("pml.jl")
 include("planewave.jl")
@@ -45,7 +48,7 @@ include("curvilinear_teleseismic.jl")
 include("anisotropy.jl")
 include("inversion.jl")
 
-export MomentTensorSource, DoubleCoupleSource, ForceSource, PlaneWave, TeleseismicWave, Station, Seismograms, simulate, moment_rate, SampledSTF, CPU, DistributedModel
+export MomentTensorSource, DoubleCoupleSource, ForceSource, finite_fault, read_sources, read_srf, read_cmtsolution, ExplosionSource, PlaneWave, TeleseismicWave, Station, Seismograms, simulate, moment_rate, SampledSTF, CPU, DistributedModel
 export curvilinear_mesh
 export ReciprocalGreen, reciprocal_green, seismogram, Snapshots, random_medium, perturb, read_random_medium, misfit_gradient, born,
        L2Misfit, TravelTimeMisfit, ModelParameters, initial_parameters, to_model, WaveformProblem, objective,

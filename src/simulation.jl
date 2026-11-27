@@ -214,10 +214,14 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     # volume of the source: of its cell, or nominal between grid points (the weights carry the local spacing in depth)
     volume(s) = sinc ? prod(g.d) : prod(Base.front(g.d)) * thickness(g, position(s.x, s.y, s.z)[N])
     S, FS = moments[iS], forces[iF]
+    # the injected amplitudes per source and step, on the device in windows of steps (source_window.jl)
+    amp_m(n, it) = (s = S[n]; s.M0 / M0 * source_rate(source_stf(s, stf), tbeg + (it - 0.5) * dt, s.t0, s.trise, dt) * dt / volume(s))
+    amp_f(n, it) = (s = FS[n]; 1e3 / M0 * source_rate(source_stf(s, stf), tbeg + it * dt, s.t0, s.trise, dt) * dt / volume(s))
+    Wm, Wf = source_window(amp_m, length(S), nt, dev, FT, backend), source_window(amp_f, length(FS), nt, dev, FT, backend)
     Src0 = merge(source_cells(S, position, off, dev, Val(N)), (; M=dev(FT[s.M[m] * (m in (4, 5) ? -1 : 1) for s in S, m in 1:6]),     # z up -> z down
-                              s=dev(FT[s.M0 / M0 * moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt / volume(s) for s in S, it in 1:nt])))
+                              s=Wm.s))
     FSrc0 = merge(source_cells(FS, position, off, dev, Val(N)), (; F=dev(FT[s.F[m] * (m == 3 ? -1 : 1) for s in FS, m in 1:3]),
-                                s=dev(FT[1e3 / M0 * moment_rate(stf, tbeg + it * dt, s.t0, s.trise) * dt / volume(s) for s in FS, it in 1:nt])))
+                                s=Wf.s))
     # between grid points: the weights of the points around the sources (Kaiser-windowed sinc)
     Src = sinc ? merge(Src0, first(sinc_tables(g, med, [ipos(s.x, s.y, s.z) for s in S], spec_s, off, nl, dev, FT; derivatives=Val(true),
                                                 items=collect(eachindex(S)), nodes=Val(true)))) : Src0
@@ -288,7 +292,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
                         noforce=isempty(FS), nown=length(own), own, record_every, pw_edges, edges, backend, scale, nc, nrec, stations,
                         components, med, m, g, na, fq_ref, rho_unit=density_factor(density_unit),
                         mode, model, tbeg, dt, T=FT, parallel, nb, me, dims, nl, off, sources, moments, forces, M0, stf,
-                        iS, iF, sinc, volume=map(volume, moments), fvolume=map(volume, forces), tw, rows))
+                        iS, iF, sinc, volume=map(volume, moments), fvolume=map(volume, forces), tw, rows, Wm, Wf, amp_m, amp_f, dev))
         parallel && IGG.finalize_global_grid(finalize_MPI=false)
         return res
     end
@@ -299,7 +303,7 @@ function simulate(model::Union{CartData,DistributedModel}, ::Val{mode}, ::Val{in
     ckp = checkpoint === nothing ? nothing : parallel ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"
     restart && (ckp === nothing || !isfile(ckp)) && error("restart = true needs the checkpoint file $ckp")
     tail = (nt, isempty(S), isempty(FS), length(own), record_every, snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt,
-            verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, pw_edges, edges, planes, backend, tw)
+            verbose && me == 0, parallel, nb, ckp, checkpoint_every, restart, pw_edges, edges, planes, backend, tw, Wm, Wf)
     # (separate variables per branch: each call sees concrete regions)
     movie_out = if absorber === :cerjan
         whole = ((ntuple(_ -> H, N), nl .- 2H, nothing),)
@@ -492,7 +496,7 @@ stresses(F) = haskey(F, :Sxx) ? (haskey(F, :Syy) ? (F.Sxx, F.Syy, F.Szz, F.Syz, 
 # Function barrier: everything below is concretely typed.
 function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, inject!, force!, record!, plane!), (regions, rows), nt, nosource, noforce, nown, record_every,
                    snapshot_every, snapshot_dir, callback, movie, out, tbeg, dt, verbose, parallel, nb, ckp, checkpoint_every, restart,
-                   pw_edges, edges, planes, backend, tw)
+                   pw_edges, edges, planes, backend, tw, Wm, Wf)
     V, Σ = velocities(F), stresses(F)
     cells = (rows..., Base.tail(regions)...)                   # the interior by rows, and the PML zones
     report = max(nt ÷ 10, 1)
@@ -523,12 +527,12 @@ function timeloop!(F, M, Src, FSrc, St, rec, acc, c, vc, dtT, (vel!, stress!, in
         end
         pw_edges && extrapolate_sides!(V, edges)
         foreach_region!(backend, stress!, (F, M, c, vc, dtT), cells)
-        nosource || inject_sources!(backend, inject!, (F, Src, it), Src)
+        nosource || inject_sources!(backend, inject!, (F, Src, window_step!(Wm, it)), Src)
         inject_wave!(tw, Val(:stress), F, M, c, vc, dtT, eltype(dtT)(tbeg + (it - 0.5) * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, Σ...))
         pw_edges && extrapolate_sides!(Σ, edges)
         foreach_region!(backend, vel!, (F, M, c, dtT), cells)
-        noforce || inject_sources!(backend, force!, (F, M, FSrc, it), FSrc)
+        noforce || inject_sources!(backend, force!, (F, M, FSrc, window_step!(Wf, it)), FSrc)
         inject_wave!(tw, Val(:velocity), F, M, c, vc, dtT, eltype(dtT)(tbeg + it * dt), backend)
         parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, nb, V...))
         if verbose && it % report == 0
