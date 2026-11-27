@@ -116,4 +116,4 @@ Mattsson, K., Niemelä, O., and Winters, A. R. (2027). Boundary-optimized closur
 
 Mattsson, K. (2017). Diagonal-norm upwind SBP operators. *Journal of Computational Physics*, 335, 283–310.
 
-MIT license. The forward numerical algorithms are ported from OpenSWPC, © Takuto Maeda, MIT license.
+MIT license ([LICENSE](LICENSE)). The staggered-grid solver is ported from OpenSWPC, © Takuto Maeda, MIT license.
