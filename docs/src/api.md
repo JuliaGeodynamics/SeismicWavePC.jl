@@ -22,6 +22,8 @@ PlaneWave
 TeleseismicWave
 moment_rate
 SampledSTF
+BerlageSTF
+KlauderSTF
 Snapshots
 read_snapshots
 SeismicWavePC.SnapshotSeries
@@ -50,6 +52,8 @@ flatten_depth
 ```@docs
 write_sac
 read_sac
+write_su
+read_su
 ReciprocalGreen
 reciprocal_green
 seismogram

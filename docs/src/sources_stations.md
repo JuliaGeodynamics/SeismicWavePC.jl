@@ -101,6 +101,9 @@ time `t0` and rise time `trise` (see [`moment_rate`](@ref)); a source given its 
 `MomentTensorSource(...; stf=SampledSTF(t, values))`, subfaults with different slip-rate functions) uses that one:
 - `:kupper` (default), `:boxcar`, `:triangle`, `:herrmann`, `:cosine`, `:texp` (as in OpenSWPC), `:ricker`, `:gaussian`,
   `:gaussian_derivative`;
+- SOFI's wavelets: `:fuchs_mueller` (Fuchs-Müller), `:sin3` (= `:kupper`), and with their parameters
+  [`BerlageSTF`](@ref)`(; n, α, φ0)` and [`KlauderSTF`](@ref)`(; fmin, fmax, tsweep)` (the autocorrelation of a vibroseis
+  sweep);
 - `:step` (a unit step at `t0`, e.g. a static load switched on) and `:delta` (a unit impulse at `t0`: one time step of
   height 1/dt; for moment tensors a step of the moment);
 - any function `stf(t, t0, trise)`;
