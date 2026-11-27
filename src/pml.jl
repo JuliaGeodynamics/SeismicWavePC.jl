@@ -59,17 +59,20 @@ the interior. As OpenSWPC, no PML at the top.
 """
 function zones(n::NTuple{2,Int}, na, periodic=(false,))
     x, z = n
-    periodic[1] && return (1:x, 1:z-na), ((1:x, z-na+1:z),)                # (no side layers)
-    inner = (na+1:x-na, 1:z-na)
-    return inner, ((1:na, 1:z), (x-na+1:x, 1:z), (na+1:x-na, z-na+1:z))
+    px = periodic[1]
+    xa = px ? (1:x) : (na+1:x-na)
+    # (periodic axes: empty side layers, the same number of zones: the types do not depend on `periodic`)
+    side(r) = px ? (1:0) : r
+    return (xa, 1:z-na), ((side(1:na), 1:z), (side(x-na+1:x), 1:z), (xa, z-na+1:z))
 end
 function zones(n::NTuple{3,Int}, na, periodic=(false, false))
     x, y, z = n
     px, py = periodic
-    # (side layers only along the axes that are not periodic)
     xa, ya = px ? (1:x) : (na+1:x-na), py ? (1:y) : (na+1:y-na)
-    sides = (py ? () : ((1:x, 1:na, 1:z), (1:x, y-na+1:y, 1:z)))..., (px ? () : ((1:na, ya, 1:z), (x-na+1:x, ya, 1:z)))...
-    return (xa, ya, 1:z-na), (sides..., (xa, ya, z-na+1:z))
+    sx(r) = px ? (1:0) : r
+    sy(r) = py ? (1:0) : r
+    return (xa, ya, 1:z-na), ((1:x, sy(1:na), 1:z), (1:x, sy(y-na+1:y), 1:z), (sx(1:na), ya, 1:z), (sx(x-na+1:x), ya, 1:z),
+                              (xa, ya, z-na+1:z))
 end
 
 "Offset `lo` and size of the part of the global range `r` (per axis) on this rank (array indices `lo .+ (1:ndr)`)."
@@ -95,12 +98,12 @@ function pml_regions(::Val{mode}, g::Grid{N}, na, dt, fcut, off, nl, R, dev, bac
                      periodic=ntuple(_ -> false, Val(N - 1))) where {mode,N,T}
     top = g.zf[H] # edge above the first cell
     m = mpml !== nothing
-    prof = ntuple(a -> a < N || g.uniform ? pml_axis(g.n[a], g.d[a], na, dt, fcut, T; mpml=m, top=a < N) :
+    prof0 = ntuple(a -> a < N || g.uniform ? pml_axis(g.n[a], g.d[a], na, dt, fcut, T; mpml=m, top=a < N) :
                                  pml_axis(g.zc .- top, g.zf .- top, g.zf[end-H] - g.zf[end-H-na], g.zf[end-H] - top, g.n[a], na, dt, fcut, T;
                                           mpml=m, top=false), Val(N))
     # periodic axes: no damping (the profile of the middle of the axis everywhere)
     flat((c, e, outer)) = (fill(c[length(c) ÷ 2], length(c)), fill(e[length(e) ÷ 2], length(e)), fill(false, length(outer)))
-    prof = ntuple(a -> a < N && periodic[a] ? flat(prof[a]) : prof[a], Val(N))
+    prof = ntuple(a -> a < N && periodic[a] ? flat(prof0[a]) : prof0[a], Val(N))
     loc(v, a) = dev(v[R[a]])
     profiles = N == 3 ? (; gxc=loc(prof[1][1], 1), gxe=loc(prof[1][2], 1), gyc=loc(prof[2][1], 2), gye=loc(prof[2][2], 2),
                            gzc=loc(prof[3][1], 3), gze=loc(prof[3][2], 3), ox=loc(prof[1][3], 1), oy=loc(prof[2][3], 2)) :
