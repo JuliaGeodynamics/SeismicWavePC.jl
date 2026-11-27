@@ -19,16 +19,25 @@ jobs:
       matrix:
         version: ['1']
         os: [ubuntu-latest, macos-latest, windows-latest]
-        group: [mpi1, mpi2, mpi3, gradient, curvilinear, other]
-        exclude:                        # (no MPI tests on Windows)
+        group: [mpi1, mpi2, mpi3, mpi4, gradient, curvilinear1, curvilinear2, other]
+        # MPI on Linux only: Windows runners have no working mpiexec, macOS runners (3 cores, 7 GB) swap with 4 processes
+        exclude:
           - {os: windows-latest, group: mpi1}
+          - {os: windows-latest, group: mpi2}
           - {os: windows-latest, group: mpi3}
+          - {os: windows-latest, group: mpi4}
+          - {os: macos-latest, group: mpi1}
+          - {os: macos-latest, group: mpi2}
+          - {os: macos-latest, group: mpi3}
+          - {os: macos-latest, group: mpi4}
         include:
           - {version: '1.10', os: ubuntu-latest, group: mpi1}
           - {version: '1.10', os: ubuntu-latest, group: mpi2}
           - {version: '1.10', os: ubuntu-latest, group: mpi3}
+          - {version: '1.10', os: ubuntu-latest, group: mpi4}
           - {version: '1.10', os: ubuntu-latest, group: gradient}
-          - {version: '1.10', os: ubuntu-latest, group: curvilinear}
+          - {version: '1.10', os: ubuntu-latest, group: curvilinear1}
+          - {version: '1.10', os: ubuntu-latest, group: curvilinear2}
           - {version: '1.10', os: ubuntu-latest, group: other}
     steps:
       - uses: actions/checkout@v4

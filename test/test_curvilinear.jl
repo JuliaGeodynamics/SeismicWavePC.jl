@@ -5,8 +5,11 @@ using SeismicWavePC, GeophysicalModelGenerator, LinearAlgebra, NCDatasets, Test
 const SW = SeismicWavePC
 isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
 
-@testset "curvilinear" begin
-    @testset "SBP operators" begin
+# CI runs the testsets in two halves, as parallel jobs (runtests.jl: "curvilinear:1", "curvilinear:2"; default: all)
+cvpart(k) = !isdefined(Main, :TEST_PARTS) || isempty(Main.TEST_PARTS[]) || string(k) in Main.TEST_PARTS[]
+
+@testset verbose = true "curvilinear" begin
+    cvpart(1) && @testset "SBP operators" begin
         n = 40
         x, h = SW.sbp_grid(0.0, 3.0, n)
         H = SW.sbp_weights(n, h)
@@ -23,7 +26,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
 
     topo(x) = 1.5 * exp(-x^2 / (2 * 3.0^2))
     moho(x) = -6.0 + 1.0 * sin(2π * x / 20)
-    @testset "mesh and blocks" begin
+    cvpart(1) && @testset "mesh and blocks" begin
         mesh = curvilinear_mesh(range(-20, 20, length=81), [topo, moho]; dz=0.5, bottom=-30)
         @test SW.is_curvilinear(mesh)
         @test !SW.is_curvilinear(CartData(xyz_grid(-1:0.5:1, 0, -1:0.5:0)))
@@ -40,7 +43,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         @test first(SW.find_blocks(Z, vc, vc ./ 1.73)) == [r]
     end
 
-    @testset "flat model: against the staggered solver ($kind)" for kind in (:isotropic, :vti)
+    cvpart(1) && @testset "flat model: against the staggered solver ($kind)" for kind in (:isotropic, :vti)
         # a double couple 5 km deep, Q = 50, receivers on the surface and at depth; staggered at half the spacing
         src = DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=3.0, strike=0, dip=45, rake=90, trise=1.0)
         stations = [Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in (2, 5, 8)]
@@ -74,7 +77,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         end
     end
 
-    @testset "Rayleigh waves: stations exactly on the surface" begin
+    cvpart(1) && @testset "Rayleigh waves: stations exactly on the surface" begin
         profile(d) = (e = exp(-max(d, 0) / 150); (vp=1.8 * (2000 - 1200e), vs=2000 - 1200e, rho=2600 - 600e))   # SI
         mesh = curvilinear_mesh(range(-0.1, 4.0, length=411), [x -> 0.0]; dz=0.01, bottom=-1.2)
         P = profile.(-1e3 .* mesh.z.val)
@@ -100,7 +103,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         end
     end
 
-    @testset "topography and a curved interface: stable, Float32" begin
+    cvpart(1) && @testset "topography and a curved interface: stable, Float32" begin
         mesh = curvilinear_mesh(range(-20, 20, length=81), [topo, moho]; dz=0.5, bottom=-30)
         Z, X = mesh.z.val, mesh.x.val
         lower = Z .< moho.(X)
@@ -120,7 +123,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         @test length(times) > 2 && times[1] == 0
     end
 
-    @testset "3D: mesh, blocks, against the staggered solver, stability" begin
+    cvpart(1) && @testset "3D: mesh, blocks, against the staggered solver, stability" begin
         topo3(x, y) = 1.0 * exp(-(x^2 + (y - 1)^2) / (2 * 3.0^2))
         moho3(x, y) = -5.0 + 0.8 * sin(2π * x / 16) * cos(2π * y / 20)
         mesh = curvilinear_mesh(range(-10, 10, length=41), range(-8, 8, length=33), [topo3, moho3]; dz=0.5, bottom=-15)
@@ -172,7 +175,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         end
     end
 
-    @testset "misfit gradient (2D, VTI, attenuation) against finite differences" begin
+    cvpart(1) && @testset "misfit gradient (2D, VTI, attenuation) against finite differences" begin
         topog(x) = 1.2 * exp(-x^2 / 12)
         mohog(x) = -4.0 + 0.6 * sin(2π * x / 10)
         mesh = curvilinear_mesh(range(-8, 8, length=49), [topog, mohog]; dz=0.33, bottom=-10)
@@ -212,7 +215,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         @test sg[2].z ≈ fdx(e -> [ms, ForceSource(fs.x, 0.0, fs.z + e; fz=fs.F[3], trise=fs.trise)]) rtol = 1e-5
         @test sg[2].F[3] ≈ fdx(e -> [ms, ForceSource(fs.x, 0.0, fs.z; fz=fs.F[3] + 1e13e, trise=fs.trise)]) / 1e13 rtol = 1e-6
     end
-    @testset "misfit gradient (3D) against finite differences" begin
+    cvpart(1) && @testset "misfit gradient (3D) against finite differences" begin
         topog3(x, y) = 1.0 * exp(-(x^2 + y^2) / 10)
         mohog3(x, y) = -4.0 + 0.5 * sin(2π * x / 10) * cos(2π * y / 12)
         mesh = curvilinear_mesh(range(-6, 6, length=33), range(-5, 5, length=29), [topog3, mohog3]; dz=0.4, bottom=-8)
@@ -238,7 +241,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
             @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
         end
     end
-    @testset "Born modelling: 2D with VTI and attenuation (finite differences), 3D (dot test with the gradient)" begin
+    cvpart(1) && @testset "Born modelling: 2D with VTI and attenuation (finite differences), 3D (dot test with the gradient)" begin
         topob(x) = 1.2 * exp(-x^2 / 12)
         mohob(x) = -4.0 + 0.6 * sin(2π * x / 10)
         mesh = curvilinear_mesh(range(-8, 8, length=49), [topob, mohob]; dz=0.33, bottom=-10)
@@ -279,7 +282,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         _, adj = L2Misfit()(b0.v, obs.v, obs.t)
         @test sum(adj .* δd.v) ≈ sum(k -> sum(gr.fields[k] .* δ[k]), keys(δ)) rtol = 1e-10
     end
-    @testset "illumination: Σ |v|² of the forward wavefield" begin
+    cvpart(1) && @testset "illumination: Σ |v|² of the forward wavefield" begin
         topoi(x) = 1.2 * exp(-x^2 / 12)
         mohoi(x) = -4.0 + 0.6 * sin(2π * x / 10)
         mesh = curvilinear_mesh(range(-8, 8, length=49), [topoi, mohoi]; dz=0.33, bottom=-10)
@@ -294,7 +297,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         simulate(m; kw..., stations=sts, verbose=false, snapshot_every=1, callback=(w, t) -> (L .+= w.fields.V[1] .^ 2 .+ w.fields.V[3] .^ 2))
         @test g.fields.illumination ≈ L rtol = 1e-12
     end
-    @testset "snapshot planes (netCDF)" begin
+    cvpart(1) && @testset "snapshot planes (netCDF)" begin
         topos(x, y) = 1.0 * exp(-(x^2 + y^2) / 10)
         mesh = curvilinear_mesh(range(-6, 6, length=33), range(-5, 5, length=29), [topos]; dz=0.4, bottom=-8)
         o = ones(size(mesh.x.val))
@@ -322,7 +325,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         s = read_snapshots(joinpath(dir, "swpc.psv.xz.v.nc"))
         @test first.(s.axes) == ("x", "z") && maximum(abs, s["Vz", length(s.t)]) > 0
     end
-    @testset "checkpoint and restart" begin
+    cvpart(2) && @testset "checkpoint and restart" begin
         topoc(x) = 1.2 * exp(-x^2 / 12)
         mesh = curvilinear_mesh(range(-8, 8, length=49), [topoc]; dz=0.33, bottom=-10)
         o = ones(size(mesh.x.val))
@@ -336,7 +339,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         r = simulate(m; kw..., checkpoint=f, checkpoint_every=30, restart=true)
         @test r.v == ref.v && r.u == ref.u && r.stress == ref.stress
     end
-    @testset "Cerjan sponge: misfit gradient against finite differences" begin
+    cvpart(2) && @testset "Cerjan sponge: misfit gradient against finite differences" begin
         mesh = curvilinear_mesh(range(-8, 8, length=49), [x -> 1.2 * exp(-x^2 / 12)]; dz=0.33, bottom=-10)
         X, Z = mesh.x.val, mesh.z.val
         o = ones(size(X))
@@ -354,7 +357,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
             @test sum(g.fields[f] .* δ) ≈ fd rtol = 1e-6
         end
     end
-    @testset "PML: fewer reflections; misfit gradient and Born against finite differences" begin
+    cvpart(2) && @testset "PML: fewer reflections; misfit gradient and Born against finite differences" begin
         # sides and bottom: a flat model against one 4 times as wide and deep with the same node spacing (h = 0.1 km)
         P6 = SW.SBP_P[6]
         Dz(nz) = 0.1 * (2P6 + nz - 11)
@@ -395,7 +398,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         M = simulate(addfield(mesh, merge(base, (; vs=base.vs .- 1e-3 .* δv))); kw..., stations=sts, verbose=false)
         @test maximum(abs, δd.v .- (P.v .- M.v) ./ 2e-3) < 1e-6 * maximum(abs, δd.v)
     end
-    @testset "multiaxial PML (absorber = :mpml)" begin
+    cvpart(2) && @testset "multiaxial PML (absorber = :mpml)" begin
         # the reproducer of issue #6, coarse: under a soft surface layer the classical PML grows exponentially, the M-PML decays
         mesh = curvilinear_mesh(range(0, 10, length=101), [x -> 0.0, x -> -0.4]; dz=0.1, bottom=-3.0)
         soft = mesh.z.val .>= -0.4 - 1e-9
@@ -447,7 +450,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
               Jof3(addfield(mesh, (; rho=2600 .* o, vp=5.5 .* o, vs=3.2 .* o .- 1e-3 .* δ)))) / 2e-3
         @test sum(g.fields.vs .* δ) ≈ fd rtol = 1e-6
     end
-    @testset "fluid–solid interfaces (oceans)" begin
+    cvpart(2) && @testset "fluid–solid interfaces (oceans)" begin
         # 2D P-SV: an ocean over a flat seafloor (the staircase of the staggered grid exact), against the staggered grid at 25 m
         mat(z) = z > 0 ? (1.0, 0.0, 0.0) : z > -2.0 - 1e-9 ? (1000.0, 1.5, 0.0) : (2700.0, 5.0, 2.9)
         fl(F) = (; rho=getindex.(F, 1), vp=getindex.(F, 2), vs=getindex.(F, 3))
@@ -508,7 +511,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         fd = (Jof3(addfield(mesh, merge(base, (; vp=base.vp .+ 1e-3 .* δ)))) - Jof3(addfield(mesh, merge(base, (; vp=base.vp .- 1e-3 .* δ))))) / 2e-3
         @test sum(g.fields.vp .* δ) ≈ fd rtol = 1e-6
     end
-    @testset "the mesh of GMG (curvilinear_grid with SBP spacing)" begin
+    cvpart(2) && @testset "the mesh of GMG (curvilinear_grid with SBP spacing)" begin
         if isdefined(GeophysicalModelGenerator, :curvilinear_grid)              # (GMG ≥ 0.10.2)
             topog(x) = 1.2 * exp(-x^2 / 12)
             mohog(x) = -4.0 + 0.6 * sin(2π * x / 10)
@@ -525,7 +528,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
             @test maximum(abs, born(m, addfield(b, (; vs=0.1 .* o)); kw...)[2].v) > 0
         end
     end
-    @testset "DistributedModel (columns built per process), also from GMG" begin
+    cvpart(2) && @testset "DistributedModel (columns built per process), also from GMG" begin
         topod(x) = 1.2 * exp(-x^2 / 12)
         mohod(x) = -4.0 + 0.6 * sin(2π * x / 10)
         mesh = curvilinear_mesh(range(-8, 8, length=49), [topod, mohod]; dz=0.33, bottom=-10)
@@ -550,7 +553,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         end
         @test_throws "have size" simulate(DistributedModel((ix, iy) -> (; Z=Z[ix, iy, 1:end-1], rho=m.fields.rho[ix, iy, 1:end-1]), X[:, 1, 1], [0.0], size(m)[3]); kw...)
     end
-    @testset "snapshots of divergence and rotation (:ps)" begin
+    cvpart(2) && @testset "snapshots of divergence and rotation (:ps)" begin
         # 2D, a hill and an interface: against centred differences of the velocity on the plane (away from the interface)
         topop(x) = 1.0 * exp(-x^2 / 8)
         mohop(x) = -6.0 + 0.5 * sin(2π * x / 12)
@@ -573,7 +576,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         @test norm([D[i, j] for (i, j) in I] - dfd) < 0.03norm(dfd)                       # (2 %: the error of the differences)
         @test norm([R[i, j] for (i, j) in I] - rfd) < 0.03norm(rfd)
     end
-    @testset "SH waves: against the staggered solver, gradient and Born against finite differences" begin
+    cvpart(2) && @testset "SH waves: against the staggered solver, gradient and Born against finite differences" begin
         # flat half-space with attenuation and VTI (γ): seismograms at the surface and stresses at depth
         src = DoubleCoupleSource(-2.0, 0.0, -5.0; Mw=3.0, strike=90, dip=60, rake=0, trise=1.0)
         stations = [[Station("s$x", Float64(x), 0.0, 0.0; surface=true) for x in (2, 5, 8)]; Station("d", 4.0, 0.0, -3.0)]
@@ -633,7 +636,7 @@ isdefined(@__MODULE__, :rayleigh_modes) || include("rayleigh_modes.jl")
         M = simulate(addfield(mesh, merge(base, (; vs=base.vs .- 1e-3 .* δv))); kw..., stations=sts, verbose=false)
         @test maximum(abs, δd.v .- (P.v .- M.v) ./ 2e-3) < 1e-6 * maximum(abs, δd.v)
     end
-    @testset "teleseismic waves (TF/SF injection): exact background, gradient" begin
+    cvpart(2) && @testset "teleseismic waves (TF/SF injection): exact background, gradient" begin
         # a layer over a half-space: inside the box the total field is the background (exact, layered), outside nothing
         Lb = SW.Layers([0.0, 3000.0], [2400.0, 2800.0], [2400 * (4000.0^2 - 2 * 2300.0^2), 2800 * (6000.0^2 - 2 * 3400.0^2)],
                        [2400 * 2300.0^2, 2800 * 3400.0^2])

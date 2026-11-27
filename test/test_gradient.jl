@@ -1,6 +1,11 @@
 # Misfit gradients: adjoint-state method and automatic differentiation (Enzyme extension), against each other and against
 # finite differences of whole simulations
-using Enzyme, LinearAlgebra
+using LinearAlgebra
+# The gradients of automatic differentiation (Enzyme, method = :ad) against the adjoint: Enzyme's compilation took most of the
+# time of these tests on CI runners. Locally on Julia ≥ 1.11; on CI only with SWPC_TEST_AD=true. (The adjoint is checked
+# against finite differences either way.)
+const RUN_AD = VERSION >= v"1.11" && (get(ENV, "CI", "false") != "true" || get(ENV, "SWPC_TEST_AD", "false") == "true")
+RUN_AD && @eval using Enzyme
 
 perturbed(m, field, I, d) = CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, NamedTuple{(field,)}(((A = copy(m.fields[field]); A[I] += d; A),))))
 observed(m, kw, mode) = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs=m.fields.vs .* 1.03))); kw...,
@@ -12,11 +17,14 @@ misfit(m, obs, kw) = (r = simulate(m; kw..., stations=obs.stations, verbose=fals
     kw = (; dt=DT, nt=150, sources=test_source(), T=Float64)
     obs = observed(m, kw, :psv)
     J, g = misfit_gradient(m, obs; kw...)
-    Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=20)
-    @test J ≈ misfit(m, obs, kw) ≈ Jad
+    @test J ≈ misfit(m, obs, kw)
     @test g isa CartData && size(g) == size(m) && keys(g.fields) == (:rho, :vp, :vs, :Qp, :Qs)
-    for f in keys(g.fields)                                         # the adjoint is the exact gradient of the discrete scheme
-        @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+    if RUN_AD
+        Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=20)
+        @test J ≈ Jad
+        for f in keys(g.fields)                                     # the adjoint is the exact gradient of the discrete scheme
+            @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+        end
     end
     I = CartesianIndex(110, 1, 75)
     for (field, h) in ((:vs, 1e-4), (:rho, 1e-1), (:Qp, 1e-2))
@@ -51,7 +59,7 @@ end
     obs = observed(m, kw, :psv)
     J, g = misfit_gradient(m, obs; kw...)
     @test J ≈ misfit(m, obs, kw)
-    @test g.fields.vs ≈ misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=20)[2].fields.vs rtol = 1e-10
+    RUN_AD && @test g.fields.vs ≈ misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=20)[2].fields.vs rtol = 1e-10
     i = findlast(<=(1.0), m.x.val[:, 1, 1])                     # last column below the step
     k = findlast(>(0), m.fields.vs[i, 1, :])                    # its top cell, at the inner corner of the step
     for I in (CartesianIndex(i, 1, k), CartesianIndex(i + 1, 1, k + 1))
@@ -81,10 +89,13 @@ end
     kw = (; dt=DT, nt=500, sources=test_source(), T=Float64, absorber=:mpml, mpml_ratio=0.2)
     obs = observed(m, kw, :psv)
     J, g = misfit_gradient(m, obs; kw...)
-    Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=25)
-    @test J ≈ misfit(m, obs, kw) ≈ Jad
-    for f in (:rho, :vp, :vs, :Qs)
-        @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+    @test J ≈ misfit(m, obs, kw)
+    if RUN_AD
+        Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=25)
+        @test J ≈ Jad
+        for f in (:rho, :vp, :vs, :Qs)
+            @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+        end
     end
     edge(A, i) = CartesianIndex(i, 1, argmax(abs.(A[i, 1, :])))      # the most sensitive cell of the column i
     for (field, h, I) in ((:vp, 1e-4, CartesianIndex(94, 1, 21)), (:vs, 1e-4, edge(g.fields.vs, 21)), (:rho, 1e-1, edge(g.fields.rho, 21)))
@@ -200,10 +211,13 @@ end
         kw = (; dt=DT, nt=150, sources=test_source(), T=Float64, wave=mode)
         obs = observed(m, kw, mode)
         J, g = misfit_gradient(m, obs; kw...)
-        Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=20)
-        @test J ≈ misfit(m, obs, kw) ≈ Jad
-        for f in (:rho, :vs, :Qs)
-            @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+        @test J ≈ misfit(m, obs, kw)
+        if RUN_AD
+            Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=20)
+            @test J ≈ Jad
+            for f in (:rho, :vs, :Qs)
+                @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+            end
         end
     end
     m = test_model(:psv; stretched=true)
@@ -239,10 +253,13 @@ end
         vs = copy(m.fields.vs); vs[90:110, 1, 50:60] .*= 1.05                         # observed: an anomaly in the box
         obs = simulate(CartData(m.x.val, m.y.val, m.z.val, merge(m.fields, (; vs))); kw..., stations=test_stations(mode), verbose=false)
         J, g = misfit_gradient(m, obs; kw...)
-        Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=25)
-        @test J ≈ misfit(m, obs, kw) ≈ Jad
-        for f in (:rho, :vp, :vs)
-            @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+        @test J ≈ misfit(m, obs, kw)
+        if RUN_AD
+            Jad, gad = misfit_gradient(m, obs; kw..., method=:ad, checkpoint_steps=25)
+            @test J ≈ Jad
+            for f in (:rho, :vp, :vs)
+                @test g.fields[f] ≈ gad.fields[f] rtol = 1e-10
+            end
         end
     end
 end

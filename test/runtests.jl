@@ -2,24 +2,26 @@ using Test
 
 include("setup.jl")
 
-# Pkg.test("SeismicWavePC"; test_args=["types", "gradient"]) runs only those files; "mpi:forward,born" only those parts of
-# the MPI test (mpi_script.jl). MPI first: its 4 processes start while this process is still small (memory of the CI runners)
+# Pkg.test("SeismicWavePC"; test_args=["types", "gradient"]) runs only those files; "file:a,b" only those parts of a file
+# ("mpi:forward,born": parts of mpi_script.jl, "curvilinear:1": the first half of test_curvilinear.jl). MPI first: its 4 processes start while this process is still small (memory of the CI runners)
 const TESTS = ["mpi", "basics", "openswpc", "files", "types", "gradient", "born", "anisotropy", "inversion", "interpolation", "distributed", "rayleigh", "curvilinear"]
 # CI runs the groups as parallel jobs (environment variable SWPC_TEST_GROUP; unset: all tests)
 const GROUPS = Dict("mpi1" => ["mpi:forward,gradient,born,vti"],
-                    "mpi2" => ["mpi:mpml,other", "basics", "openswpc", "files", "types", "inversion", "interpolation", "rayleigh"],
+                    "mpi2" => ["mpi:mpml,other"],
                     "mpi3" => ["mpi:curvilinear"],
-                    "gradient" => ["gradient"],
-                    "curvilinear" => ["curvilinear"],
+                    "mpi4" => ["mpi:curvilinear3d"],
+                    "gradient" => ["gradient", "basics", "openswpc", "files", "types", "inversion", "interpolation", "rayleigh"],
+                    "curvilinear1" => ["curvilinear:1"],
+                    "curvilinear2" => ["curvilinear:2"],
                     "other" => ["born", "anisotropy", "distributed"])
-const MPI_PARTS = Ref(["forward", "gradient", "born", "vti", "mpml", "other", "curvilinear"])        # (read by test_mpi.jl)
+const TEST_PARTS = Ref(String[])            # the parts of the file being run (empty: all; read by the test files)
 group = get(ENV, "SWPC_TEST_GROUP", "")
 isempty(group) || haskey(GROUPS, group) || error("SWPC_TEST_GROUP: one of $(join(sort(collect(keys(GROUPS))), ", ")), got $group")
 
 @testset "SeismicWavePC" begin
     for entry in (!isempty(ARGS) ? ARGS : isempty(group) ? TESTS : GROUPS[group])
         t, parts = occursin(':', entry) ? split(entry, ':') : (entry, "")
-        isempty(parts) || (MPI_PARTS[] = split(parts, ','))
+        TEST_PARTS[] = isempty(parts) ? String[] : String.(split(parts, ','))
         # MPI tests need a working mpiexec; MicrosoftMPI on Windows CI runners is not set up for that
         t == "mpi" && Sys.iswindows() && continue
         println("running test_$entry (peak memory so far $(round(Sys.maxrss() / 2^30, digits=1)) GB)"); flush(stdout)
