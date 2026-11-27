@@ -98,3 +98,108 @@ function read_sac(file)
                         evdp=f[39], dist=f[51], az=f[52])
     end
 end
+
+# ------------------------------------------------------------------ Seismic Unix (SU)
+
+"""
+    write_su(result, dir="."; title="swpc", source=nothing, quantities=(:v,))
+
+Write the seismograms of [`Seismograms`](@ref) `result` as Seismic Unix (SU) files (as SOFI): one file per quantity and
+component with one trace per station, `dir/title.solver.<quantity><component>.su` (e.g. `swpc.psv.vx.su`). `quantities`:
+`:v`, `:u` (m/s, m), `:stress` (Pa), `:strain`, `:p` (pressure: minus the mean normal stress, Pa), `:div` and `:curl` (of the
+velocity, 1/s: needs `simulate(...; derivatives = true)`). Trace headers: station and (with `source`) source positions in m
+(scaler -100: cm), receiver and source elevation, offset, sample interval (µs) and delay (ms). Samples: 32-bit floats,
+little endian (as Seismic Unix on x86 and ARM). Returns the file names.
+"""
+function write_su(r::Seismograms, dir="."; title="swpc", source=nothing, quantities=(:v,))
+    solver = r.components == (:x, :z) ? "psv" : r.components == (:y,) ? "sh" : "3d"
+    all(in((:v, :u, :stress, :strain, :p, :div, :curl)), quantities) ||
+        error("quantities must be :v, :u, :stress, :strain, :p, :div or :curl, got $quantities")
+    dt = length(r.t) > 1 ? r.t[2] - r.t[1] : 1.0
+    dtus = round(Int, 1e6dt)
+    abs(dtus - 1e6dt) > 1e-3 * 1e6dt && @warn "write_su: the sample interval $dt s is rounded to $dtus µs (SU headers)"
+    (dtus <= typemax(UInt16) && length(r.t) <= typemax(UInt16)) || error("write_su: SU allows at most 65535 samples and a sample interval of 65.535 ms")
+    mkpath(dir)
+    files = String[]
+    for q in quantities
+        traces = if q in (:v, :u)
+            data = q === :v ? r.v : r.u
+            [(string(q) * string(c), data[:, k, :]) for (k, c) in enumerate(r.components)]
+        elseif q in (:stress, :strain)
+            data = q === :stress ? r.stress : r.strain
+            [((q === :stress ? "s" : "e") * string(c), data[:, k, :]) for (k, c) in enumerate(r.tensor_components)]
+        elseif q === :p
+            normal = [k for (k, c) in enumerate(r.tensor_components) if c in (:xx, :yy, :zz)]
+            isempty(normal) && error("write_su: no pressure for SH waves")
+            [("p", -dropdims(sum(r.stress[:, normal, :]; dims=2); dims=2) ./ length(normal))]
+        else
+            r.div === nothing && error("write_su: :$q needs simulate(...; derivatives = true)")
+            q === :div ? [("div", r.div)] : [("curl" * string(c), r.curl[:, k, :]) for (k, c) in enumerate((:x, :y, :z))]
+        end
+        for (name, data) in traces
+            file = joinpath(dir, "$title.$solver.$name.su")
+            open(file, "w") do io
+                for (n, st) in enumerate(r.stations)
+                    write(io, su_header(n, st, source, length(r.t), dtus, r.t[1]))
+                    write(io, htol.(Float32.(data[:, n])))
+                end
+            end
+            push!(files, file)
+        end
+    end
+    return files
+end
+
+function su_header(n, st, source, ns, dtus, t0)
+    h = zeros(UInt8, 240)
+    i32!(o, v) = (h[o+1:o+4] .= reinterpret(UInt8, [htol(Int32(v))]))
+    i16!(o, v) = (h[o+1:o+2] .= reinterpret(UInt8, [htol(Int16(v))]))
+    u16!(o, v) = (h[o+1:o+2] .= reinterpret(UInt8, [htol(UInt16(v))]))
+    cm(x) = round(Int32, 1e5x)                              # [km] -> [cm] (scaler -100)
+    i32!(0, n); i32!(4, n); i32!(12, n)                     # tracl, tracr, tracf
+    i16!(28, 1)                                             # trid: seismic data
+    i32!(40, cm(st.z)); i16!(68, -100); i16!(70, -100)      # gelev; scalel, scalco
+    i32!(80, cm(st.x)); i32!(84, cm(st.y))                  # gx, gy
+    if source !== nothing
+        i32!(36, round(Int32, 1e3hypot(st.x - source.x, st.y - source.y)))    # offset [m]
+        i32!(44, cm(source.z)); i32!(48, cm(-source.z))     # selev, sdepth
+        i32!(72, cm(source.x)); i32!(76, cm(source.y))      # sx, sy
+    end
+    i16!(108, round(Int, 1e3t0))                            # delrt [ms]
+    u16!(114, ns); u16!(116, dtus)                          # ns, dt [µs]
+    return h
+end
+
+"""
+    su = read_su(file)
+
+An SU file (little or big endian): `su.t` the times [s], `su.data` the traces (samples × traces), and per trace the
+positions `su.sx, su.sy, su.gx, su.gy` [m] (with the coordinate scaler applied) and `su.offset`. E.g. a source wavelet:
+`SampledSTF(su.t, su.data[:, 1])`.
+"""
+function read_su(file)
+    bytes = read(file)
+    length(bytes) >= 240 || error("read_su: $file is too short for an SU trace")
+    for conv in (ltoh, ntoh)                                 # (little, then big endian)
+        u16(b, o) = conv(reinterpret(UInt16, b[o+1:o+2])[1])
+        ns = Int(u16(bytes, 114))
+        len = 240 + 4ns
+        ns > 0 && length(bytes) % len == 0 || continue
+        ntr = length(bytes) ÷ len
+        i32(b, o) = conv(reinterpret(Int32, b[o+1:o+4])[1])
+        i16(b, o) = conv(reinterpret(Int16, b[o+1:o+2])[1])
+        data = zeros(Float32, ns, ntr)
+        sx, sy, gx, gy, offset = (zeros(ntr) for _ in 1:5)
+        dt, delrt = Int(u16(bytes, 116)) * 1e-6, Int(i16(bytes, 108)) * 1e-3
+        for k in 1:ntr
+            b = view(bytes, (k-1)*len+1:k*len)
+            sc = i16(b, 70)
+            f = sc == 0 ? 1.0 : sc > 0 ? Float64(sc) : 1 / -sc
+            sx[k], sy[k], gx[k], gy[k] = (i32(b, o) * f for o in (72, 76, 80, 84))
+            offset[k] = i32(b, 36)
+            data[:, k] .= conv.(reinterpret(Float32, b[241:end]))
+        end
+        return (; t=delrt .+ dt .* (0:ns-1), data, sx, sy, gx, gy, offset)
+    end
+    error("read_su: $file is not an SU file (trace lengths do not match the number of samples)")
+end

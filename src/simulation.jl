@@ -35,6 +35,8 @@ Result of [`simulate`](@ref). Fields:
 - `components`: `(:x, :z)` (P-SV), `(:y,)` (SH) or `(:x, :y, :z)` (3D)
 - `tensor_components`: `(:xx, :zz, :xz)` (P-SV), `(:yz, :xy)` (SH) or `(:xx, :yy, :zz, :yz, :xz, :xy)` (3D)
 - `wavefield`: velocity field `V` [m/s] at the end of the simulation as `CartData` (on MPI rank 0; `nothing` elsewhere)
+- `div`, `curl`: with `simulate(...; derivatives = true)`, the divergence `div[it, station]` and the curl
+  `curl[it, component, station]` (components x, y, z) of the velocity [1/s]; otherwise `nothing`
 
 `r["name"]` returns the `(nt, ncomponents)` matrix of the station called `"name"`.
 """
@@ -48,7 +50,11 @@ struct Seismograms
     components::Tuple{Vararg{Symbol}}
     tensor_components::Tuple{Vararg{Symbol}}
     wavefield::Union{CartData,Nothing}
+    div::Union{Matrix{Float64},Nothing}
+    curl::Union{Array{Float64,3},Nothing}
 end
+Seismograms(t, v, u, stress, strain, stations, components, tensor_components, wavefield) =
+    Seismograms(t, v, u, stress, strain, stations, components, tensor_components, wavefield, nothing, nothing)
 
 function Base.getindex(r::Seismograms, name::AbstractString)
     n = findfirst(s -> s.name == name, r.stations)
@@ -124,8 +130,13 @@ Keyword arguments
 - `wavefield = true`: return the velocity field at the end (collected on rank 0) in the result; `false` by default for a
   `DistributedModel`.
 - `verbose = true`: print a summary and the progress (on rank 0).
+- `derivatives = false`: also the divergence and curl of the velocity at the stations (`div`, `curl` of the result), from
+  4th-order centred differences over `dh` [km] (default: the grid spacing in x) between auxiliary stations around each
+  station; at stations on the surface the vertical derivatives are one-sided from below.
 """
-function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolation=:cell, free_surface=:openswpc, grid=:auto, kwargs...)
+function simulate(model::Union{CartData,DistributedModel}; wave=:psv, interpolation=:cell, free_surface=:openswpc, grid=:auto,
+                  derivatives=false, dh=nothing, kwargs...)
+    derivatives && return simulate_derivatives(model, dh; wave, interpolation, free_surface, grid, kwargs...)
     grid in (:auto, :staggered, :curvilinear) || error("grid must be :auto, :staggered or :curvilinear, got :$grid")
     if (model isa CartData && (grid === :curvilinear || (grid === :auto && is_curvilinear(model)))) || (model isa DistributedModel && is_curvilinear(model))
         return size(model)[2] == 1 ? simulate_curvilinear(model; wave, kwargs...) : simulate_curvilinear3d(model; kwargs...)

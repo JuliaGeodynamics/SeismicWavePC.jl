@@ -32,6 +32,7 @@ include("planewave.jl")
 include("injection.jl")
 include("snapshots.jl")
 include("simulation.jl")
+include("derivatives.jl")
 include("curvilinear.jl")
 include("curvilinear3d.jl")
 include("curvilinear_snapshots.jl")
@@ -53,6 +54,6 @@ export curvilinear_mesh
 export ReciprocalGreen, reciprocal_green, seismogram, Snapshots, random_medium, perturb, read_random_medium, misfit_gradient, born,
        L2Misfit, TravelTimeMisfit, ModelParameters, initial_parameters, to_model, WaveformProblem, objective,
        objective_and_gradient, fg!
-export read_netcdf, write_sac, read_sac, read_lhm, read_lgm, read_grd, flatten_earth, flatten_depth, read_snapshots, SnapshotSeries
+export read_netcdf, write_sac, read_sac, write_su, read_su, read_lhm, read_lgm, read_grd, flatten_earth, flatten_depth, read_snapshots, SnapshotSeries
 
 end

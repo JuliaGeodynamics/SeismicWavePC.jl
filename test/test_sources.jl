@@ -161,3 +161,44 @@ end
     @test c.z ≈ -10.0 atol = 1e-6
     @test sum(c.stf(t, c.t0, c.trise) for t in -6:0.001:10) * 0.001 ≈ 1 rtol = 1e-6                   # (unit moment rate)
 end
+
+@testset "divergence and curl at stations; Seismic Unix files" begin
+    isdefined(@__MODULE__, :test_model) || include("setup.jl")
+    # an explosion in a homogeneous medium (before reflections): no curl; the divergence is the rate of the volumetric strain
+    X, Y, Z = xyz_grid(range(-4, 4, step=0.05), 0, range(-8, 0, step=0.05))
+    o = ones(size(X))
+    hom = CartData(X, Y, Z, (; rho=2500 .* o, vp=4.0 .* o, vs=2.3 .* o))
+    src = ExplosionSource(0.0, 0.0, -4.0; M0=1e12, trise=0.3)
+    r = simulate(hom; dt=DT, nt=300, sources=src, stations=[Station("a", 1.0, 0.0, -5.0)], verbose=false, T=Float64, derivatives=true)
+    tr = r.strain[:, 1, 1] .+ r.strain[:, 2, 1]
+    n = length(tr)
+    rate = (tr[2:n-1] .- tr[1:n-2]) ./ DT                      # (the strain is integrated at half steps)
+    @test maximum(abs, r.curl) < 1e-10 * maximum(abs, r.div)
+    @test sqrt(sum(abs2, r.div[2:n-1] .- rate) / sum(abs2, rate)) < 0.03
+    # a station on a flat free surface (curvilinear grid: one-sided vertical differences): σzz = σxz = 0 gives
+    # div = 2μ/(λ+2μ) ∂vx/∂x and curl_y = -2 ∂vz/∂x
+    mesh = curvilinear_mesh(range(-10, 10, length=201), [x -> 0.0]; dz=0.1, bottom=-10)
+    o = ones(size(mesh.x.val))
+    m = addfield(mesh, (; rho=2500 .* o, vp=4.0 .* o, vs=2.3 .* o))
+    h = 0.1
+    st = [Station("s", 4.0, 0.0, 0.0; surface=true); [Station("x$k", 4.0 + k * h, 0.0, 0.0; surface=true) for k in (-2, -1, 1, 2)]]
+    rs = simulate(m; grid=:curvilinear, tmax=4.0, sources=MomentTensorSource(0.0, 0.0, -3.0, 1e14, (1.0, 0.0, -1.0, 0.0, 0.6, 0.0); trise=0.8),
+                  stations=st, verbose=false, T=Float64, derivatives=true)
+    dx(c) = (rs.v[:, c, 2] .- 8 .* rs.v[:, c, 3] .+ 8 .* rs.v[:, c, 4] .- rs.v[:, c, 5]) ./ (12e3h)
+    μ, λ = 2500 * 2300.0^2, 2500 * 4000.0^2 - 2 * 2500 * 2300.0^2
+    rel(a, b) = sqrt(sum(abs2, a .- b) / sum(abs2, b))
+    @test rel(rs.div[:, 1], 2μ / (λ + 2μ) .* dx(1)) < 0.05 && rel(rs.curl[:, 2, 1], -2 .* dx(2)) < 0.03
+    @test size(rs.v, 3) == 5 && rs.stations == st                 # (the auxiliary stations are not returned)
+    # Seismic Unix: one file per quantity and component, the stations as traces; pressure -(σxx + σzz)/2
+    dir = mktempdir()
+    files = write_su(r, dir; quantities=(:v, :p, :div, :curl), source=src)
+    @test length(files) == 2 + 1 + 1 + 3 && all(isfile, files)
+    su = read_su(joinpath(dir, "swpc.psv.vx.su"))
+    @test su.data[:, 1] == Float32.(r.v[:, 1, 1]) && su.t ≈ r.t && su.gx[1] ≈ 1000 && su.sx[1] ≈ 0 && su.offset[1] == 1000
+    @test read_su(joinpath(dir, "swpc.psv.p.su")).data[:, 1] ≈ Float32.(-(r.stress[:, 1, 1] .+ r.stress[:, 2, 1]) ./ 2)
+    @test read_su(joinpath(dir, "swpc.psv.div.su")).data[:, 1] ≈ Float32.(r.div[:, 1])
+    plain = simulate(hom; dt=DT, nt=10, sources=src, stations=[Station("a", 1.0, 0.0, -5.0)], verbose=false)
+    @test plain.div === nothing && plain.curl === nothing
+    @test_throws "derivatives = true" write_su(plain, dir; quantities=(:div,))
+    @test_throws "needs stations" simulate(hom; dt=DT, nt=10, sources=src, verbose=false, derivatives=true)
+end
