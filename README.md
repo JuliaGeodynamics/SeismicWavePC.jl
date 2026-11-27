@@ -1,5 +1,7 @@
 [![CI](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/actions/workflows/CI.yml)
-[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/)
+[![Docs stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://juliageodynamics.github.io/SeismicWavePC.jl/stable/)
+[![Docs dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliageodynamics.github.io/SeismicWavePC.jl/dev/)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24603603.svg)](https://doi.org/10.5281/zenodo.24603603)
 
 
 **Seismic wave propagation and full-waveform inversion (FWI) in 2D and 3D visco-elastic media, in pure Julia, on CPUs, GPUs and MPI clusters.**

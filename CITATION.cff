@@ -9,6 +9,7 @@ authors:
   given-names: Ludovic
   orcid: "https://orcid.org/0000-0002-1136-899X"
 license: MIT
+doi: "10.5281/zenodo.24603603"
 repository-code: "https://github.com/JuliaGeodynamics/SeismicWavePC.jl"
 url: "https://juliageodynamics.github.io/SeismicWavePC.jl/dev/"
 keywords:
