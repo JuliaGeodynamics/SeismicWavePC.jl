@@ -29,7 +29,8 @@ mesh whose top row of nodes is the topography. It is then simulated on a curvili
 finite differences: the free surface lies exactly on the topography, and the scheme is provably stable (the discrete
 energy is conserved, or dissipated at the absorbing boundaries). The SBP operators are the boundary-optimized dual-pairing
 operators of Mattsson, Niemelä & Winters (2027, *J. Comput. Phys.* 568, 115399; order 7), from [SummationByPartsOperators.jl](https://github.com/ranocha/SummationByPartsOperators.jl)
-(Ranocha, 2021, *J. Open Source Softw.* 6(64), 3454).
+(Ranocha, 2021, *J. Open Source Softw.* 6(64), 3454). The method and its relation to published SBP-SAT schemes for
+seismic waves: [Curvilinear solver: method and related work](@ref).
 
 ```julia
 topo(x) = 3.0 * exp(-x^2 / 50)                                   # [km]

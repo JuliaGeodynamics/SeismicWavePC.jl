@@ -24,6 +24,7 @@ makedocs(;
         "Examples" => "examples.md",
         "Coming from OpenSWPC" => "openswpc.md",
         "Validation" => "validation.md",
+        "Curvilinear solver: method" => "curvilinear_method.md",
         "Performance" => "performance.md",
         "API reference" => "api.md",
     ],
