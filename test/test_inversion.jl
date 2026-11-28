@@ -63,7 +63,7 @@ end
         J, adj = m(syn, obs, t)
         @test J > 0 && m(obs, obs, t)[1] < 1e-20
         d = noise(size(syn)...)
-        h = 1e-5
+        h = 1e-4
         fd = (m(syn .+ h .* d, obs, t)[1] - m(syn .- h .* d, obs, t)[1]) / 2h
         @test sum(adj .* d) ≈ fd rtol = 1e-4
     end
