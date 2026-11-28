@@ -4,7 +4,7 @@ include("setup.jl")
 
 # Pkg.test("SeismicWavePC"; test_args=["types", "gradient"]) runs only those files; "file:a,b" only those parts of a file
 # ("mpi:forward,born": parts of mpi_script.jl, "curvilinear:1": the first half of test_curvilinear.jl). MPI first: its 4 processes start while this process is still small (memory of the CI runners)
-const TESTS = ["mpi", "basics", "openswpc", "files", "types", "gradient", "born", "anisotropy", "inversion", "interpolation", "distributed", "rayleigh", "sources", "curvilinear"]
+const TESTS = ["mpi", "basics", "openswpc", "files", "types", "gradient", "born", "anisotropy", "inversion", "interpolation", "distributed", "rayleigh", "sources", "validation", "curvilinear"]
 # CI runs the groups as parallel jobs (environment variable SWPC_TEST_GROUP; unset: all tests)
 const GROUPS = Dict("mpi1" => ["mpi:forward,gradient,born"],
                     "mpi2" => ["mpi:vti,mpml,other"],
@@ -13,7 +13,7 @@ const GROUPS = Dict("mpi1" => ["mpi:forward,gradient,born"],
                     "gradient" => ["gradient", "basics", "openswpc", "files", "types", "inversion", "interpolation", "rayleigh"],
                     "curvilinear1" => ["curvilinear:1"],
                     "curvilinear2" => ["curvilinear:2"],
-                    "other" => ["born", "anisotropy", "distributed", "sources"])
+                    "other" => ["born", "anisotropy", "distributed", "sources", "validation"])
 const TEST_PARTS = Ref(String[])            # the parts of the file being run (empty: all; read by the test files)
 group = get(ENV, "SWPC_TEST_GROUP", "")
 isempty(group) || haskey(GROUPS, group) || error("SWPC_TEST_GROUP: one of $(join(sort(collect(keys(GROUPS))), ", ")), got $group")

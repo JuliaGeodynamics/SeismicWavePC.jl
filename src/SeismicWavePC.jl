@@ -48,11 +48,12 @@ include("curvilinear_adjoint.jl")
 include("curvilinear_teleseismic.jl")
 include("anisotropy.jl")
 include("inversion.jl")
+include("analytic.jl")
 
 export MomentTensorSource, DoubleCoupleSource, ForceSource, finite_fault, read_sources, read_srf, read_cmtsolution, ExplosionSource, PlaneWave, TeleseismicWave, Station, Seismograms, simulate, moment_rate, SampledSTF, BerlageSTF, KlauderSTF, CPU, DistributedModel
 export curvilinear_mesh
 export ReciprocalGreen, reciprocal_green, seismogram, Snapshots, random_medium, perturb, read_random_medium, misfit_gradient, born,
-       L2Misfit, TravelTimeMisfit, EnvelopeMisfit, PhaseMisfit, TFPhaseMisfit, Filtered, bandpass, geographic_weights, ModelParameters, initial_parameters, to_model, WaveformProblem, objective,
+       L2Misfit, TravelTimeMisfit, EnvelopeMisfit, PhaseMisfit, TFPhaseMisfit, Filtered, bandpass, geographic_weights, garvin, tf_misfits, ModelParameters, initial_parameters, to_model, WaveformProblem, objective,
        objective_and_gradient, fg!
 export read_netcdf, write_sac, read_sac, write_su, read_su, read_lhm, read_lgm, read_grd, flatten_earth, flatten_depth, read_snapshots, SnapshotSeries
 

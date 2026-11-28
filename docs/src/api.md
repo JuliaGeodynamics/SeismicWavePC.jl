@@ -80,3 +80,10 @@ objective
 objective_and_gradient
 fg!
 ```
+
+## Validation
+
+```@docs
+garvin
+tf_misfits
+```

@@ -133,6 +133,36 @@ kernel launches), and the curvilinear solver at 500 m is about 3× faster than `
 large models, such as the 10 m Unzen model of the README (8.5 million nodes). Near a sloping surface on the staggered grid, use a finer grid
 than the 16 points per S wavelength that suffice elsewhere, or the curvilinear solver.
 
+## Garvin's problem: exact solution on tilted surfaces
+
+The test of de la Puente et al. (2014): Garvin's problem (Garvin, 1956), a line explosion 25 m below the free surface of a
+half-space (vp = 2 km/s, vs = 1 km/s, ρ = 1600 kg/m³, Ricker wavelet with its peak at 10 Hz, < 5 % above 23 Hz), five
+receivers on the surface 100–500 m from the source, the surface tilted by 0–40°. The reference is exact:
+[`garvin`](@ref) evaluates the Cagniard–de Hoop solution. The errors are the time-frequency envelope (EM) and phase (PM)
+misfits of Kristeková et al. (2006) ([`tf_misfits`](@ref), 2–30 Hz) of the components along (v_t) and normal to (v_n) the
+surface, for the curvilinear solver on a mesh whose bottom is parallel to the surface
+([`examples/garvin_benchmark.jl`](https://github.com/JuliaGeodynamics/SeismicWavePC.jl/blob/main/examples/garvin_benchmark.jl),
+under a minute on a laptop):
+
+![Garvin's problem: seismograms and misfits](assets/garvin_benchmark.png)
+
+EM and PM (%), mean over the five receivers and both components (6.67 m: 6 points per minimum S wavelength, as in the
+paper):
+
+| Grid | 0° | 10° | 20° | 30° | 40° |
+|---|---|---|---|---|---|
+| 6.67 m | EM 8.9, PM 1.2 | EM 0.7, PM 0.2 | EM 0.14, PM 0.09 | EM 0.5, PM 0.2 | EM 0.5, PM 0.2 |
+| 5 m | EM 0.5, PM 0.1 | EM 0.09, PM 0.05 | EM 0.08, PM 0.04 | EM 0.08, PM 0.04 | EM 0.08, PM 0.04 |
+| 3.33 m | EM 0.04, PM 0.03 | EM 0.03, PM 0.02 | EM 0.03, PM 0.02 | EM 0.03, PM 0.02 | EM 0.04, PM 0.03 |
+
+On tilted surfaces the curvilinear solver stays below 1 % already at 6 points per wavelength (de la Puente et al. report
+EM 1.3–4.5 % and PM 0.3–1 % for their mimetic scheme at that resolution), and the errors drop by an order of magnitude
+with each refinement step. On the *flat* surface the 6.67 m grid is the exception: the source, less than four nodes below
+the surface, excites a spurious surface mode at about 7 grid points per wavelength (here 21 Hz; 28 Hz on the 5 m grid),
+which hardly propagates and rings at the source and the nearest receivers (upper left). It is a property of the
+discrete free surface (other upwind SBP closures give it too) and is damped on sloping surfaces. Keep the source spectrum
+below it (8 points per minimum S wavelength: < 1 %), or the source a few wavelengths deep (25 m → 100 m: 9 % → 2 %).
+
 ## Rayleigh waves in firn
 
 Firn (compacting snow over glacial ice) has a strong velocity gradient: vs grows from about 300 m/s at the surface to
@@ -195,3 +225,13 @@ The tests also check:
 - the interfaces to Optim, LogDensityProblems, ChainRules and ForwardDiff;
 - type stability with [JET.jl](https://github.com/aviatesk/JET.jl).
 
+## References
+
+de la Puente, J., Ferrer, M., Hanzich, M., Castillo, J. E., and Cela, J. M. (2014). Mimetic seismic wave modeling
+including topography on deformed staggered grids. *Geophysics*, 79(3), T125–T141. doi:10.1190/geo2013-0371.1
+
+Garvin, W. W. (1956). Exact transient solution of the buried line source problem. *Proceedings of the Royal Society of
+London A*, 234, 528–541. doi:10.1098/rspa.1956.0055
+
+Kristeková, M., Kristek, J., Moczo, P., and Day, S. M. (2006). Misfit criteria for quantitative comparison of
+seismograms. *Bulletin of the Seismological Society of America*, 96(5), 1836–1850. doi:10.1785/0120060012
