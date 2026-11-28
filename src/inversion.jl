@@ -3,13 +3,17 @@
 # DynamicHMC, Pathfinder, Turing) and give it a ChainRulesCore rule (Zygote, …); `fg!` serves Optim.jl.
 
 """
-    ModelParameters(model::CartData, fields::Symbol...; mask=nothing, log=false, basis=nothing)
+    ModelParameters(model::CartData, fields::Symbol...; mask=nothing, log=false, smooth=nothing, basis=nothing)
 
 Parametrization of `model` by a vector θ: the listed `fields` (`:vp`, `:vs`, `:rho`, `:Qp`, `:Qs`, and for VTI models
 `:epsilon`, `:delta`, `:gamma`) vary, everything else
 stays as in `model`.
 - Without `basis`: one parameter per cell where `mask` is true (default: solid rock, `vs > 0`), the field value or, with
   `log = true`, its logarithm (keeps it positive, often better scaled for optimization and sampling).
+- `smooth = L` [km] (or `(Lx, Ly, Lz)`): the model is the initial one plus a smoothed perturbation, `field = field₀ +
+  S (θ - θ₀)` in the mask (with `log`: its logarithm), with `S` a Gaussian smoothing `exp(-(d/L)²)` along each axis. The
+  gradient is that of the smoothed model (`Sᵀ g`, exact), which removes the small-scale noise of cell-wise gradients near
+  the sources and stations: the usual preconditioning of waveform inversions. θ stays one value per cell.
 - With `basis`, a vector of arrays of the size of the model: per field, one parameter per basis function, and
   `field = field₀ + Σₖ θₖ basis[k]` (layers, blobs, splines, …: few parameters, e.g. for Hamiltonian Monte Carlo).
 
@@ -21,10 +25,11 @@ struct ModelParameters
     fields::Vector{Symbol}
     mask::Union{Nothing,BitArray{3}}
     log::Bool
+    smooth::Union{Nothing,NTuple{3,Matrix{Float64}}}       # smoothing matrices along x, y, z
     basis::Union{Nothing,Vector{Array{Float64,3}}}
 end
 
-function ModelParameters(model::CartData, fields::Symbol...; mask=nothing, log=false, basis=nothing)
+function ModelParameters(model::CartData, fields::Symbol...; mask=nothing, log=false, smooth=nothing, basis=nothing)
     isempty(fields) && error("give the fields to invert for, e.g. ModelParameters(model, :vs)")
     for f in fields
         haskey(model.fields, f) || error("the model has no field $f")
@@ -33,12 +38,35 @@ function ModelParameters(model::CartData, fields::Symbol...; mask=nothing, log=f
         mask = mask === nothing ? BitArray(model.fields.vs .> 0) : BitArray(mask)
         size(mask) == size(model) || error("mask must have the size $(size(model)) of the model")
         log && any(f -> any(<=(0), model.fields[f][mask]), fields) && error("log = true needs positive values in the mask")
-        return ModelParameters(model, collect(fields), mask, log, nothing)
+        return ModelParameters(model, collect(fields), mask, log, smoothing_matrices(model, smooth), nothing)
     end
     log && error("log = true is for cell parameters (without basis)")
+    smooth === nothing || error("smooth is for cell parameters (without basis)")
     B = [Float64.(b) for b in basis]
     all(b -> size(b) == size(model), B) || error("the basis functions must have the size $(size(model)) of the model")
-    return ModelParameters(model, collect(fields), nothing, false, B)
+    return ModelParameters(model, collect(fields), nothing, false, nothing, B)
+end
+
+# shortcut: the coordinates along each axis are those of the first grid line (exact on rectilinear grids, approximate on
+# curvilinear meshes with topography)
+"Row-normalized Gaussian smoothing matrices `exp(-(d/L)²)` along x, y, z (`nothing`: no smoothing)."
+function smoothing_matrices(model, L)
+    L === nothing && return nothing
+    Ls = L isa Number ? (L, L, L) : Tuple(L)
+    length(Ls) == 3 && all(>=(0), Ls) || error("smooth = L or (Lx, Ly, Lz) [km], got $L")
+    axes_ = (model.x.val[:, 1, 1], model.y.val[1, :, 1], model.z.val[1, 1, :])
+    return map(axes_, Ls) do c, l
+        K = l > 0 ? exp.(-((c .- c') ./ l) .^ 2) : Float64.(c .== c')
+        K ./ sum(K; dims=2)
+    end
+end
+
+"Apply the matrices `G[d]` along the dimensions `d` of the 3D array `A`."
+function along_axes(G, A)
+    n1, n2, n3 = size(A)
+    B = reshape(G[1] * reshape(A, n1, :), n1, n2, n3)
+    B = stack(B[:, :, k] * transpose(G[2]) for k in 1:n3)
+    return reshape(reshape(B, :, n3) * transpose(G[3]), n1, n2, n3)
 end
 
 "Number of parameters per field."
@@ -61,7 +89,13 @@ function to_model(p::ModelParameters, θ::AbstractVector)
         q === nothing && return A
         θf = view(θ, (q-1)*n+1:q*n)
         B = Float64.(copy(A))
-        if p.basis === nothing
+        if p.smooth !== nothing
+            v0 = p.log ? log.(B[p.mask]) : B[p.mask]
+            δ = zeros(size(B))
+            δ[p.mask] .= θf .- v0
+            v = v0 .+ along_axes(p.smooth, δ)[p.mask]
+            B[p.mask] .= p.log ? exp.(v) : v
+        elseif p.basis === nothing
             B[p.mask] .= p.log ? exp.(θf) : θf
         else
             for (k, b) in enumerate(p.basis)
@@ -77,7 +111,10 @@ end
 function parameter_gradient(p::ModelParameters, grad::CartData, m::CartData)
     return reduce(vcat, map(p.fields) do f
         g = grad.fields[f]
-        p.basis === nothing ? (p.log ? g[p.mask] .* m.fields[f][p.mask] : g[p.mask]) : [sum(g .* b) for b in p.basis]
+        p.basis === nothing || return [sum(g .* b) for b in p.basis]
+        gv = p.log ? g .* m.fields[f] : Float64.(g)
+        p.smooth === nothing && return gv[p.mask]
+        along_axes(transpose.(p.smooth), gv .* p.mask)[p.mask]
     end)
 end
 
@@ -134,10 +171,11 @@ logprior(prior, θ) = prior(θ)
 
 "Misfit of the seismograms of the model `m` (summed over the shots)."
 function data_misfit(prob::WaveformProblem, m)
-    shots = prob.observed isa Seismograms ? ((prob.observed, prob.sources),) : zip(prob.observed, prob.sources)
-    return sum(shots) do (obs, src)
+    shots = prob.observed isa Seismograms ? ((prob.observed, prob.sources, prob.misfit),) :
+            zip(prob.observed, prob.sources, shot_misfits(prob.misfit, length(prob.observed)))
+    return sum(shots) do (obs, src, misfit)
         r = simulate(m; Base.structdiff(prob.kwargs, NamedTuple{(:mute,)})..., sources=src, stations=obs.stations, verbose=false)
-        first(prob.misfit(r.v, obs.v, r.t))
+        first(misfit(r.v, obs.v, r.t))
     end
 end
 

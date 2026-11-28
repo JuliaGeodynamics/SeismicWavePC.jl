@@ -9,10 +9,12 @@ Misfit `J` between the velocity seismograms of a simulation and `observed` (whos
 respect to the model and the sources. With a vector of `observed` seismograms and a vector of `sources` (one entry per shot:
 a source or a vector of sources) the misfits and model gradients of all shots are summed.
 
-- `misfit`: [`L2Misfit`](@ref) (default: `J = ½ Σ (v - v_observed)²`, optionally with weights, time windows and an inverse
-  covariance matrix),
-  [`TravelTimeMisfit`](@ref) (cross-correlation time shifts), or any function `(syn, obs, t) -> (J, ∂J/∂syn)` of the
-  synthetic and observed velocities `[it, component, station]` [m/s] and the sample times `t` [s].
+- `misfit`: [`L2Misfit`](@ref) (default: `J = ½ Σ (v - v_observed)²`, optionally with weights, time windows, an inverse
+  covariance matrix and normalization per trace), [`TravelTimeMisfit`](@ref) (cross-correlation time shifts),
+  [`EnvelopeMisfit`](@ref), [`PhaseMisfit`](@ref) (instantaneous phase), [`TFPhaseMisfit`](@ref) (time-frequency phase),
+  any of them on band-pass filtered seismograms with [`Filtered`](@ref), or any function `(syn, obs, t) -> (J, ∂J/∂syn)`
+  of the synthetic and observed velocities `[it, component, station]` [m/s] and the sample times `t` [s]. With several
+  shots: one misfit for all, or a vector with one per shot (event weights, e.g. from [`geographic_weights`](@ref)).
 - `mute = (sources=r, stations=r)`: taper the model gradient to 0 at the sources and stations within the distance `r` [km]
   (the gradient is large and of little use next to them).
 - `illumination = true`: also return the illumination of the model by the sources, Σₜ |v|² of the forward wavefield
@@ -85,15 +87,19 @@ function mute_gradient!(g::CartData, mute, sources, stations)
     return g
 end
 
-function misfit_gradient(model::CartData, observed::AbstractVector{Seismograms}; sources::AbstractVector, kwargs...)
+function misfit_gradient(model::CartData, observed::AbstractVector{Seismograms}; sources::AbstractVector, misfit=L2Misfit(), kwargs...)
     length(sources) == length(observed) || error("one entry of `sources` per shot: $(length(observed)) shots, $(length(sources)) sources")
-    shots = [misfit_gradient(model, o; kwargs..., sources=src) for (o, src) in zip(observed, sources)]
+    shots = [misfit_gradient(model, o; kwargs..., sources=src, misfit=mi) for (o, src, mi) in zip(observed, sources, shot_misfits(misfit, length(observed)))]
     g = first(shots)[2]
     fields = map(keys(g.fields)) do f
         sum(r -> r[2].fields[f], shots)
     end
     return sum(first, shots), CartData(g.x.val, g.y.val, g.z.val, NamedTuple{keys(g.fields)}(fields)), [r[3] for r in shots]
 end
+
+"The misfits of `n` shots: one for all, or a vector with one per shot (e.g. with event weights)."
+shot_misfits(misfit, n) = fill(misfit, n)
+shot_misfits(misfit::AbstractVector, n) = (length(misfit) == n || error("misfit: one per shot ($n), got $(length(misfit))"); misfit)
 
 "Driver of `simulate` for `method = :ad` (Enzyme extension)."
 ad_driver(args...) = error("misfit_gradient(...; method = :ad) needs the optional package Enzyme: add it and load it with `using Enzyme`")
