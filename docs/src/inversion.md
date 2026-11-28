@@ -52,3 +52,31 @@ julia -t auto --project=examples/Inversion examples/Inversion/inversion_hmc.jl [
 
 
 See [`ModelParameters`](@ref) and [`WaveformProblem`](@ref) for all options.
+
+## Practical waveform inversion
+
+Inversions with one parameter per cell need a few more ingredients, which the misfits and parametrizations provide:
+
+```julia
+params = ModelParameters(model, :vp, :vs; log=true, smooth=2.0)    # smoothed updates (correlation length 2 km)
+w      = geographic_weights(observed.stations, 20.0)               # balance clusters of stations
+θ      = initial_parameters(params)
+for band in ((0.0, 0.5), (0.0, 1.0), (0.0, 2.0))                    # from low to high frequencies
+    misfit  = Filtered(PhaseMisfit(weights=w), band)
+    problem = WaveformProblem(params, observed; sources, misfit, dt, nt, backend, mute=(sources=1.0,))
+    θ = Optim.minimizer(optimize(Optim.only_fg!(fg!(problem)), θ, LBFGS(), Optim.Options(iterations=10)))
+end
+```
+
+- **Smoothing** (`smooth = L` [km], or `(Lx, Ly, Lz)`): the model is the initial one plus a Gaussian-smoothed perturbation,
+  and the gradient is exactly that of the smoothed model. This removes the small-scale noise of cell-wise gradients near
+  sources and stations (the usual preconditioning of waveform inversions); shrink `L` as the frequencies go up.
+- **Frequency continuation:** [`Filtered`](@ref)`(misfit, (f1, f2))` filters synthetic and observed seismograms alike, so
+  that the observed data stay unfiltered. Start at low frequencies, where the starting model is within half a period.
+- **Misfits:** [`EnvelopeMisfit`](@ref) (robust, low resolution: a first stage for poor starting models), [`PhaseMisfit`](@ref)
+  (instantaneous phase, independent of amplitudes: source strength, attenuation and site effects matter little),
+  [`TFPhaseMisfit`](@ref) (phase differences in time and frequency), [`TravelTimeMisfit`](@ref),
+  [`L2Misfit`](@ref)`(normalize=true)` (each trace scaled by its energy).
+- **Weights:** [`geographic_weights`](@ref)`(points, L)` (Ruan et al., 2019) for stations, and for the shots from their
+  sources with a vector of misfits, one per shot:
+  `misfit = [L2Misfit(weights=we .* ws) for we in geographic_weights(sources, 50.0)]` (one source per shot).

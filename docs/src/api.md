@@ -66,6 +66,12 @@ misfit_gradient
 born
 L2Misfit
 TravelTimeMisfit
+EnvelopeMisfit
+PhaseMisfit
+TFPhaseMisfit
+Filtered
+bandpass
+geographic_weights
 ModelParameters
 initial_parameters
 to_model

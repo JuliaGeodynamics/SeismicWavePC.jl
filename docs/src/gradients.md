@@ -11,11 +11,19 @@ sgrad[1].M, sgrad[1].t0                                                 # ∂J/�
 - **Misfit:** `misfit=L2Misfit()` (default) is `J = ½ Σ (v - v_observed)²` over all samples, components and stations of
   `observed`, whose stations are used.
   - `L2Misfit(weights=w, window=(t1, t2))` weights stations, components or samples and selects time windows (one for all, or
-    one per station); `L2Misfit(invcov=C⁻¹)` uses an inverse covariance matrix of the samples of a trace (correlated noise).
+    one per station); `L2Misfit(invcov=C⁻¹)` uses an inverse covariance matrix of the samples of a trace (correlated noise);
+    `L2Misfit(normalize=true)` divides the misfit of each trace by the energy of the observed trace.
   - `TravelTimeMisfit(; weights, window)` uses the cross-correlation time shifts of the traces.
+  - `EnvelopeMisfit()` compares the envelopes (insensitive to the phase, robust against cycle skipping), `PhaseMisfit()` the
+    instantaneous phases (insensitive to amplitudes), `TFPhaseMisfit(width=T)` the phase differences in time and frequency
+    (Fichtner et al., 2008).
+  - `Filtered(misfit, (f1, f2))` applies a misfit to band-pass filtered synthetic and observed seismograms (zero-phase
+    Butterworth, [`bandpass`](@ref)), for inversions from low to high frequencies.
+  - [`geographic_weights`](@ref)`(stations, L)` gives station weights that balance clusters of stations.
   - Any function `(syn, obs, t) -> (J, ∂J/∂syn)` of the synthetic and observed velocities `[it, component, station]` works too.
 - **Several shots:** `misfit_gradient(model, [obs1, obs2, …]; sources=[src1, src2, …], …)` sums the misfits and model
-  gradients of the shots; each shot can have several sources.
+  gradients of the shots; each shot can have several sources. `misfit` is one misfit for all shots, or a vector with one per
+  shot (e.g. event weights).
 - **Model gradient:** `grad` is a `CartData` with the fields `rho`, `vp`, `vs`, `Qp`, `Qs`. With
   `mute=(sources=r, stations=r)` it is tapered to zero within the distance `r` [km] of the sources and stations, where it is
   large and of little use.
@@ -50,7 +58,8 @@ sgrad[1].M, sgrad[1].t0                                                 # ∂J/�
   forward simulations, on the CPU and one process, with the default misfit and without source gradients.
 
 
-See [`misfit_gradient`](@ref), [`L2Misfit`](@ref) and [`TravelTimeMisfit`](@ref) for all options.
+See [`misfit_gradient`](@ref) and the misfits ([`L2Misfit`](@ref), [`TravelTimeMisfit`](@ref), [`EnvelopeMisfit`](@ref),
+[`PhaseMisfit`](@ref), [`TFPhaseMisfit`](@ref), [`Filtered`](@ref)) for all options.
 
 ## Born modelling (the Jacobian)
 
