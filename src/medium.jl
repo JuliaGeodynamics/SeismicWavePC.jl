@@ -274,12 +274,13 @@ cells of an MPI rank with a few around them), the 2nd-order zones near free surf
 the maximum P velocity (`vlayer` per layer). `block(S)` gives the fields of the physical cells `S` (ranges in x, (y)) as
 internal arrays. With `Val(true)` the arrays are returned as [`Window`](@ref)s, otherwise (the whole grid) as plain arrays.
 """
-function setup_medium(block, g::Grid{N}, W::NTuple{N,UnitRange{Int}}, ::Val{windows}, na, fq_min, fq_max, fq_ref) where {N,windows}
+function setup_medium(block, g::Grid{N}, W::NTuple{N,UnitRange{Int}}, ::Val{windows}, na, fq_min, fq_max, fq_ref;
+                      periodic=ntuple(_ -> false, Val(N - 1))) where {N,windows}
     n = g.n
     # the physical cell whose medium a padded cell gets: itself, or for the padding and the absorber zone (`na` cells at the
-    # sides and the bottom, homogenized as in OpenSWPC) the nearest cell outside them
-    J = ntuple(a -> [a == N ? clamp(i - H, 1, n[a] - na) : clamp(i - H, na + 1, n[a] - na) for i in W[a]], Val(N))
-    S = ntuple(a -> first(J[a]):last(J[a]), Val(N - 1))
+    # sides and the bottom, homogenized as in OpenSWPC) the nearest cell outside them; periodic axes: the cell on the other side
+    J = ntuple(a -> [a == N ? clamp(i - H, 1, n[a] - na) : periodic[a] ? mod1(i - H, n[a]) : clamp(i - H, na + 1, n[a] - na) for i in W[a]], Val(N))
+    S = ntuple(a -> minimum(J[a]):maximum(J[a]), Val(N - 1))
     b = block(S)
     pad(A) = A[ntuple(a -> a == N ? J[a] : J[a] .- (first(S[a]) - 1), Val(N))...]
     rho = pad(max.(b.rho, 0.001))   # air needs a small non-zero density (as in OpenSWPC)

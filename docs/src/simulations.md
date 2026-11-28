@@ -13,6 +13,10 @@ result = simulate(model; dt, nt, sources, stations, stf=:kupper, absorber=:pml, 
   Poisson ratio) reaches into the side layers, the PML can grow exponentially after some tens of seconds. `:mpml` is stable
   there (`mpml_ratio = 0.1`), for a few % more time, but reflects more than the PML (less than `:cerjan`): mostly a slowly
   decaying long-period residual after the direct waves.
+- **Periodic sides:** `periodic = true` (or per axis, `(true, false)` for x and y in 3D) makes the sides periodic: waves
+  leaving on one side enter on the other (no absorbing layers there; the bottom still absorbs), e.g. for plane waves
+  through random media, as SOFI's periodic boundaries. Staggered grid, simulations (with MPI and on GPUs as usual); not yet
+  for misfit gradients, Born modelling, a `DistributedModel` or teleseismic waves.
 - **Precision:** `T = Float32` (default) or `Float64`.
 - **CPU threads:** start Julia with `-t auto` (or `-t n`).
 - **GPUs:** `backend = CUDABackend()`, `ROCBackend()` or `MetalBackend()` (after `using CUDA`, `AMDGPU` or `Metal`).

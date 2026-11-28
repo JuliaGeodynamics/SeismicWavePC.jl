@@ -426,12 +426,12 @@ function forward_step!(F, M, Src, FSrc, St, rec, acc, regions, it, p, record=tru
     p.pw_edges && extrapolate_sides!(velocities(F), p.edges)
     cells = (p.rows..., Base.tail(regions)...)                 # the interior by rows (as `timeloop!`), the PML zones
     foreach_region!(backend, stress!, (F, M, c, vc, dtT), cells)
-    p.nosource || inject_sources!(backend, inject!, (F, Src, it), Src)
+    p.nosource || inject_sources!(backend, inject!, (F, Src, window_step!(p.Wm, it)), Src)
     inject_wave!(p.tw, Val(:stress), F, M, c, vc, dtT, eltype(dtT)(p.tbeg + (it - 0.5) * p.dt), backend)
     p.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, p.nb, stresses(F)...))
     p.pw_edges && extrapolate_sides!(stresses(F), p.edges)
     foreach_region!(backend, vel!, (F, M, c, dtT), cells)
-    p.noforce || inject_sources!(backend, force!, (F, M, FSrc, it), FSrc)
+    p.noforce || inject_sources!(backend, force!, (F, M, FSrc, window_step!(p.Wf, it)), FSrc)
     inject_wave!(p.tw, Val(:velocity), F, M, c, vc, dtT, eltype(dtT)(p.tbeg + it * p.dt), backend)
     p.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, p.nb, velocities(F)...))
     return nothing
@@ -509,8 +509,12 @@ function (d::AdjointDriver)(s)
     L = d.illumination ? new(M.lam) : nothing
     buf = [(map(new, V), fmem()) for _ in 0:K]
     N = ndims(M.lam)
-    SW, SX = KernelAbstractions.zeros(backend, s.T, length(s.Src.i), 6, nt), KernelAbstractions.zeros(backend, s.T, length(s.Src.i), 6, 2N)
-    FW, FX = KernelAbstractions.zeros(backend, s.T, length(s.FSrc.i), 3, nt), KernelAbstractions.zeros(backend, s.T, length(s.FSrc.i), 3, 2N)
+    # source sensitivities: per step (in windows of steps, reduced on the host: source_window.jl) and the location sums
+    nSl, nFl = length(s.Src.i), length(s.FSrc.i)
+    sens = source_sensitivities(s, nSl, nFl, nt, backend)
+    SW, FW = sens.Wm.out[1], sens.Wf.out[1]
+    Srcb, FSrcb = merge(s.Src, (; s=sens.Wm.s)), merge(s.FSrc, (; s=sens.Wf.s))
+    SX, FX = KernelAbstractions.zeros(backend, s.T, nSl, 6, 2N), KernelAbstractions.zeros(backend, s.T, nFl, 3, 2N)
     sync_halo!(A) = s.parallel && (KernelAbstractions.synchronize(backend); exchange_halo!(backend, s.nb, A...))
     # backward, segment by segment: recompute the forward velocities, then the adjoint steps n = b … a
     for (seg, a) in Iterators.reverse(enumerate(1:K:nt))
@@ -539,12 +543,13 @@ function (d::AdjointDriver)(s)
             inject_wave_grad!(s.tw, G, E, Ma, c, dtT, eltype(dtT)(s.tbeg + (n - 0.5) * s.dt), backend)   # teleseismic wave
             foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, nothing), deep...)
             map(((lo, ndr),) -> foreach_cell!(backend, stress!, (Q, Ma, c, vc, dtT, Δv), lo, ndr), rest)
+            lm, lf = window_step!(sens.Wm, n), window_step!(sens.Wf, n)
             if s.sinc
-                s.nosource || run_once!(backend, source_sens_sinc!, (SW, SX, E, -one(s.T), s.Src, sg.mcols, n))
-                s.noforce || run_once!(backend, source_sens_sinc!, (FW, FX, velocities(Qv), -one(s.T), s.FSrc, sg.fcols, n))
+                s.nosource || run_once!(backend, source_sens_sinc!, (SW, SX, E, -one(s.T), Srcb, sg.mcols, lm))
+                s.noforce || run_once!(backend, source_sens_sinc!, (FW, FX, velocities(Qv), -one(s.T), FSrcb, sg.fcols, lf))
             else
-                s.nosource || run_once!(backend, source_sens!, (SW, SX, mt_sample, E, Qv, M, s.Src, n))
-                s.noforce || run_once!(backend, source_sens!, (FW, FX, f_sample, E, Qv, M, s.FSrc, n))
+                s.nosource || run_once!(backend, source_sens!, (SW, SX, mt_sample, E, Qv, M, Srcb, lm))
+                s.noforce || run_once!(backend, source_sens!, (FW, FX, f_sample, E, Qv, M, FSrcb, lf))
             end
             sync_halo!(stresses(Q))
             map(((lo, ndr, P),) -> foreach_cell!(backend, stretch_s!, (Δs, Q, P, dtT), lo, ndr), azones)
@@ -552,6 +557,7 @@ function (d::AdjointDriver)(s)
         end
     end
     KernelAbstractions.synchronize(backend)
+    flush!(sens.Wm); flush!(sens.Wf)
     # accumulators of all ranks on the global grid (rank 0), chain rule there, result to all ranks
     Gg = map(A -> gather_interior(A, s), G)
     g = s.me == 0 ? model_gradient(s, vti ? assemble_gradient_vti(Gg, s.med, s.mode) : assemble_gradient(Gg, s.med.mu, s.mode, shear_rule(s.med))) : nothing
@@ -563,7 +569,37 @@ function (d::AdjointDriver)(s)
         end
     end
     s.parallel && (g = MPI.bcast(g, 0, IGG.comm()))
-    return J, g, source_gradients(s, SW, SX, FW, FX)
+    return J, g, source_gradients(s, sens, SX, FX)
+end
+
+"""
+The windows of the backward pass for the source sensitivities (`W[l, j, step]`: of the injected amplitude of source `l`,
+component `j`), with the host sums the source gradients need: `dA[l, j]` = Σₙ sₙ W (sₙ the amplitude) and `gm[l, n]` =
+∂J/∂(moment rate) = c Σⱼ Aⱼ W (A the moment tensor or force as injected).
+"""
+function source_sensitivities(s, nSl, nFl, nt, backend)
+    flip(j) = j in (4, 5) ? -1.0 : 1.0
+    S, FS = s.moments[s.iS], s.forces[s.iF]
+    Mi = [ntuple(j -> src.M[j] * flip(j), 6) for src in S]
+    Fi = [ntuple(m -> src.F[m] * (m == 3 ? -1.0 : 1.0), 3) for src in FS]
+    cm = [src.M0 / s.M0 * s.dt / s.volume[i] for (src, i) in zip(S, s.iS)]
+    cf = [1e3 / s.M0 * s.dt / s.fvolume[i] for i in s.iF]
+    dM, gmM, dF, gmF = zeros(nSl, 6), zeros(nSl, nt), zeros(nFl, 3), zeros(nFl, nt)
+    function reducer(dA, gm, A, c)
+        return (outs, steps, amp) -> begin
+            W = outs[1]
+            for (q, n) in enumerate(steps), l in axes(W, 1)
+                a = Float64(amp[l, q])                          # (the injected amplitude, from the window)
+                for j in axes(W, 2)
+                    dA[l, j] += a * W[l, j, q]
+                    gm[l, n] += c[l] * A[l][j] * W[l, j, q]
+                end
+            end
+        end
+    end
+    Wm = source_window(s.amp_m, nSl, nt, s.dev, s.T, backend; outputs=((nSl, 6),), reduce=reducer(dM, gmM, Mi, cm))
+    Wf = source_window(s.amp_f, nFl, nt, s.dev, s.T, backend; outputs=((nFl, 3),), reduce=reducer(dF, gmF, Fi, cf))
+    return (; Wm, Wf, dM, gmM, dF, gmF)
 end
 
 "Sum of the per-rank source sensitivities `A[l, …]` of the sources `idx` (indices in the list of all sources) over the ranks."
@@ -578,10 +614,10 @@ end
 Gradients with respect to the parameters of every source of `s.sources` (`nothing` for plane waves and ignored sources), from
 the sensitivities to the injected amplitudes `W` (per step) and `X` (neighbour cells): see [`misfit_gradient`](@ref).
 """
-function source_gradients(s, SW, SX, FW, FX)
+function source_gradients(s, sens, SX, FX)
     g, N, nt, dt = s.g, length(s.g.n), s.nt, s.dt
-    W, X = global_sources(SW, s.iS, length(s.moments), s), global_sources(SX, s.iS, length(s.moments), s)
-    FWg, FXg = global_sources(FW, s.iF, length(s.forces), s), global_sources(FX, s.iF, length(s.forces), s)
+    DM, GM, X = (global_sources(A, s.iS, length(s.moments), s) for A in (sens.dM, sens.gmM, SX))
+    DF, GF, FXg = (global_sources(A, s.iF, length(s.forces), s) for A in (sens.dF, sens.gmF, FX))
     # ∂J/∂(position) from the sensitivities at the neighbour cells (or of the interpolation weights, per nominal spacing);
     # internal axes (x, [y,] depth) -> (x, y, z up)
     function position(A, amp, l, src)
@@ -591,7 +627,8 @@ function source_gradients(s, SW, SX, FW, FX)
     end
     # ∂J/∂t0, ∂J/∂trise from the gradient with respect to the moment rate (central differences of the source time function)
     function timing(gm, times, src)
-        mr(t, t0, tr) = moment_rate(s.stf, t, t0, tr)
+        source_stf(src, s.stf) === :delta && return NaN, NaN        # (an impulse: no derivative with respect to t0, trise)
+        mr(t, t0, tr) = moment_rate(source_stf(src, s.stf), t, t0, tr)
         h = 1e-6 * src.trise
         dt0 = sum(gm[n] * (mr(times[n], src.t0 + h, src.trise) - mr(times[n], src.t0 - h, src.trise)) / 2h for n in 1:nt)
         dtr = sum(gm[n] * (mr(times[n], src.t0, src.trise + h) - mr(times[n], src.t0, src.trise - h)) / 2h for n in 1:nt)
@@ -602,21 +639,16 @@ function source_gradients(s, SW, SX, FW, FX)
     tf = [s.tbeg + n * dt for n in 1:nt]                         # and of the forces
     mts = map(enumerate(s.moments)) do (l, src)
         Mi = ntuple(j -> src.M[j] * flip(j), 6)                    # internal moment tensor
-        vol = s.volume[l]                                          # as injected (`simulate`)
-        sl = [src.M0 / s.M0 * moment_rate(s.stf, tm[n], src.t0, src.trise) * dt / vol for n in 1:nt]
-        dMi = ntuple(j -> sum(sl[n] * W[l, j, n] for n in 1:nt), 6)  # ∂J/∂Mi
-        dP = ntuple(j -> flip(j) * dMi[j] / src.M0, 6)             # ∂J/∂(M0 M)
-        gm = [sum(Mi[j] * W[l, j, n] for j in 1:6) * src.M0 / s.M0 * dt / vol for n in 1:nt]    # ∂J/∂(moment rate)
+        dP = ntuple(j -> flip(j) * DM[l, j] / src.M0, 6)           # ∂J/∂(M0 M) from ∂J/∂Mi
+        gm = GM[l, :]                                              # ∂J/∂(moment rate)
         x, y, z = position(X, Mi, l, src)
         t0, trise = timing(gm, tm, src)
         (; M=dP, M0=sum(src.M[j] * dP[j] for j in 1:6), x, y, z, t0, trise, stf=gm, t=tm)
     end
     fs = map(enumerate(s.forces)) do (l, src)
         Fi = ntuple(m -> src.F[m] * (m == 3 ? -1.0 : 1.0), 3)
-        vol = s.fvolume[l]
-        sl = [1e3 / s.M0 * moment_rate(s.stf, tf[n], src.t0, src.trise) * dt / vol for n in 1:nt]
-        dF = ntuple(m -> (m == 3 ? -1.0 : 1.0) * sum(sl[n] * FWg[l, m, n] for n in 1:nt), 3)
-        gm = [sum(Fi[m] * FWg[l, m, n] for m in 1:3) * 1e3 / s.M0 * dt / vol for n in 1:nt]
+        dF = ntuple(m -> (m == 3 ? -1.0 : 1.0) * DF[l, m], 3)
+        gm = GF[l, :]
         x, y, z = position(FXg, Fi, l, src)
         t0, trise = timing(gm, tf, src)
         (; F=dF, x, y, z, t0, trise, stf=gm, t=tf)

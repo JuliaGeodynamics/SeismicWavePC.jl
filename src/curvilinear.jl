@@ -1055,12 +1055,16 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     fcoef, mcoef = (H, i, k) -> 1.0, (H, i, k) -> 1 / H.J[i-ow, k]
     tables(δ) = (mine(source_table(forces, fcoef, δ)), mine(source_table(moments, mcoef, δ)))
     ft, mt = tables((0.0, 0.0))
+    # the amplitudes per source and step, on the device in windows of steps (source_window.jl)
+    amp_f(n) = (s = forces[n]; amp_row(source_stf(s, stf), 1, 1, 1, tbeg, 1, dt, s.t0, s.trise))
+    amp_m(n) = (s = moments[n]; amp_row(source_stf(s, stf), 1, dt, 1, tbeg, 0.5, dt, s.t0, s.trise))
+    Wf, Wm = source_window(amp_f, length(forces), nt, dev, FT, backend), source_window(amp_m, length(moments), nt, dev, FT, backend)
     FS = (; b=dev(ft.b), i=dev(ft.i), k=dev(ft.k), c=dev(FT.(ft.c)), n=dev(ft.n), seg=dev(ft.seg),
           F=dev(FT[s.F[c] for s in forces, c in (sh ? (2,) : (1, 3))]),
-          s=dev(FT[moment_rate(stf, tbeg + (it - 1) * dt, s.t0, s.trise) for s in forces, it in 1:nt]))
+          s=Wf.s)
     MS = (; b=dev(mt.b), i=dev(mt.i), k=dev(mt.k), c=dev(FT.(mt.c)), n=dev(mt.n), seg=dev(mt.seg),
           M=dev(FT[s.M0 * s.M[c] for s in moments, c in (sh ? (6, 4) : (1, 3, 5))]),        # (SH: σxy, σyz)
-          s=dev(FT[moment_rate(stf, tbeg + (it - 0.5) * dt, s.t0, s.trise) * dt for s in moments, it in 1:nt]))
+          s=Wm.s)
     # stations
     nst = length(stations)
     st = map(stations) do s
@@ -1128,14 +1132,14 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
         momentum!(dtT, true)
         ntw > 0 && foreach_item!(backend, sh ? tf_momentum_sh! : tf_momentum_psv!, (tfB, TW, FT(tbeg + n * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(V -> V .*= B.gs, vel(B)), blocks)
-        length(FS.seg) > 1 && foreach_item!(backend, sh ? force_sh_cv! : force_cv!, (forceB, FS, it, dtT), length(FS.seg) - 1)
+        length(FS.seg) > 1 && foreach_item!(backend, sh ? force_sh_cv! : force_cv!, (forceB, FS, window_step!(Wf, it), dtT), length(FS.seg) - 1)
         par === nothing || KernelAbstractions.synchronize(backend)     # (the halos: MPI reads finished fields)
         exchange_v!()
         record && nst > 0 && foreach_item!(backend, sh ? record_sh_cv! : record_cv!, (rec, acc, prev, recB, St, itw, dtT), nst)
         stress!(vc, dtT)
         ntw > 0 && foreach_item!(backend, sh ? tf_stress_sh! : tf_stress_psv!, (updB, TW, vc, FT(tbeg + (n + 0.5) * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(S -> S .*= B.gs, str(B)), blocks)
-        length(MS.seg) > 1 && foreach_item!(backend, sh ? moment_sh_cv! : moment_cv!, (momB, MS, it), length(MS.seg) - 1)
+        length(MS.seg) > 1 && foreach_item!(backend, sh ? moment_sh_cv! : moment_cv!, (momB, MS, window_step!(Wm, it)), length(MS.seg) - 1)
         par === nothing || KernelAbstractions.synchronize(backend)
         exchange_s!()
     end
@@ -1155,7 +1159,7 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     driver === nothing || return drive_curvilinear(driver, (; backend, FT, blocks, hostblocks, nb, nx, nzt, nl, no, hx, ox, xr, ia, ib,
         par, me, dt, dtT, nt, nrec, record_every, momentum!, stress!, step!, exchange_v!, exchange_s!, owned, St, nst, FS, forces,
         Hξ, hξ, tbeg, attenuation, dev, model, all_traces, stations, density_unit, vc, own_stations=own, sponge=absorber === :cerjan, nsrc=length(allsrcs), st_all,
-        seismograms, ts, fq_ref, loc=A -> A[xr .- ow, :], ftab=ft, mtab=mt, MS, moments, srcs=allsrcs, stf, tables, ow, owy=0,
+        seismograms, ts, fq_ref, loc=A -> A[xr .- ow, :], ftab=ft, mtab=mt, MS, moments, srcs=allsrcs, stf, tables, ow, owy=0, Wf, Wm, amp_f, amp_m,
         TW, ntw, tfkind=sh ? Val(:sh) : Val(:psv)))
     # checkpoints (one file per process): the wavefield and memory variables, the recording and the plane accumulators
     ckp = checkpoint === nothing ? nothing : par !== nothing ? "$(checkpoint)_rank$me.jls" : "$checkpoint.jls"

@@ -255,3 +255,27 @@ end
     @test_throws "mpml_ratio" simulate(test_model(:psv); dt=DT, nt=1, sources=test_source(), absorber=:mpml, mpml_ratio=1.5, verbose=false)
     @test_throws "absorber" simulate(test_model(:psv); dt=DT, nt=1, sources=test_source(), absorber=:mpl, verbose=false)
 end
+
+@testset "periodic side boundaries" begin
+    # a model uniform along x with periodic sides: moving source and stations together (across the edge) changes nothing
+    m = test_model(:psv)                                    # (layered, flat surface; 10 km wide)
+    w(x, L) = mod(x + L / 2, L) - L / 2
+    src(x) = MomentTensorSource(w(x, 10.0), 0.0, -1.0, 1e15, (1.0, 0.0, -1.0, 0.0, 0.7, 0.0); trise=0.3)
+    st(x) = [Station("a", w(x + 1.0, 10.0), 0.0, -0.5), Station("b", w(x - 3.0, 10.0), 0.0, -1.5)]
+    kw = (; dt=DT, nt=400, T=Float64, verbose=false, periodic=true)
+    @test simulate(m; kw..., sources=src(-0.475), stations=st(-0.475)).v == simulate(m; kw..., sources=src(4.025), stations=st(4.025)).v
+    # a plane wave at vertical incidence: the same at all x (no side effects)
+    pw = simulate(m; kw..., nt=300, sources=PlaneWave(:p; depth=2.5, length=1.0), stations=[Station("p", x, 0.0, -1.0) for x in (-4.0, 0.0, 3.0)])
+    @test pw.v[:, :, 1] == pw.v[:, :, 2] == pw.v[:, :, 3]
+    # 3D, periodic in x and y: shifted across both edges
+    m3 = test_model(:p3d; step=false)
+    src3(x, y) = MomentTensorSource(w(x, 4.0), w(y, 3.0), -1.0, 1e15, (1.0, 0.5, -1.0, 0.3, 0.7, -0.2); trise=0.3)
+    st3(x, y) = [Station("a", w(x + 1.0, 4.0), w(y + 0.6, 3.0), -0.5), Station("b", w(x - 1.4, 4.0), w(y - 1.1, 3.0), -1.5)]
+    k3 = (; dt=DT, nt=150, T=Float64, verbose=false, periodic=true)
+    @test simulate(m3; k3..., sources=src3(-0.475, 0.025), stations=st3(-0.475, 0.025)).v ==
+          simulate(m3; k3..., sources=src3(1.525, 1.025), stations=st3(1.525, 1.025)).v
+    # periodic in x only (3D), and without periodic sides the absorbing layers
+    @test all(isfinite, simulate(m3; k3..., nt=20, periodic=(true, false), sources=src3(0.0, 0.0), stations=st3(0.0, 0.0)).v)
+    obs = simulate(m; dt=DT, nt=50, sources=src(0.0), stations=st(0.0), verbose=false)
+    @test_throws "periodic boundaries" misfit_gradient(m, obs; dt=DT, nt=50, sources=src(0.0), periodic=true)
+end

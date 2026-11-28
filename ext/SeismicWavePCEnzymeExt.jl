@@ -32,9 +32,10 @@ state(s) = (values(s.F)..., s.acc, S.pml_state(s.regions)...)
 
 function (d::GradientDriver)(s)
     s.backend isa S.CPU && !s.parallel || error("misfit_gradient(...; method = :ad) runs on the CPU and one process (no MPI)")
+    S.whole(s.Wm) && S.whole(s.Wf) || error("misfit_gradient(...; method = :ad): too many sources × steps for one table (use method = :adjoint)")
     o = S.observed_velocities(d.observed, s)
     p = (; s.c, s.vc, s.dtT, s.nosource, s.noforce, s.nown, s.record_every, s.pw_edges, s.edges, s.backend, s.scale, s.nc, s.parallel, s.nb,
-         kernels=s.kernels[1:5], s.tw, s.tbeg, s.dt, s.rows)
+         kernels=s.kernels[1:5], s.tw, s.tbeg, s.dt, s.rows, Wm=nothing, Wf=nothing)   # (the whole source tables: no windows)
     K = something(d.checkpoint_steps, ceil(Int, sqrt(s.nt)))
     starts = collect(1:K:s.nt)
     seg(a) = (a, min(a + K - 1, s.nt))

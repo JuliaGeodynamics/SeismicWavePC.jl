@@ -34,7 +34,7 @@ How OpenSWPC's options map to SeismicWavePC.jl:
 |---|---|
 | input file (`dt`, `nt`, `na`, `fq_min`, `stftype`, …) | keyword arguments of `simulate` (`stf` for `stftype`) |
 | velocity model (`vmodel_type`) | any GMG `CartData`; `read_netcdf` (`velm`), `read_lhm` (`lhm`), `read_lgm` (`lgm`), `read_grd` (`grd`); `velm` and `grd` need `using NCDatasets` |
-| source and station files | `DoubleCoupleSource`, `MomentTensorSource`, `ForceSource` (`bf_mode`), `PlaneWave` (`pw_mode`), `Station` (in x, y or longitude, latitude) |
+| source and station files | `read_sources(file; format)` (every `stf_format`), `DoubleCoupleSource`, `MomentTensorSource`, `ForceSource` (`bf_mode`), `PlaneWave` (`pw_mode`), `Station` (in x, y or longitude, latitude) |
 | `green_mode` (reciprocal Green's functions) | `reciprocal_green(model, receiver, points; component)`, `seismogram(green, n, source)`, `write_sac(green, dir)` |
 | netCDF in general | optional: NCDatasets is only loaded with `using NCDatasets` (package extension) |
 | random media (`gen_rmed3d`, `gen_rmed2d`, `*_rmed` models) | `perturb(model, random_medium(x, y, z; spectrum, a, epsilon, kappa))`; `read_random_medium(file)` for existing files |

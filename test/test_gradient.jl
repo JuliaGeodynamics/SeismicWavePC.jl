@@ -1,6 +1,6 @@
 # Misfit gradients: adjoint-state method and automatic differentiation (Enzyme extension), against each other and against
 # finite differences of whole simulations
-using LinearAlgebra
+using LinearAlgebra, Random
 # The gradients of automatic differentiation (Enzyme, method = :ad) against the adjoint: Enzyme's compilation took most of the
 # time of these tests on CI runners. Locally on Julia ≥ 1.11; on CI only with SWPC_TEST_AD=true. (The adjoint is checked
 # against finite differences either way.)
@@ -176,14 +176,16 @@ end
     h = 1e-3
     @test dJ ≈ (misfit(vals .* 1.1 .+ h .* (1:21 .== k)) - misfit(vals .* 1.1 .- h .* (1:21 .== k))) / 2h rtol = 1e-5
     # L2 misfit with an inverse covariance matrix: identity = plain L2; derivative by finite differences
-    syn, o = randn(30, 2, 3), randn(30, 2, 3)
+    rng = Random.Xoshiro(2026)                                   # (reproducible)
+    syn, o = randn(rng, 30, 2, 3), randn(rng, 30, 2, 3)
     t = range(0, 1, length=30)
     @test L2Misfit(invcov=Matrix(1.0I, 30, 30))(syn, o, t)[1] ≈ L2Misfit()(syn, o, t)[1]
-    A = randn(30, 30); C = A * A' / 30 + I
+    A = randn(rng, 30, 30); C = A * A' / 30 + I
     mis = L2Misfit(invcov=C, weights=[1.0, 2.0, 0.5], window=(0.2, 0.8))
     Jc, adj = mis(syn, o, t)
-    e = zeros(size(syn)); e[12, 2, 3] = 1e-6
-    @test adj[12, 2, 3] ≈ (mis(syn .+ e, o, t)[1] - mis(syn .- e, o, t)[1]) / 2e-6 rtol = 1e-6
+    # (the misfit is quadratic: central differences are exact, a large step keeps the rounding small)
+    e = zeros(size(syn)); e[12, 2, 3] = 1e-2
+    @test adj[12, 2, 3] ≈ (mis(syn .+ e, o, t)[1] - mis(syn .- e, o, t)[1]) / 2e-2 rtol = 1e-9
     # muting: zero at the source and the stations, unchanged far from them
     J1, g1 = misfit_gradient(m, obs; dt=DT, nt=150, T=Float64, sources=src, stf=SampledSTF(tq, vals .* 1.1))
     _, g2 = misfit_gradient(m, obs; dt=DT, nt=150, T=Float64, sources=src, stf=SampledSTF(tq, vals .* 1.1), mute=(sources=1.0, stations=0.5))

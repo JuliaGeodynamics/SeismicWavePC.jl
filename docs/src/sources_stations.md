@@ -2,10 +2,11 @@
 
 ## Sources
 
-- `DoubleCoupleSource(x, y, z; Mw, strike, dip, rake, t0, trise)`: a double couple from fault angles (strike clockwise from
-  north = +y).
+- `DoubleCoupleSource(x, y, z; Mw (or M0), strike, dip, rake, t0, trise)`: a double couple from fault angles (strike
+  clockwise from north = +y).
 - `MomentTensorSource(x, y, z, M0, M; t0, trise)`: a general moment tensor `M = (xx, yy, zz, yz, xz, xy)` in the model frame.
 - `ForceSource(x, y, z; fx, fy, fz, t0, trise)`: a point force [N] (OpenSWPC's body force).
+- `ExplosionSource(x, y, z; M0 or Mw, t0, trise)`: an explosion (isotropic moment tensor, diagonal components `M0`).
 - `TeleseismicWave(:p, :sv or :sh; angle, backazimuth, box, t0, trise, amplitude)`: a plane wave from below, injected along
   a box (see [Teleseismic waves](@ref)).
 - `PlaneWave(:p or :s; depth, length, strike, dip, rake)`: an incoming plane wave as an initial wavefield (OpenSWPC's
@@ -13,6 +14,35 @@
 
 All can be combined in a vector, and all accept `(lon, lat, z, proj::ProjectionPoint)` instead of `x, y, z`. Sources outside
 the model or in the air are ignored with a warning (as in OpenSWPC, e.g. parts of a finite fault).
+
+## Finite faults
+
+A kinematic rupture is a set of point sources, the subfaults, each with its own slip, rake, rupture time, rise time and
+source time function. [`finite_fault`](@ref) makes them for a planar fault:
+
+```julia
+slip(a, b) = 2.0 * exp(-(a^2 / 30 + (b - 6)^2 / 10))           # [m]; a along strike from the centre, b down dip [km]
+fault = finite_fault(; top=(0.0, 0.0, -2.0), strike=20, dip=60, length=16.0, width=12.0, nl=50, nw=40,
+                     slip, rake=90, model, hypocenter=(-4.0, 8.0), vr=2.8, trise=1.0)
+result = simulate(model; tmax=30.0, sources=fault, stations)
+```
+
+The moment of a subfault is μ A slip, with μ = ρ vs² of the `model` at the subfault (or a given `mu`). Slip, rake and rise
+time can also be matrices (e.g. from a published slip model), and the rupture times can be given instead of a rupture
+velocity. In 2D models the fault is a line in the x–z plane (moments per unit length). Faults with thousands of subfaults
+run on GPUs as well: the amplitudes of all sources at all time steps are kept on the device in windows of time steps when
+they would not fit as a whole (and the source sensitivities of [`misfit_gradient`](@ref) likewise), with the same results.
+Misfit gradients with respect to every subfault (moment tensor, location, timing, source time function) come with the
+gradient, for kinematic source inversions.
+
+**Source files.**
+- [`read_srf`](@ref): kinematic ruptures in the Standard Rupture Format (SRF, versions 1 and 2), e.g. of the SCEC Broadband
+  Platform: one subfault per point, with its slip-velocity function, rupture time and moment (μ from the file or the model).
+- [`read_cmtsolution`](@ref): CMTSOLUTION files (SPECFEM, Global CMT; several blocks for finite sources), with SPECFEM's
+  Gaussian moment rate of the given half duration.
+- [`read_sources`](@ref): OpenSWPC's source lists (`fn_stf`, every `stf_format`: `xym0ij`, `xym0dc`, `llm0dc`, …,
+  `xydsdc`, `psmeca`, and the body forces of `bf_mode`): one point source per line, OpenSWPC's way to describe finite
+  faults.
 
 ## Teleseismic waves
 
@@ -67,9 +97,15 @@ around it with a Kaiser-windowed sinc function (Hicks, 2002; 8 points per axis, 
 ## Source time functions
 
 The keyword `stf` of [`simulate`](@ref) sets the moment-rate function (or force history) of all sources, with their origin
-time `t0` and rise time `trise` (see [`moment_rate`](@ref)):
+time `t0` and rise time `trise` (see [`moment_rate`](@ref)); a source given its own `stf` (e.g.
+`MomentTensorSource(...; stf=SampledSTF(t, values))`, subfaults with different slip-rate functions) uses that one:
 - `:kupper` (default), `:boxcar`, `:triangle`, `:herrmann`, `:cosine`, `:texp` (as in OpenSWPC), `:ricker`, `:gaussian`,
   `:gaussian_derivative`;
+- SOFI's wavelets: `:fuchs_mueller` (Fuchs-Müller), `:sin3` (= `:kupper`), and with their parameters
+  [`BerlageSTF`](@ref)`(; n, α, φ0)` and [`KlauderSTF`](@ref)`(; fmin, fmax, tsweep)` (the autocorrelation of a vibroseis
+  sweep);
+- `:step` (a unit step at `t0`, e.g. a static load switched on) and `:delta` (a unit impulse at `t0`: one time step of
+  height 1/dt; for moment tensors a step of the moment);
 - any function `stf(t, t0, trise)`;
 - sampled values: `stf = SampledSTF(t, values)` (times after `t0`, linearly interpolated), e.g. a source time function
   from a source inversion, or one that is being inverted for: [`misfit_gradient`](@ref) returns the gradient with respect
