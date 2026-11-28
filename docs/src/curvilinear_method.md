@@ -59,6 +59,11 @@ SBP-SAT methods for seismic waves on curvilinear, boundary-conforming meshes hav
 - **Lotto & Dunham (2015)** couple a compressible ocean to an elastic solid with SBP-SAT.
 - **Duru & Kreiss (2014)** and **Duru, Kozdon & Kreiss (2015)** analyze the stability of PMLs for the elastic wave
   equation, with SBP-SAT discretizations.
+- **O'Reilly et al. (2022)** use SBP operators on *staggered* curvilinear grids with topography (4th order, provably stable),
+  for the GPU code AWP-ODC.
+- **de la Puente et al. (2014)** take a different route: a fully staggered (Lebedev) grid deformed to the topography, with
+  mimetic operators at the free surface (no energy estimate; 4× the memory of a standard staggered grid). Their test,
+  Garvin's problem on tilted surfaces, is in [Validation](@ref).
 
 The accuracy of the curvilinear solver on topography, against the staggered grid, is shown in [Validation](@ref)
 (free surface on topography).
@@ -93,6 +98,9 @@ Duru, K., and Kreiss, G. (2014). Boundary waves and stability of the perfectly m
 dimensional elastic wave equation in second order form. *SIAM Journal on Numerical Analysis*, 52(6), 2883–2904.
 doi:10.1137/13093563x
 
+de la Puente, J., Ferrer, M., Hanzich, M., Castillo, J. E., and Cela, J. M. (2014). Mimetic seismic wave modeling
+including topography on deformed staggered grids. *Geophysics*, 79(3), T125–T141. doi:10.1190/geo2013-0371.1
+
 Duru, K., Williams, C., and Fung, F. (2022). Accurate simulations of nonlinear dynamic shear ruptures on pre-existing
 faults in 3D elastic solids with dual-pairing SBP methods. Preprint, arXiv:2207.07891.
 
@@ -118,6 +126,10 @@ derivatives. *Journal of Computational Physics*, 199(2), 503–540. doi:10.1016/
 Meza-Fajardo, K. C., and Papageorgiou, A. S. (2008). A nonconvolutional, split-field, perfectly matched layer for wave
 propagation in isotropic and anisotropic elastic media: stability analysis. *Bulletin of the Seismological Society of
 America*, 98(4), 1811–1836. doi:10.1785/0120070223
+
+O'Reilly, O., Yeh, T.-Y., Olsen, K. B., Hu, Z., Breuer, A., Roten, D., and Goulet, C. A. (2022). A high-order
+finite-difference method on staggered curvilinear grids for seismic wave propagation applications with topography.
+*Bulletin of the Seismological Society of America*, 112(1), 3–22. doi:10.1785/0120210096
 
 Petersson, N. A., and Sjögreen, B. (2015). Wave propagation in anisotropic elastic materials and curvilinear coordinates
 using a summation-by-parts finite difference method. *Journal of Computational Physics*, 299, 820–841.
