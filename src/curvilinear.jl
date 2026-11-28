@@ -221,6 +221,20 @@ end
 
 # ------------------------------------------------------------------ kernels (one node (i, k) of a block)
 
+"""
+The arrays `names` of every block (those present): kernels that see all blocks get only what they read, as their arguments
+are limited (Metal: 4 kB; with attenuation and VTI a 3D block has ~40 arrays).
+"""
+slim(blocks, names) = map(B -> NamedTuple{Tuple(k for k in names if haskey(B, k))}(B), blocks)
+const CV_VEL = (:V1, :V2, :V3)
+const CV_STRESS = (:S11, :S22, :S33, :S23, :S13, :S12, :S1, :S2)
+const CV_RECORD = (CV_VEL..., CV_STRESS..., :lam, :mu, :mu66)                       # (stations)
+const CV_FORCE = (CV_VEL..., :iρJ)                                                  # (forces)
+const CV_METRIC = (:J, :Jx, :Jy, :hξ, :hψ, :hη, :ox, :oy)
+const CV_TF = (CV_FORCE..., CV_METRIC...)                                           # (teleseismic momentum)
+const CV_UPDATE = (CV_STRESS..., CV_METRIC..., :V1, :lam, :mu, :mu66, :tp, :ts, :wx, :wz, :s13,
+                   :R11, :R22, :R33, :R23, :R13, :R12, :R1, :R2)                    # (the stress update: teleseismic stress)
+
 "The arrays of a neighbouring block that the interface terms read (small kernel arguments: Metal allows 4 kB)."
 neighbour(B) = (; V1=B.V1, V2=B.V2, S11=B.S11, S12=B.S12, S22=B.S22, Jx=B.Jx, fluid=B.fluid)
 neighbour(::Nothing) = nothing
@@ -906,6 +920,9 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
                a2=loc(H.a2), hξ=FT(hξ), hη=FT(H.hη), ox, nxg=nx, fluid=H.fluid), mem, vti, sponge, player)
     end)
     lite = map(B -> merge(B, (; pml=nothing)), blocks)        # (kernels without the PML: Metal allows 4 kB of arguments)
+    # (kernels that see all blocks: only the arrays they read)
+    recB, forceB, momB, updB, velB = slim(blocks, CV_RECORD), slim(blocks, CV_FORCE), slim(blocks, CV_STRESS), slim(blocks, CV_UPDATE), slim(blocks, CV_VEL)
+    tfB = slim(blocks, CV_TF)
     below_(b) = b > 1 ? blocks[b-1] : nothing
     above_(b) = b < nb ? blocks[b+1] : nothing
     # the regions of a block, each with its kernel variant: the interior (branch-free), the top and bottom rows away from
@@ -1111,18 +1128,18 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
     function step!(it, record)
         n = it - 1
         itw = record && n % record_every == 0 ? n ÷ record_every + 1 : 0
-        itw > 0 && nst > 0 && foreach_item!(backend, sh ? vprev_sh_cv! : vprev_cv!, (prev, lite, St), nst)
+        itw > 0 && nst > 0 && foreach_item!(backend, sh ? vprev_sh_cv! : vprev_cv!, (prev, recB, St), nst)
         momentum!(dtT, true)
-        ntw > 0 && foreach_item!(backend, sh ? tf_momentum_sh! : tf_momentum_psv!, (lite, TW, FT(tbeg + n * dt), dtT), ntw)
+        ntw > 0 && foreach_item!(backend, sh ? tf_momentum_sh! : tf_momentum_psv!, (tfB, TW, FT(tbeg + n * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(V -> V .*= B.gs, vel(B)), blocks)
-        length(FS.seg) > 1 && foreach_item!(backend, sh ? force_sh_cv! : force_cv!, (lite, FS, window_step!(Wf, it), dtT), length(FS.seg) - 1)
+        length(FS.seg) > 1 && foreach_item!(backend, sh ? force_sh_cv! : force_cv!, (forceB, FS, window_step!(Wf, it), dtT), length(FS.seg) - 1)
         par === nothing || KernelAbstractions.synchronize(backend)     # (the halos: MPI reads finished fields)
         exchange_v!()
-        record && nst > 0 && foreach_item!(backend, sh ? record_sh_cv! : record_cv!, (rec, acc, prev, lite, St, itw, dtT), nst)
+        record && nst > 0 && foreach_item!(backend, sh ? record_sh_cv! : record_cv!, (rec, acc, prev, recB, St, itw, dtT), nst)
         stress!(vc, dtT)
-        ntw > 0 && foreach_item!(backend, sh ? tf_stress_sh! : tf_stress_psv!, (lite, TW, vc, FT(tbeg + (n + 0.5) * dt), dtT), ntw)
+        ntw > 0 && foreach_item!(backend, sh ? tf_stress_sh! : tf_stress_psv!, (updB, TW, vc, FT(tbeg + (n + 0.5) * dt), dtT), ntw)
         absorber === :cerjan && foreach(B -> foreach(S -> S .*= B.gs, str(B)), blocks)
-        length(MS.seg) > 1 && foreach_item!(backend, sh ? moment_sh_cv! : moment_cv!, (lite, MS, window_step!(Wm, it)), length(MS.seg) - 1)
+        length(MS.seg) > 1 && foreach_item!(backend, sh ? moment_sh_cv! : moment_cv!, (momB, MS, window_step!(Wm, it)), length(MS.seg) - 1)
         par === nothing || KernelAbstractions.synchronize(backend)
         exchange_s!()
     end
@@ -1163,7 +1180,7 @@ function simulate_curvilinear(model::Union{CartData,DistributedModel}; dt=nothin
             store = snapshot_every > 0 && n % snapshot_every == 0
             store && Dps !== nothing && divrot!()
             for p in planes
-                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, lite, store ? Dps : nothing, p.pts, dtT, store, Val(sh ? 1 : 2)),
+                isempty(p.own) || foreach_item!(backend, plane_cv!, (p.B, p.U, p.PK, velB, store ? Dps : nothing, p.pts, dtT, store, Val(sh ? 1 : 2)),
                                                 length(p.own))
             end
             if store

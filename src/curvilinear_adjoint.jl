@@ -372,7 +372,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             end
             if forcedamp
                 foreach(F -> foreach(A -> fill!(A, 0), F), Finc)
-                foreach_item!(backend, sh ? force_sh_cv! : N == 2 ? force_cv! : force3_cv!, (Fblk, FS, window_step!(c.Wf, it), dtT), length(FS.seg) - 1)
+                foreach_item!(backend, sh ? force_sh_cv! : N == 2 ? force_cv! : force3_cv!, (slim(Fblk, CV_FORCE), FS, window_step!(c.Wf, it), dtT), length(FS.seg) - 1)
                 for b in 1:nb, k in 1:nV
                     q[b][3nV+k] .= q[b][nV+k] .- Finc[b][k]
                 end
@@ -385,7 +385,7 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             # moment tensors (stress glut, after the stress update)
             nM > 0 && run_once!(backend, moment_sens_cv!, (AM, Wmb.out[1], Adj, MSb, window_step!(Wmb, it), dtT, Val(sn)))
             c.sponge && foreach(b -> foreach(S -> S .*= blocks[b].gs, comps(Adj[b], sn)), 1:nb)      # (the sponge is diagonal)
-            c.ntw > 0 && foreach_item!(backend, tf_grad_stress!, (Grad, Adj, lite, Mv, c.TW, FT(c.tbeg + (n + 0.5) * c.dt), dtT, c.tfkind), c.ntw)
+            c.ntw > 0 && foreach_item!(backend, tf_grad_stress!, (Grad, Adj, slim(lite, (CV_METRIC..., :V1)), Mv, c.TW, FT(c.tbeg + (n + 0.5) * c.dt), dtT, c.tfkind), c.ntw)
             # stress update: gradient (λ, μ, τ) and v̄ += dt Gᵀ (C₁ σ̄ - Cτ Q)
             for b in 1:nb, k in 1:nV
                 copyto!(Win[b][k], q[b][nV+k])
@@ -418,10 +418,10 @@ function curvilinear_gradient(d::CurvilinearGradient, c, N)
             if nF > 0
                 lf = window_step!(Wfb, it)
                 run_once!(backend, force_grad!, (Grad, Adj, FSb, lf, dtT))
-                run_once!(backend, force_sens_cv!, (AF, Wfb.out[1], Adj, map(B -> merge(B, (; pml=nothing)), blocks), FSb, lf, dtT, Val(vn)))
+                run_once!(backend, force_sens_cv!, (AF, Wfb.out[1], Adj, slim(blocks, (:iρJ,)), FSb, lf, dtT, Val(vn)))
             end
             c.sponge && foreach(b -> foreach(V -> V .*= blocks[b].gs, comps(Adj[b], vn)), 1:nb)
-            c.ntw > 0 && foreach_item!(backend, tf_grad_momentum!, (Grad, Adj, lite, c.TW, FT(c.tbeg + n * c.dt), dtT, c.tfkind), c.ntw)
+            c.ntw > 0 && foreach_item!(backend, tf_grad_momentum!, (Grad, Adj, slim(lite, (CV_METRIC..., :V1)), c.TW, FT(c.tbeg + n * c.dt), dtT, c.tfkind), c.ntw)
             for b in 1:nb
                 g, B = Grad[b], blocks[b]
                 for (k, ab) in enumerate(comps(B, an))
